@@ -73,8 +73,15 @@ class FakeTracker(_ConfigurableFake):
         default = task if task is not None and task.repository == repository else None
         return self._outcome("get_task", default)  # type: ignore[return-value]
 
-    def claim(self, repository: str, task_id: str, claimant: str) -> ClaimResult:
-        self._record("claim", repository, task_id, claimant)
+    def claim(
+        self,
+        repository: str,
+        task_id: str,
+        claimant: str,
+        *,
+        approved_by: tuple[str, ...] | None = None,
+    ) -> ClaimResult:
+        self._record("claim", repository, task_id, claimant, approved_by)
         task = self.tasks.get(task_id)
         matches = task is not None and task.repository == repository
         default = ClaimResult(matches, task if matches else None)

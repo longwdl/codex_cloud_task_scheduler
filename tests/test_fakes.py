@@ -40,13 +40,17 @@ class FakeTrackerTests(unittest.TestCase):
         result = ClaimResult(True, task)
         tracker.set_result("claim", result)
 
-        self.assertIs(tracker.claim("owner/repo", "42", "worker"), result)
-        self.assertIs(tracker.claim("owner/repo", "42", "worker"), result)
+        self.assertIs(
+            tracker.claim("owner/repo", "42", "worker", approved_by=("alice",)), result
+        )
+        self.assertIs(
+            tracker.claim("owner/repo", "42", "worker", approved_by=("alice",)), result
+        )
         self.assertEqual(
             tracker.calls,
             [
-                Call("claim", ("owner/repo", "42", "worker")),
-                Call("claim", ("owner/repo", "42", "worker")),
+                Call("claim", ("owner/repo", "42", "worker", ("alice",))),
+                Call("claim", ("owner/repo", "42", "worker", ("alice",))),
             ],
         )
 

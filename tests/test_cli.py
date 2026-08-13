@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from codex_dispatcher.cli import main, run_once_dry_run
+from codex_dispatcher.contract import ContractCheck
 from codex_dispatcher.domain import Run
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.testing.fakes import FakeTracker
@@ -27,6 +28,33 @@ class CliTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual("offline-core", payload["phase"])
         self.assertIn("tool:gh", {item["name"] for item in payload["checks"]})
+
+    def test_doctor_contract_requires_config_and_reports_checks(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(["doctor", "--contract", "--json"])
+        self.assertEqual(1, exit_code)
+        self.assertFalse(json.loads(stdout.getvalue())["ok"])
+
+        stdout = io.StringIO()
+        with (
+            patch("codex_dispatcher.cli.load_config", return_value=make_config()),
+            patch(
+                "codex_dispatcher.contract.run_contract_checks",
+                return_value=(ContractCheck("git", True, "2.55.0"),),
+            ),
+            patch(
+                "codex_dispatcher.cli.shutil.which",
+                side_effect=lambda tool: f"/usr/bin/{tool}",
+            ),
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = main(
+                ["doctor", "--config", "config.toml", "--contract", "--json"]
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(0, exit_code)
+        self.assertIn("contract:git", {item["name"] for item in payload["checks"]})
 
     def test_status_rejects_missing_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

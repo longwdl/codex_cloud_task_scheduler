@@ -16,12 +16,14 @@ Implemented in the current snapshot:
 - tracker and executor ports with offline fakes;
 - read-only candidate validation, priority ordering, and capacity planning;
 - local `doctor` and database `status` commands, plus dependency-injected and GitHub CLI dry-run
-  entry points.
+  entry points;
+- controlled GitHub claim/state/comment primitives with write-after-read verification;
+- exact tool-version and empty Codex Cloud environment contract checks.
 
 Explicitly deferred:
 
-- real `gh` writes (the implemented GitHub adapter is read-only);
-- real `codex cloud exec`, status reconciliation, diff, or apply;
+- unattended `gh` write orchestration (write primitives are not exposed by the CLI);
+- real `codex cloud exec`, status reconciliation, diff, or apply (all Cloud writes fail closed);
 - branch push and draft PR creation;
 - systemd installation or Linux hardening;
 - any merge, deployment, or production access.
@@ -40,12 +42,19 @@ Run the offline preflight check:
 
 ```bash
 PYTHONPATH=src python3 -m codex_dispatcher doctor --json
+PYTHONPATH=src python3 -m codex_dispatcher doctor \
+  --config config/dispatcher.example.toml --contract --json
 ```
 
 The networked dry-run against a private repository additionally requires `gh` authentication
 through `GH_TOKEN` or `GITHUB_TOKEN`. The token remains outside the TOML configuration and is passed
 only in the child-process environment. `doctor` still treats a missing `gh` executable as a later
 integration prerequisite rather than an offline-core failure.
+
+The `--contract` mode is also read-only. It checks exact `git`, `gh`, and `codex` versions and
+proves that each configured Cloud environment is visible through `codex cloud list --json`. The
+pinned CLI's non-empty task schema and write commands remain disabled until dedicated contract
+fixtures cover them.
 
 The repository does not yet select or add a third-party build backend. Run it from `src/` as shown
 above; packaging can be added as a separate, reviewable tooling decision.

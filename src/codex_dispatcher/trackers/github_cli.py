@@ -1,8 +1,8 @@
-"""Fail-closed, read-only GitHub CLI tracker adapter.
+"""Fail-closed GitHub CLI tracker adapter.
 
-The adapter deliberately exposes no GitHub mutations.  It translates the
-small, fixed JSON shapes requested from ``gh`` into tracker DTOs and rejects
-unexpected provider data rather than attempting to infer a safe meaning.
+The adapter implements the smallest Issue state and comment mutations needed
+for controlled contract tests. It translates fixed JSON shapes requested from
+``gh`` and rejects unexpected provider data rather than inferring a safe meaning.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from typing import Any, Never
 
 from codex_dispatcher.command_runner import CommandResult, run_command
 from codex_dispatcher.trackers.base import (
+    ClaimResult,
     DraftPullRequestRequest,
     PullRequest,
     TaskState,
@@ -27,11 +28,14 @@ class GitHubCliTrackerError(RuntimeError):
 
 
 class GitHubCliReadOnlyError(GitHubCliTrackerError):
-    """Raised before an attempt to use a write operation on this adapter."""
+    """Raised when a write operation is deliberately unavailable."""
 
 
 class GitHubCliUnsupportedReadError(GitHubCliTrackerError):
-    """Raised for tracker reads not implemented by the Phase 2 adapter."""
+    """Raised for tracker reads not implemented by the current adapter."""
+
+
+_RUN_COMMENT_PREFIX = "<!-- codex-dispatcher:"
 
 
 _STATUS_LABELS = {f"agent:{state.value}": state for state in TaskState}
@@ -42,7 +46,7 @@ _REPOSITORY_RE = re.compile(
 
 
 class GitHubCliTracker:
-    """Read open GitHub issues using a pinned absolute ``gh`` executable path."""
+    """Read and safely update Issues using an absolute ``gh`` executable path."""
 
     def __init__(
         self,
@@ -128,20 +132,129 @@ class GitHubCliTracker:
             "find_pr_by_branch is not implemented by read-only adapter"
         )
 
-    def claim(self, repository: str, task_id: str, claimant: str) -> Never:
-        self._raise_read_only()
+    def claim(
+        self,
+        repository: str,
+        task_id: str,
+        claimant: str,
+        *,
+        approved_by: tuple[str, ...] | None = None,
+    ) -> ClaimResult:
+        """Atomically-as-possible claim a ready issue after re-reading it."""
+        repository = _validate_repository(repository)
+        issue_number = _validate_issue_id(task_id)
+        _validate_text(claimant, "claimant")
+        task = self.get_task(repository, task_id)
+        if task is None or not task.is_open or task.state is not TaskState.READY:
+            return ClaimResult(False, task, "task is not open and ready")
+        if approved_by is None or task.ready_approved_by not in approved_by:
+            return ClaimResult(False, task, "ready approval is not trusted")
+        self._replace_state_label(repository, issue_number, task.labels, TaskState.DISPATCHING)
+        claimed = self.get_task(repository, task_id)
+        if claimed is None or claimed.state is not TaskState.DISPATCHING:
+            raise GitHubCliTrackerError("claim verification failed")
+        return ClaimResult(True, claimed)
 
-    def set_state(self, repository: str, task_id: str, state: TaskState) -> Never:
-        self._raise_read_only()
+    def set_state(
+        self, repository: str, task_id: str, state: TaskState
+    ) -> TrackerTask:
+        """Replace the single current agent state and verify the result."""
+        repository = _validate_repository(repository)
+        issue_number = _validate_issue_id(task_id)
+        if not isinstance(state, TaskState):
+            raise TypeError("state must be a TaskState")
+        task = self.get_task(repository, task_id)
+        if task is None:
+            raise GitHubCliTrackerError("task does not exist")
+        self._replace_state_label(repository, issue_number, task.labels, state)
+        updated = self.get_task(repository, task_id)
+        if updated is None or updated.state is not state:
+            raise GitHubCliTrackerError("state update verification failed")
+        return updated
 
-    def upsert_run_comment(self, repository: str, task_id: str, marker: str, body: str) -> Never:
-        self._raise_read_only()
+    def upsert_run_comment(
+        self, repository: str, task_id: str, marker: str, body: str
+    ) -> None:
+        """Create or edit the one dispatcher comment identified by *marker*."""
+        repository = _validate_repository(repository)
+        issue_number = _validate_issue_id(task_id)
+        marker = _validate_comment_marker(marker)
+        body = _validate_text(body, "body")
+        signature = f"{_RUN_COMMENT_PREFIX}{marker} -->"
+        rendered = f"{signature}\n{body}"
+        comments = self._json_command(
+            (
+                self._gh_path,
+                "api",
+                "--method",
+                "GET",
+                "--paginate",
+                "--slurp",
+                "-H",
+                "Accept: application/vnd.github+json",
+                f"/repos/{repository}/issues/{issue_number}/comments?per_page=100",
+            )
+        )
+        comment_ids = _matching_comment_ids(comments, signature)
+        if len(comment_ids) > 1:
+            raise GitHubCliTrackerError("multiple dispatcher comments match marker")
+        if comment_ids:
+            endpoint = f"/repos/{repository}/issues/comments/{comment_ids[0]}"
+            method = "PATCH"
+        else:
+            endpoint = f"/repos/{repository}/issues/{issue_number}/comments"
+            method = "POST"
+        self._json_command(
+            (
+                self._gh_path,
+                "api",
+                "--method",
+                method,
+                "-H",
+                "Accept: application/vnd.github+json",
+                endpoint,
+                "-f",
+                f"body={rendered}",
+            )
+        )
 
     def create_draft_pr(self, request: DraftPullRequestRequest) -> Never:
-        self._raise_read_only()
+        raise GitHubCliReadOnlyError("draft pull request creation is not implemented")
 
-    def _raise_read_only(self) -> Never:
-        raise GitHubCliReadOnlyError("GitHub CLI tracker is read-only")
+    def _replace_state_label(
+        self,
+        repository: str,
+        issue_number: int,
+        labels: tuple[str, ...],
+        state: TaskState,
+    ) -> None:
+        status_labels = tuple(label for label in labels if label.startswith("agent:"))
+        if len(status_labels) != 1:
+            raise GitHubCliTrackerError("task must have exactly one agent state label")
+        if len(set(labels)) != len(labels):
+            raise GitHubCliTrackerError("task labels must not contain duplicates")
+        current = status_labels[0]
+        requested = f"agent:{state.value}"
+        if current == requested:
+            return
+        updated_labels = tuple(label for label in labels if label != current) + (requested,)
+        label_arguments = tuple(
+            argument
+            for label in updated_labels
+            for argument in ("-f", f"labels[]={label}")
+        )
+        self._json_command(
+            (
+                self._gh_path,
+                "api",
+                "--method",
+                "PATCH",
+                "-H",
+                "Accept: application/vnd.github+json",
+                f"/repos/{repository}/issues/{issue_number}",
+                *label_arguments,
+            )
+        )
 
     def _last_ready_label_actor(self, repository: str, issue_number: int) -> str | None:
         events = self._json_command(
@@ -235,6 +348,42 @@ def _validate_issue_id(task_id: str) -> int:
     if value <= 0:
         raise ValueError("task_id must be a positive canonical issue number")
     return value
+
+
+def _validate_text(value: str, field: str) -> str:
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise ValueError(f"{field} must be a non-empty string without NUL")
+    return value
+
+
+def _validate_comment_marker(marker: str) -> str:
+    marker = _validate_text(marker, "marker")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}", marker) is None:
+        raise ValueError("marker contains unsupported characters")
+    return marker
+
+
+def _matching_comment_ids(value: Any, signature: str) -> tuple[int, ...]:
+    if not isinstance(value, list):
+        raise GitHubCliTrackerError("gh issue comments JSON must be an array of pages")
+    matches: list[int] = []
+    seen: set[int] = set()
+    for page in value:
+        if not isinstance(page, list):
+            raise GitHubCliTrackerError("gh issue comments page must be an array")
+        for comment in page:
+            if not isinstance(comment, dict) or set(comment) < {"id", "body"}:
+                raise GitHubCliTrackerError("gh issue comment has invalid fields")
+            comment_id = comment["id"]
+            body = comment["body"]
+            if type(comment_id) is not int or comment_id <= 0 or not isinstance(body, str):
+                raise GitHubCliTrackerError("gh issue comment has invalid values")
+            if comment_id in seen:
+                raise GitHubCliTrackerError("gh issue comments contain duplicate ids")
+            seen.add(comment_id)
+            if body.startswith(signature):
+                matches.append(comment_id)
+    return tuple(matches)
 
 
 def _parse_issue(value: Any, repository: str, path: str) -> TrackerTask:

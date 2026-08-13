@@ -19,8 +19,9 @@ built first:
 - tracker/executor ports, offline fakes, and read-only candidate planning;
 - offline unit and integration tests.
 
-There is no real GitHub write adapter, Codex Cloud submission, systemd deployment, automatic PR
-creation, merge, or deployment in this revision.
+There is no enabled GitHub write sweep, Codex Cloud submission, systemd deployment, automatic PR
+creation, merge, or deployment in this revision. GitHub claim/state/comment primitives exist for
+controlled contract tests but are not exposed by the CLI.
 
 Candidate planning is exposed through a dependency-injected Python entry point and a read-only
 GitHub CLI dry-run command. The command performs tracker reads but does not claim issues, mutate
@@ -44,6 +45,8 @@ Run the source-tree CLI without installing a package:
 
 ```bash
 PYTHONPATH=src python3 -m codex_dispatcher --help
+PYTHONPATH=src python3 -m codex_dispatcher doctor \
+  --config config/dispatcher.example.toml --contract --json
 PYTHONPATH=src python3 -m codex_dispatcher run-once \
   --dry-run --config config/dispatcher.example.toml --json
 ```
@@ -57,6 +60,7 @@ approved; they are not needed for the offline core.
 - [Owner preparation checklist](docs/owner-preparation-checklist.md)
 - [Development notes](docs/development.md)
 - [Architecture baseline](docs/architecture.md)
+- [Live fixture test evidence](docs/live-test-evidence.md)
 
 ## Security model
 

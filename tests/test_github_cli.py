@@ -163,16 +163,123 @@ class GitHubCliTrackerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             tracker.get_task(REPOSITORY, "012")
 
-    def test_writes_raise_before_running_a_command_and_optional_read_is_clear(self) -> None:
+    def test_claim_rereads_updates_and_verifies_state(self) -> None:
+        ready = issue()
+        dispatching = issue(labels=[label("agent:dispatching"), label("exec:cloud")])
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            side_effect=[
+                result(ready),
+                result([[{
+                    "event": "labeled",
+                    "created_at": "2026-08-13T02:00:00Z",
+                    "label": {"name": "agent:ready"},
+                    "actor": {"login": "alice"},
+                }]]),
+                result({"number": 12}),
+                result(dispatching),
+                result([]),
+            ],
+        ) as runner:
+            claimed = GitHubCliTracker(gh_path=GH).claim(
+                REPOSITORY, "12", "worker", approved_by=("alice",)
+            )
+
+        self.assertTrue(claimed.claimed)
+        self.assertIsNotNone(claimed.task)
+        assert claimed.task is not None
+        self.assertEqual(TaskState.DISPATCHING, claimed.task.state)
+        edit_argv = runner.call_args_list[2].args[0]
+        self.assertEqual((GH, "api", "--method", "PATCH"), edit_argv[:4])
+        self.assertNotIn("labels[]=agent:ready", edit_argv)
+        self.assertIn("labels[]=agent:dispatching", edit_argv)
+        self.assertIn("labels[]=exec:cloud", edit_argv)
+
+    def test_claim_does_not_write_when_task_is_not_ready(self) -> None:
+        paused = issue(labels=[label("agent:paused"), label("exec:cloud")])
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            side_effect=[result(paused), result([])],
+        ) as runner:
+            claimed = GitHubCliTracker(gh_path=GH).claim(
+                REPOSITORY, "12", "worker", approved_by=("alice",)
+            )
+        self.assertFalse(claimed.claimed)
+        self.assertEqual(2, runner.call_count)
+
+    def test_claim_requires_explicit_trusted_ready_approver(self) -> None:
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            side_effect=[result(issue()), result([[{
+                "event": "labeled",
+                "created_at": "2026-08-13T02:00:00Z",
+                "label": {"name": "agent:ready"},
+                "actor": {"login": "mallory"},
+            }]])],
+        ) as runner:
+            claimed = GitHubCliTracker(gh_path=GH).claim(
+                REPOSITORY, "12", "worker", approved_by=("alice",)
+            )
+        self.assertFalse(claimed.claimed)
+        self.assertEqual("ready approval is not trusted", claimed.reason)
+        self.assertEqual(2, runner.call_count)
+
+    def test_run_comment_is_created_or_updated_idempotently(self) -> None:
+        tracker = GitHubCliTracker(gh_path=GH)
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            side_effect=[result([[]]), result({"id": 7})],
+        ) as runner:
+            tracker.upsert_run_comment(REPOSITORY, "12", "run-1:started", "Started")
+        create_argv = runner.call_args_list[1].args[0]
+        self.assertIn("POST", create_argv)
+        self.assertIn("body=<!-- codex-dispatcher:run-1:started -->\nStarted", create_argv)
+
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            side_effect=[
+                result([[{
+                    "id": 7,
+                    "body": "<!-- codex-dispatcher:run-1:started -->\nOld",
+                }]]),
+                result({"id": 7}),
+            ],
+        ) as runner:
+            tracker.upsert_run_comment(REPOSITORY, "12", "run-1:started", "Updated")
+        update_argv = runner.call_args_list[1].args[0]
+        self.assertIn("PATCH", update_argv)
+        self.assertIn("/repos/owner/repo/issues/comments/7", update_argv)
+
+    def test_ambiguous_comment_marker_fails_before_write(self) -> None:
+        signature = "<!-- codex-dispatcher:run-1:started -->"
+        comments = [[{"id": 7, "body": signature}, {"id": 8, "body": signature}]]
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            return_value=result(comments),
+        ) as runner:
+            with self.assertRaisesRegex(GitHubCliTrackerError, "multiple"):
+                GitHubCliTracker(gh_path=GH).upsert_run_comment(
+                    REPOSITORY, "12", "run-1:started", "body"
+                )
+        runner.assert_called_once()
+
+    def test_duplicate_comment_ids_fail_closed(self) -> None:
+        comments = [[{"id": 7, "body": "one"}, {"id": 7, "body": "two"}]]
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            return_value=result(comments),
+        ) as runner:
+            with self.assertRaisesRegex(GitHubCliTrackerError, "duplicate ids"):
+                GitHubCliTracker(gh_path=GH).upsert_run_comment(
+                    REPOSITORY, "12", "run-1:started", "body"
+                )
+        runner.assert_called_once()
+
+    def test_unsupported_draft_pr_and_optional_read_are_clear(self) -> None:
         tracker = GitHubCliTracker(gh_path=GH)
         with patch("codex_dispatcher.trackers.github_cli.run_command") as runner:
-            for call in (
-                lambda: tracker.claim(REPOSITORY, "12", "worker"),
-                lambda: tracker.set_state(REPOSITORY, "12", TaskState.BLOCKED),
-                lambda: tracker.upsert_run_comment(REPOSITORY, "12", "marker", "body"),
-            ):
-                with self.assertRaises(GitHubCliReadOnlyError):
-                    call()
+            with self.assertRaises(GitHubCliReadOnlyError):
+                tracker.create_draft_pr(None)  # type: ignore[arg-type]
         runner.assert_not_called()
         with self.assertRaises(GitHubCliUnsupportedReadError):
             tracker.find_pr_by_branch(REPOSITORY, "branch")

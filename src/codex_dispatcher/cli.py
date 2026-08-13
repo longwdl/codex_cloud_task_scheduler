@@ -32,6 +32,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "doctor", help="Run read-only local prerequisite checks."
     )
     doctor.add_argument("--config", type=Path, help="Optional TOML configuration to validate.")
+    doctor.add_argument(
+        "--contract",
+        action="store_true",
+        help="Run read-only exact-version and Codex Cloud environment checks.",
+    )
     doctor.add_argument("--json", action="store_true", help="Emit machine-readable output.")
 
     status = subparsers.add_parser("status", help="Inspect an existing local state database.")
@@ -59,7 +64,9 @@ def run_once_dry_run(
     return build_dry_run_plan(config, tracker, active_runs)
 
 
-def _doctor(config_path: Path | None) -> tuple[int, dict[str, object]]:
+def _doctor(
+    config_path: Path | None, *, contract: bool = False
+) -> tuple[int, dict[str, object]]:
     checks: list[dict[str, object]] = []
 
     python_ok = sys.version_info >= (3, 12)
@@ -82,9 +89,10 @@ def _doctor(config_path: Path | None) -> tuple[int, dict[str, object]]:
             }
         )
 
+    config: Config | None = None
     if config_path is not None:
         try:
-            load_config(config_path)
+            config = load_config(config_path)
         except (OSError, ValueError) as exc:
             checks.append(
                 {"name": "config", "ok": False, "detail": str(exc), "required_now": True}
@@ -99,6 +107,49 @@ def _doctor(config_path: Path | None) -> tuple[int, dict[str, object]]:
                 }
             )
 
+    if contract:
+        if config is None:
+            checks.append(
+                {
+                    "name": "contract",
+                    "ok": False,
+                    "detail": "--contract requires a valid --config",
+                    "required_now": True,
+                }
+            )
+        else:
+            locations = {tool: shutil.which(tool) for tool in ("git", "gh", "codex")}
+            if any(location is None for location in locations.values()):
+                checks.append(
+                    {
+                        "name": "contract",
+                        "ok": False,
+                        "detail": "git, gh, and codex executables are required",
+                        "required_now": True,
+                    }
+                )
+            else:
+                from codex_dispatcher.contract import run_contract_checks
+
+                contract_checks = run_contract_checks(
+                    pins=config.tools,
+                    git_path=Path(locations["git"] or ""),
+                    gh_path=Path(locations["gh"] or ""),
+                    codex_path=Path(locations["codex"] or ""),
+                    cloud_environment_ids=tuple(
+                        repository.cloud_environment_id
+                        for repository in config.repositories
+                    ),
+                )
+                checks.extend(
+                    {
+                        "name": f"contract:{check.name}",
+                        "ok": check.ok,
+                        "detail": check.detail,
+                        "required_now": True,
+                    }
+                    for check in contract_checks
+                )
     required_failures = [
         check
         for check in checks
@@ -206,7 +257,7 @@ def _emit(payload: dict[str, object], as_json: bool) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "doctor":
-        code, payload = _doctor(args.config)
+        code, payload = _doctor(args.config, contract=args.contract)
         _emit(payload, args.json)
         return code
     if args.command == "status":
