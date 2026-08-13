@@ -45,7 +45,11 @@ def normalize_repo_path(path: str) -> str:
     """Return a normalized repository-relative POSIX path, or reject it."""
     if not isinstance(path, str):
         raise TaskSpecError("path must be a string")
-    if not path or "\x00" in path or "\\" in path:
+    if (
+        not path
+        or "\\" in path
+        or any(ord(character) < 32 or ord(character) == 127 for character in path)
+    ):
         raise TaskSpecError("path must be a non-empty POSIX path")
     if path.startswith("/") or path.endswith("/"):
         raise TaskSpecError("path must be a non-root repository-relative path")

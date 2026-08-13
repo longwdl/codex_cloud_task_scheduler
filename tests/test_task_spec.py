@@ -58,6 +58,11 @@ class TaskSpecTests(unittest.TestCase):
         for unsafe in unsafe_paths:
             self.assertFalse(is_path_allowed(unsafe, allowed), unsafe)
 
+    def test_path_policy_rejects_control_characters(self) -> None:
+        for path in ("docs/new\nfile.md", "docs/tab\tfile.md", "docs/del\x7ffile.md"):
+            with self.subTest(path=repr(path)):
+                self.assertFalse(is_path_allowed(path, ("docs",)))
+
     def test_allowlist_is_component_bounded(self) -> None:
         self.assertFalse(
             is_path_allowed(

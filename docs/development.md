@@ -25,7 +25,9 @@ Implemented in the current snapshot:
   branch name are committed to SQLite before the guarded remote ref creation, then verified before
   the run advances to `branch_prepared`;
 - a Cloud dispatch preparation boundary that verifies the immutable Prompt hash, snapshots known
-  remote Task IDs, and atomically advances SQLite to `dispatching` without calling `submit`.
+  remote Task IDs, and atomically advances SQLite to `dispatching` without calling `submit`;
+- read-only applied-change validation that intersects Issue and repository path policies and rejects
+  hard-denied paths, Git behavior files, symbolic links, binary changes, and whitespace errors.
 
 Explicitly deferred:
 
