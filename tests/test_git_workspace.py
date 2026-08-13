@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,68 @@ REMOTE = "https://github.com/owner/repo.git"
 
 
 class GitWorkspaceTests(unittest.TestCase):
+    def test_ssh_agent_requires_an_existing_socket(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with self.assertRaisesRegex(ValueError, "Unix socket"):
+                GitWorkspace(
+                    git_path=GIT,
+                    workspace_root=root,
+                    ssh_auth_sock=root / "missing.sock",
+                )
+            unsafe_config = root / "ssh config"
+            unsafe_config.write_text("Host github.com\n", encoding="utf-8")
+            unsafe_config.chmod(0o666)
+            with self.assertRaisesRegex(ValueError, "protected regular file"):
+                GitWorkspace(
+                    git_path=GIT,
+                    workspace_root=root,
+                    ssh_config_path=unsafe_config,
+                )
+
+    def test_ssh_agent_socket_is_passed_only_in_the_child_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            socket_path = root / "agent.sock"
+            with socket.socket(socket.AF_UNIX) as agent_socket:
+                agent_socket.bind(str(socket_path))
+                workspace = GitWorkspace(
+                    git_path=GIT,
+                    workspace_root=root,
+                    ssh_auth_sock=socket_path,
+                )
+                with patch(
+                    "codex_dispatcher.git_workspace.run_command",
+                    return_value=CommandResult(0, "", ""),
+                ) as runner:
+                    workspace._run(None, "version")
+            argv = runner.call_args.args[0]
+            environment = runner.call_args.kwargs["env"]
+            self.assertNotIn(str(socket_path), argv)
+            self.assertEqual(str(socket_path), environment["SSH_AUTH_SOCK"])
+
+    def test_protected_ssh_config_is_an_explicit_fixed_git_option(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "ssh config"
+            config_path.write_text("Host github.com\n", encoding="utf-8")
+            config_path.chmod(0o600)
+            workspace = GitWorkspace(
+                git_path=GIT,
+                workspace_root=root,
+                ssh_config_path=config_path,
+            )
+            with patch(
+                "codex_dispatcher.git_workspace.run_command",
+                return_value=CommandResult(0, "", ""),
+            ) as runner:
+                workspace._run(None, "version")
+            argv = runner.call_args.args[0]
+            ssh_options = tuple(item for item in argv if item.startswith("core.sshCommand="))
+            self.assertEqual(1, len(ssh_options))
+            self.assertIn("-oBatchMode=yes", ssh_options[0])
+            self.assertIn(str(config_path), ssh_options[0])
+
     def test_prepare_uses_safe_fixed_config_and_returns_clean_worktree(self) -> None:
         sha = "a" * 40
         calls: list[tuple[str, ...]] = []

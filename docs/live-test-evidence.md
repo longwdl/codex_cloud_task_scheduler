@@ -43,6 +43,18 @@ Using the real adapter against Fixture Issue `#1`:
 
 The test did not invoke Codex Cloud, create a branch, or create a pull request.
 
+## Phase 3 task-branch publication contract
+
+The recoverable branch service ran against Fixture Issue `#1` using deterministic run ID
+`fixture-issue-1-branch-contract-v1`. It recorded Base SHA
+`b992e1e52c8f11ed2e6776f78ec20bb1667a8fb5`, created branch
+`codex/issue-1-8e3775879000` at that exact commit, then reran and reused the existing branch. The
+persisted run ended in `branch_prepared`, `head_sha` equalled `base_sha`, and SQLite
+`PRAGMA integrity_check` returned `ok`.
+
+No Issue label/comment, pull request, Codex Cloud task, merge, or deployment was created. The branch
+is intentionally retained as the stable input for the later Cloud submission contract test.
+
 ## Local Git workspace contract
 
 The hardened Git workspace component cloned the private Fixture through HTTPS into a temporary

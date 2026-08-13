@@ -56,6 +56,11 @@ through `GH_TOKEN` or `GITHUB_TOKEN`. The token remains outside the TOML configu
 only in the child-process environment. `doctor` still treats a missing `gh` executable as a later
 integration prerequisite rather than an offline-core failure.
 
+Git workspaces can authenticate over HTTPS with a token kept in the child-process environment, or
+over SSH using an explicitly supplied agent socket and protected SSH config file. The dispatcher
+does not inherit the caller's full environment or home directory; deployment must configure one
+credential path deliberately.
+
 The `--contract` mode is also read-only. It checks exact `git`, `gh`, and `codex` versions and
 proves that each configured Cloud environment is visible through `codex cloud list --json`. The
 pinned CLI's non-empty task schema and write commands remain disabled until dedicated contract

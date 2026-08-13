@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import re
+import shlex
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +50,8 @@ class GitWorkspace:
         git_path: str | Path,
         workspace_root: Path,
         github_token: str | None = None,
+        ssh_auth_sock: Path | None = None,
+        ssh_config_path: Path | None = None,
         timeout_seconds: float = 120.0,
     ) -> None:
         executable = str(git_path)
@@ -61,9 +65,29 @@ class GitWorkspace:
             not isinstance(github_token, str) or not github_token or "\x00" in github_token
         ):
             raise ValueError("github_token must be a non-empty string without NUL or None")
+        if ssh_auth_sock is not None:
+            if not ssh_auth_sock.is_absolute():
+                raise ValueError("ssh_auth_sock must be an absolute path or None")
+            try:
+                mode = ssh_auth_sock.stat().st_mode
+            except OSError as exc:
+                raise ValueError("ssh_auth_sock must reference an existing Unix socket") from exc
+            if not stat.S_ISSOCK(mode):
+                raise ValueError("ssh_auth_sock must reference an existing Unix socket")
+        if ssh_config_path is not None:
+            if not ssh_config_path.is_absolute():
+                raise ValueError("ssh_config_path must be an absolute path or None")
+            try:
+                config_stat = ssh_config_path.stat()
+            except OSError as exc:
+                raise ValueError("ssh_config_path must reference a protected regular file") from exc
+            if not stat.S_ISREG(config_stat.st_mode) or config_stat.st_mode & 0o022:
+                raise ValueError("ssh_config_path must reference a protected regular file")
         self._git_path = executable
         self._root = workspace_root
         self._github_token = github_token
+        self._ssh_auth_sock = ssh_auth_sock
+        self._ssh_config_path = ssh_config_path
         self._timeout_seconds = timeout_seconds
 
     def prepare(
@@ -257,6 +281,8 @@ class GitWorkspace:
 
     def _run(self, repository: Path | None, *arguments: str) -> CommandResult:
         command_env = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+        if self._ssh_auth_sock is not None:
+            command_env["SSH_AUTH_SOCK"] = str(self._ssh_auth_sock)
         secrets: tuple[str, ...] = ()
         if self._github_token is not None:
             basic = f"x-access-token:{self._github_token}"
@@ -292,6 +318,11 @@ class GitWorkspace:
             "-c",
             "filter.lfs.clean=",
         )
+        if self._ssh_config_path is not None:
+            ssh_command = (
+                f"/usr/bin/ssh -F {shlex.quote(str(self._ssh_config_path))} -oBatchMode=yes"
+            )
+            prefix += ("-c", f"core.sshCommand={ssh_command}")
         argv = prefix + (("-C", str(repository)) if repository is not None else ()) + arguments
         result = run_command(
             argv,
