@@ -35,6 +35,14 @@ Using the real adapter against Fixture Issue `#1`:
 
 The test did not invoke Codex Cloud, create a branch, or create a pull request.
 
+## Local Git workspace contract
+
+The hardened Git workspace component cloned the private Fixture through HTTPS into a temporary
+local mirror, fetched `main` without tags or recursive submodules, resolved base SHA
+`b992e1e52c8f11ed2e6776f78ec20bb1667a8fb5`, and created local branch
+`agent/local-read-only-contract` in an isolated worktree. No branch was pushed and no remote Git
+reference changed.
+
 ## Accepted fixture risk
 
 GitHub rulesets are unavailable for this private personal-account repository on the current plan.

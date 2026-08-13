@@ -14,6 +14,7 @@ built first:
 
 - strict configuration parsing;
 - run state machine and SQLite persistence;
+- hardened local Git mirror and task-worktree preparation;
 - issue task-spec parsing and immutable prompt snapshots;
 - redaction and safe subprocess execution;
 - tracker/executor ports, offline fakes, and read-only candidate planning;

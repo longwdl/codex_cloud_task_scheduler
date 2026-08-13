@@ -18,7 +18,9 @@ Implemented in the current snapshot:
 - local `doctor` and database `status` commands, plus dependency-injected and GitHub CLI dry-run
   entry points;
 - controlled GitHub claim/state/comment primitives with write-after-read verification;
-- exact tool-version and empty Codex Cloud environment contract checks.
+- exact tool-version and empty Codex Cloud environment contract checks;
+- safe local Git mirror/worktree preparation with hooks, custom protocols, submodules, and
+  repository attribute drivers disabled or rejected.
 
 Explicitly deferred:
 
