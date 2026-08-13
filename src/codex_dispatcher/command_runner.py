@@ -1,0 +1,175 @@
+"""Safe subprocess wrapper for dispatcher-owned, fixed argv commands only."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+import os
+import signal
+import subprocess
+import threading
+import time
+from typing import BinaryIO
+
+from codex_dispatcher.redaction import redact_text
+
+
+@dataclass(frozen=True, slots=True)
+class CommandResult:
+    returncode: int | None
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    error: str | None = None
+
+
+def run_command(
+    argv: Sequence[str], *, timeout_seconds: float = 30.0, max_output_bytes: int = 65_536,
+    env: Mapping[str, str] | None = None, input_text: str | None = None,
+    secrets: Sequence[str] = (), cwd: str | None = None,
+) -> CommandResult:
+    """Run a dispatcher-owned argv without a shell and return redacted bounded output."""
+    normalized_argv = _validate_argv(argv)
+    if timeout_seconds <= 0 or max_output_bytes < 0:
+        raise ValueError("timeout_seconds must be positive and max_output_bytes non-negative")
+    if input_text is not None and not isinstance(input_text, str):
+        raise TypeError("input_text must be a string or None")
+    command_env = {"PATH": os.defpath, "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
+    if env is not None:
+        if not isinstance(env, Mapping) or any(
+            not isinstance(key, str)
+            or not key
+            or "=" in key
+            or not isinstance(value, str)
+            or "\x00" in key
+            or "\x00" in value
+            for key, value in env.items()
+        ):
+            raise TypeError("env must be a string-to-string mapping without NUL")
+        command_env.update(env)
+    try:
+        process = subprocess.Popen(
+            normalized_argv,
+            shell=False,
+            cwd=cwd,
+            env=command_env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return CommandResult(None, "", "", error=redact_text(str(exc), secrets))
+
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    stdout_buffer = bytearray()
+    stderr_buffer = bytearray()
+    stdout_truncated = [False]
+    stderr_truncated = [False]
+    readers = [
+        threading.Thread(
+            target=_drain_bounded,
+            args=(process.stdout, stdout_buffer, stdout_truncated, max_output_bytes),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_drain_bounded,
+            args=(process.stderr, stderr_buffer, stderr_truncated, max_output_bytes),
+            daemon=True,
+        ),
+    ]
+    for reader in readers:
+        reader.start()
+    writer = threading.Thread(
+        target=_write_input,
+        args=(process.stdin, input_text.encode("utf-8") if input_text is not None else b""),
+        daemon=True,
+    )
+    writer.start()
+
+    deadline = time.monotonic() + timeout_seconds
+    timed_out = False
+    try:
+        process.wait(timeout=max(0.001, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        timed_out = True
+
+    for thread in (*readers, writer):
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
+    if any(thread.is_alive() for thread in (*readers, writer)):
+        timed_out = True
+    if timed_out:
+        _kill_process_group(process)
+        process.wait()
+        for thread in (*readers, writer):
+            thread.join()
+
+    stdout = _decode_output(stdout_buffer, stdout_truncated[0])
+    stderr = _decode_output(stderr_buffer, stderr_truncated[0])
+    return CommandResult(
+        None if timed_out else process.returncode,
+        redact_text(stdout, secrets),
+        redact_text(stderr, secrets),
+        timed_out,
+        stdout_truncated[0],
+        stderr_truncated[0],
+        "command timed out" if timed_out else None,
+    )
+
+
+def _validate_argv(argv: Sequence[str]) -> list[str]:
+    if not isinstance(argv, (list, tuple)) or not argv:
+        raise TypeError("argv must be a non-empty list or tuple of strings")
+    if any(
+        not isinstance(argument, str) or not argument or "\x00" in argument
+        for argument in argv
+    ):
+        raise ValueError("argv entries must be non-empty strings without NUL")
+    return list(argv)
+
+
+def _drain_bounded(
+    stream: BinaryIO, buffer: bytearray, truncated: list[bool], maximum: int
+) -> None:
+    try:
+        while chunk := stream.read(8192):
+            remaining = maximum - len(buffer)
+            if remaining > 0:
+                buffer.extend(chunk[:remaining])
+            if len(chunk) > max(remaining, 0):
+                truncated[0] = True
+    finally:
+        stream.close()
+
+
+def _write_input(stream: BinaryIO, content: bytes) -> None:
+    try:
+        if content:
+            stream.write(content)
+            stream.flush()
+    except (BrokenPipeError, OSError):
+        pass
+    finally:
+        stream.close()
+
+
+def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except ProcessLookupError:
+        pass
+
+
+def _decode_output(value: bytearray, truncated: bool) -> str:
+    output = bytes(value).decode("utf-8", errors="replace")
+    if not truncated:
+        return output
+    marker = "\n[output truncated]\n"
+    return output + marker

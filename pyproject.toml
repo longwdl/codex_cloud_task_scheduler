@@ -1,0 +1,22 @@
+# Build backend and distributable packaging are intentionally deferred. The
+# offline core runs directly from src/ and has no third-party runtime dependency.
+
+[tool.coverage.run]
+branch = true
+source = ["codex_dispatcher"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 85
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["codex_dispatcher"]

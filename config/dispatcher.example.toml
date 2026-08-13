@@ -1,0 +1,20 @@
+[scheduler]
+poll_interval_seconds = 120
+global_max_active = 2
+database_path = "/var/lib/codex-dispatcher/state.db"
+workspace_root = "/var/lib/codex-dispatcher/repos"
+
+[tools]
+git_version = "REPLACE_AFTER_CONTRACT_TEST"
+gh_version = "REPLACE_AFTER_CONTRACT_TEST"
+codex_version = "REPLACE_AFTER_CONTRACT_TEST"
+
+[[repositories]]
+slug = "OWNER/codex-dispatcher-fixture"
+base_branch = "main"
+cloud_environment_id = "REPLACE_WITH_FIXTURE_ENVIRONMENT_ID"
+max_active = 1
+allowed_paths = ["README.md"]
+denied_paths = []
+maintainers = ["REPLACE_WITH_GITHUB_USERNAME"]
+required_checks = ["fixture"]
