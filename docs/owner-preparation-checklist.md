@@ -53,7 +53,7 @@ codex-dispatcher-fixture
 
 The first live task will only change the marked README section and create a draft PR.
 
-### 3. Protect the default branch (blocked by GitHub plan)
+### 3. Protect the default branch (risk accepted for the fixture)
 
 On the fixture repository, and later each real repository, create a branch ruleset for `main`:
 
@@ -66,7 +66,8 @@ On the fixture repository, and later each real repository, create a branch rules
 The dispatcher token will have repository-level Contents permission; GitHub cannot reliably reduce
 that permission to one branch. The branch ruleset is therefore a required safety control. GitHub
 currently rejects rulesets for this private personal-account repository unless the account is
-upgraded. Keep the fixture private; revisit this gate before Phase 4 enables branch writes.
+upgraded. The owner accepted this residual risk for the credential-free fixture; keep the fixture
+private and do not treat this exception as approval for a production-connected repository.
 
 ### 4. Plan the labels (complete)
 
