@@ -1,11 +1,12 @@
 # Owner preparation checklist
 
 This checklist separates work you can prepare now from credentials and remote changes that should
-wait until the offline core and contract tests are ready.
+wait until the offline core and contract tests are ready. Items marked complete reflect the
+2026-08-13 fixture initialization.
 
 ## Prepare now
 
-### 0. Create the remote for this source repository
+### 0. Create the remote for this source repository (complete)
 
 In GitHub, choose the owning account or organization and create a repository named
 `codex_cloud_task_scheduler` (or tell the implementer the final name). Prefer **Private** while the
@@ -21,7 +22,7 @@ in chat. If the organization supports it, enable secret scanning and push protec
 Do not configure a required CI check until that workflow exists. After the first branch is pushed,
 protect `main` against force-push and deletion and require pull requests for subsequent changes.
 
-### 1. Decide the first task target repositories
+### 1. Decide the first task target repositories (complete for the fixture)
 
 Prepare, but do not send credentials in chat:
 
@@ -35,7 +36,7 @@ Prepare, but do not send credentials in chat:
 Start with one low-risk fixture repository and at most one real repository. Do not use a repository
 with production deployment credentials for the first test.
 
-### 2. Create a private fixture repository
+### 2. Create a private fixture repository (complete)
 
 Create a small private GitHub repository dedicated to contract and smoke tests. It should contain:
 
@@ -52,7 +53,7 @@ codex-dispatcher-fixture
 
 The first live task will only change the marked README section and create a draft PR.
 
-### 3. Protect the default branch
+### 3. Protect the default branch (blocked by GitHub plan)
 
 On the fixture repository, and later each real repository, create a branch ruleset for `main`:
 
@@ -63,9 +64,11 @@ On the fixture repository, and later each real repository, create a branch rules
 - keep automatic merge disabled for the initial rollout.
 
 The dispatcher token will have repository-level Contents permission; GitHub cannot reliably reduce
-that permission to one branch. The branch ruleset is therefore a required safety control.
+that permission to one branch. The branch ruleset is therefore a required safety control. GitHub
+currently rejects rulesets for this private personal-account repository unless the account is
+upgraded. Keep the fixture private; revisit this gate before Phase 4 enables branch writes.
 
-### 4. Plan the labels
+### 4. Plan the labels (complete)
 
 The implementation will expect the following labels:
 
@@ -88,7 +91,7 @@ priority:p3
 You may create them now, or wait for a reviewed bootstrap command. Creating them now is harmless but
 is not required for offline development.
 
-### 5. Identify a Codex Cloud test environment
+### 5. Identify a Codex Cloud test environment (complete)
 
 Prepare the intended Cloud Environment ID and confirm that it points to the fixture repository.
 Configure it without production credentials. Agent-stage network access should be disabled unless a

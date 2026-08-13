@@ -21,6 +21,8 @@ dist/
 config.toml
 credentials/
 run-artifacts/
+error.log
+.local/
 
 # Editors and operating systems
 .DS_Store

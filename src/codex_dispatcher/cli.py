@@ -1,13 +1,10 @@
-"""Offline-safe command line entry points.
-
-Networked adapters and write commands are deliberately absent from the first
-implementation phase.
-"""
+"""Fail-closed command line entry points."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import shutil
 import sqlite3
@@ -40,6 +37,18 @@ def _build_parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status", help="Inspect an existing local state database.")
     status.add_argument("--database", required=True, type=Path)
     status.add_argument("--json", action="store_true", help="Emit machine-readable output.")
+
+    run_once = subparsers.add_parser(
+        "run-once", help="Plan one scheduler sweep without external writes."
+    )
+    run_once.add_argument("--config", required=True, type=Path)
+    run_once.add_argument(
+        "--dry-run",
+        action="store_true",
+        required=True,
+        help="Required safety flag; only tracker reads are allowed.",
+    )
+    run_once.add_argument("--json", action="store_true", help="Emit machine-readable output.")
     return parser
 
 
@@ -111,7 +120,7 @@ def _status(database_path: Path) -> tuple[int, dict[str, object]]:
         with StateStore(database_path, read_only=True) as store:
             integrity = store.integrity_check()
             active_runs = store.list_active_runs()
-    except (OSError, ValueError, sqlite3.Error) as exc:
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         return 1, {"ok": False, "error": str(exc), "path": str(database_path)}
 
     return 0, {
@@ -120,6 +129,58 @@ def _status(database_path: Path) -> tuple[int, dict[str, object]]:
         "active_runs": [run.run_id for run in active_runs],
         "path": str(database_path),
     }
+
+
+def _run_once(config_path: Path) -> tuple[int, dict[str, object]]:
+    gh_path = shutil.which("gh")
+    if gh_path is None:
+        return 1, {"ok": False, "error": "gh executable not found"}
+
+    try:
+        from codex_dispatcher.trackers.github_cli import GitHubCliTracker
+
+        config = load_config(config_path)
+        active_runs: Sequence[Run] = ()
+        if config.scheduler.database_path.is_file():
+            with StateStore(config.scheduler.database_path, read_only=True) as store:
+                if store.integrity_check() != "ok":
+                    return 1, {"ok": False, "error": "state database integrity check failed"}
+                active_runs = store.list_active_runs()
+        token = _github_token()
+        tracker = GitHubCliTracker(gh_path=Path(gh_path), token=token)
+        plan = run_once_dry_run(config, tracker, active_runs)
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        return 1, {"ok": False, "error": str(exc)}
+
+    return 0, {
+        "ok": True,
+        "dry_run": True,
+        "selected": [
+            {
+                "repository": task.repository,
+                "issue_number": task.issue_number,
+                "title": task.title,
+            }
+            for task in plan.selected
+        ],
+        "rejected": [
+            {
+                "repository": rejection.repository,
+                "issue_number": rejection.issue_number,
+                "code": rejection.code,
+            }
+            for rejection in plan.rejected
+        ],
+    }
+
+
+def _github_token() -> str | None:
+    """Return only a provider token shape recognized by the dispatcher."""
+    for variable in ("GH_TOKEN", "GITHUB_TOKEN"):
+        token = os.environ.get(variable)
+        if token is not None and token.startswith(("github_pat_", "ghp_")):
+            return token
+    return None
 
 
 def _emit(payload: dict[str, object], as_json: bool) -> None:
@@ -137,6 +198,9 @@ def _emit(payload: dict[str, object], as_json: bool) -> None:
         print(f"active_runs: {len(payload.get('active_runs', []))}")
     if "error" in payload:
         print(f"error: {payload['error']}", file=sys.stderr)
+    if payload.get("dry_run") is True:
+        print(f"selected: {len(payload.get('selected', []))}")
+        print(f"rejected: {len(payload.get('rejected', []))}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -147,6 +211,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return code
     if args.command == "status":
         code, payload = _status(args.database)
+        _emit(payload, args.json)
+        return code
+    if args.command == "run-once":
+        code, payload = _run_once(args.config)
         _emit(payload, args.json)
         return code
     raise AssertionError(f"unhandled command: {args.command}")

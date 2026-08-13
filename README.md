@@ -22,8 +22,9 @@ built first:
 There is no real GitHub write adapter, Codex Cloud submission, systemd deployment, automatic PR
 creation, merge, or deployment in this revision.
 
-Candidate planning is exposed as a dependency-injected Python entry point for offline tests. The
-user-facing `run-once --dry-run` CLI remains deferred until the read-only GitHub adapter exists.
+Candidate planning is exposed through a dependency-injected Python entry point and a read-only
+GitHub CLI dry-run command. The command performs tracker reads but does not claim issues, mutate
+labels, create branches, or submit Cloud tasks.
 
 ## Requirements
 
@@ -43,6 +44,8 @@ Run the source-tree CLI without installing a package:
 
 ```bash
 PYTHONPATH=src python3 -m codex_dispatcher --help
+PYTHONPATH=src python3 -m codex_dispatcher run-once \
+  --dry-run --config config/dispatcher.example.toml --json
 ```
 
 A build backend and wheel packaging are intentionally deferred until that tooling choice is

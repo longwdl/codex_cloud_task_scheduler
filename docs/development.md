@@ -15,11 +15,12 @@ Implemented in the current snapshot:
 - secret redaction and safe subprocess execution;
 - tracker and executor ports with offline fakes;
 - read-only candidate validation, priority ordering, and capacity planning;
-- local `doctor` and database `status` commands, plus a dependency-injected dry-run entry point.
+- local `doctor` and database `status` commands, plus dependency-injected and GitHub CLI dry-run
+  entry points.
 
 Explicitly deferred:
 
-- real `gh` writes;
+- real `gh` writes (the implemented GitHub adapter is read-only);
 - real `codex cloud exec`, status reconciliation, diff, or apply;
 - branch push and draft PR creation;
 - systemd installation or Linux hardening;
@@ -41,8 +42,10 @@ Run the offline preflight check:
 PYTHONPATH=src python3 -m codex_dispatcher doctor --json
 ```
 
-Missing `gh` is expected during this phase and is reported as a future integration prerequisite,
-not as an offline-core failure.
+The networked dry-run against a private repository additionally requires `gh` authentication
+through `GH_TOKEN` or `GITHUB_TOKEN`. The token remains outside the TOML configuration and is passed
+only in the child-process environment. `doctor` still treats a missing `gh` executable as a later
+integration prerequisite rather than an offline-core failure.
 
 The repository does not yet select or add a third-party build backend. Run it from `src/` as shown
 above; packaging can be added as a separate, reviewable tooling decision.

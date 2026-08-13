@@ -6,6 +6,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from codex_dispatcher.cli import main, run_once_dry_run
 from codex_dispatcher.domain import Run
@@ -66,6 +68,63 @@ class CliTests(unittest.TestCase):
         self.assertEqual(0, exit_code)
         self.assertEqual("ok", payload["integrity"])
         self.assertEqual(["run-1"], payload["active_runs"])
+
+    def test_run_once_requires_explicit_dry_run(self) -> None:
+        with self.assertRaises(SystemExit):
+            main(["run-once", "--config", "config.toml"])
+
+    def test_run_once_reports_missing_gh_without_external_write(self) -> None:
+        stdout = io.StringIO()
+        with patch("codex_dispatcher.cli.shutil.which", return_value=None):
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    ["run-once", "--dry-run", "--config", "missing.toml", "--json"]
+                )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(1, exit_code)
+        self.assertEqual("gh executable not found", payload["error"])
+
+    def test_run_once_passes_environment_token_without_printing_it(self) -> None:
+        stdout = io.StringIO()
+        token = "github_pat_test_fixture"
+        with (
+            patch("codex_dispatcher.cli.shutil.which", return_value="/usr/bin/gh"),
+            patch("codex_dispatcher.cli.load_config", return_value=make_config()),
+            patch("codex_dispatcher.cli.run_once_dry_run") as dry_run,
+            patch(
+                "codex_dispatcher.trackers.github_cli.GitHubCliTracker"
+            ) as tracker_class,
+            patch.dict("os.environ", {"GITHUB_TOKEN": token}, clear=True),
+            contextlib.redirect_stdout(stdout),
+        ):
+            dry_run.return_value = SimpleNamespace(selected=(), rejected=())
+            exit_code = main(
+                ["run-once", "--dry-run", "--config", "config.toml", "--json"]
+            )
+
+        self.assertEqual(0, exit_code)
+        tracker_class.assert_called_once_with(gh_path=Path("/usr/bin/gh"), token=token)
+        self.assertNotIn(token, stdout.getvalue())
+
+    def test_run_once_ignores_unrecognized_environment_token(self) -> None:
+        stdout = io.StringIO()
+        with (
+            patch("codex_dispatcher.cli.shutil.which", return_value="/usr/bin/gh"),
+            patch("codex_dispatcher.cli.load_config", return_value=make_config()),
+            patch("codex_dispatcher.cli.run_once_dry_run") as dry_run,
+            patch(
+                "codex_dispatcher.trackers.github_cli.GitHubCliTracker"
+            ) as tracker_class,
+            patch.dict("os.environ", {"GITHUB_TOKEN": "unrecognized-token"}, clear=True),
+            contextlib.redirect_stdout(stdout),
+        ):
+            dry_run.return_value = SimpleNamespace(selected=(), rejected=())
+            exit_code = main(
+                ["run-once", "--dry-run", "--config", "config.toml", "--json"]
+            )
+
+        self.assertEqual(0, exit_code)
+        tracker_class.assert_called_once_with(gh_path=Path("/usr/bin/gh"), token=None)
 
 
 if __name__ == "__main__":

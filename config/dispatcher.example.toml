@@ -5,16 +5,16 @@ database_path = "/var/lib/codex-dispatcher/state.db"
 workspace_root = "/var/lib/codex-dispatcher/repos"
 
 [tools]
-git_version = "REPLACE_AFTER_CONTRACT_TEST"
-gh_version = "REPLACE_AFTER_CONTRACT_TEST"
-codex_version = "REPLACE_AFTER_CONTRACT_TEST"
+git_version = "2.55.0"
+gh_version = "2.97.0"
+codex_version = "0.147.0"
 
 [[repositories]]
-slug = "OWNER/codex-dispatcher-fixture"
+slug = "longwdl/codex-dispatcher-fixture"
 base_branch = "main"
-cloud_environment_id = "REPLACE_WITH_FIXTURE_ENVIRONMENT_ID"
+cloud_environment_id = "6a7d9f7b8784819183c5c2e3691466e7"
 max_active = 1
 allowed_paths = ["README.md"]
 denied_paths = []
-maintainers = ["REPLACE_WITH_GITHUB_USERNAME"]
+maintainers = ["longwdl"]
 required_checks = ["fixture"]
