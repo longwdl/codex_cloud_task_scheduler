@@ -152,6 +152,42 @@ class StateStoreTests(unittest.TestCase):
                         run.run_id, head_sha="e" * 40, remote_reused=False
                     )
 
+    def test_cloud_dispatch_boundary_is_atomic_and_auditable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "state.db"
+            with StateStore(path) as store:
+                store.migrate()
+                run = make_run(6, run_id="run-6")
+                store.create_run(run)
+                store.update_state(run.run_id, RunState.CLAIMED)
+                store.record_branch_anchor(
+                    run.run_id,
+                    base_sha="f" * 40,
+                    task_branch="codex/issue-6-abcdef012345",
+                )
+                store.mark_branch_prepared(
+                    run.run_id,
+                    head_sha="f" * 40,
+                    remote_reused=False,
+                )
+                dispatching = store.begin_cloud_dispatch(
+                    run.run_id,
+                    known_task_ids=("task-b", "task-a"),
+                    updated_at="2026-01-01T00:00:02.000000Z",
+                )
+                self.assertEqual(RunState.DISPATCHING, dispatching.state)
+                with self.assertRaisesRegex(ValueError, "branch-prepared"):
+                    store.begin_cloud_dispatch(run.run_id, known_task_ids=())
+            with closing(sqlite3.connect(path)) as connection:
+                event_type, payload_json = connection.execute(
+                    "SELECT event_type, payload_json FROM run_events "
+                    "WHERE run_id = ? ORDER BY event_id DESC LIMIT 1",
+                    ("run-6",),
+                ).fetchone()
+            self.assertEqual("cloud_dispatch_started", event_type)
+            self.assertIn('"known_task_ids":["task-a","task-b"]', payload_json)
+            self.assertNotIn("prompt\"", payload_json)
+
 
 if __name__ == "__main__":
     unittest.main()

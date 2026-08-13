@@ -256,6 +256,65 @@ class StateStore:
         assert completed is not None
         return completed
 
+    def begin_cloud_dispatch(
+        self,
+        run_id: str,
+        *,
+        known_task_ids: tuple[str, ...],
+        updated_at: str | None = None,
+    ) -> Run:
+        """Persist the pre-submit task snapshot before any Cloud task creation."""
+        if not isinstance(known_task_ids, tuple) or any(
+            not isinstance(task_id, str) or not task_id for task_id in known_task_ids
+        ):
+            raise TypeError("known_task_ids must be a tuple of non-empty strings")
+        if len(set(known_task_ids)) != len(known_task_ids):
+            raise ValueError("known_task_ids must be unique")
+        normalized_ids = tuple(sorted(known_task_ids))
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"run not found: {run_id}")
+            run = self._row_to_run(row)
+            if run.state is not RunState.BRANCH_PREPARED:
+                raise ValueError("only a branch-prepared run can begin Cloud dispatch")
+            if run.base_sha is None or run.task_branch is None or run.head_sha != run.base_sha:
+                raise ValueError("Cloud dispatch requires one verified initial branch anchor")
+            updated = run.transition_to(RunState.DISPATCHING, at=now)
+            cursor = connection.execute(
+                "UPDATE runs SET state = ?, updated_at = ? WHERE run_id = ? AND state = ? "
+                "AND base_sha = ? AND head_sha = ? AND task_branch = ?",
+                (
+                    updated.state.value,
+                    updated.updated_at,
+                    run_id,
+                    run.state.value,
+                    run.base_sha,
+                    run.head_sha,
+                    run.task_branch,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"concurrent Cloud dispatch detected for run: {run_id}")
+            self._insert_event(
+                connection,
+                run_id,
+                "cloud_dispatch_started",
+                {
+                    "base_sha": run.base_sha,
+                    "environment_id": run.cloud_environment_id,
+                    "head_sha": run.head_sha,
+                    "known_task_ids": normalized_ids,
+                    "prompt_sha256": run.prompt_sha256,
+                    "task_branch": run.task_branch,
+                },
+                now,
+            )
+        dispatching = self.get_run(run_id)
+        assert dispatching is not None
+        return dispatching
+
     def append_event(
         self,
         run_id: str,

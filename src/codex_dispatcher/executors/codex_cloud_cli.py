@@ -1,8 +1,9 @@
 """Fail-closed Codex Cloud CLI contract adapter.
 
 The pinned CLI exposes structured JSON only for ``cloud list``. Submission
-places the prompt in argv and has no JSON response, so this adapter deliberately
-keeps every write disabled until a later contract test proves a safe protocol.
+places the prompt in argv and has no JSON response, so every write remains
+disabled. Structured task listing is implemented for pre-submit snapshots and
+recovery, while unknown fields and statuses fail closed.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from codex_dispatcher.executors.base import (
     DiffResult,
     PreflightResult,
     RemoteRun,
+    RunStatus,
     SubmissionRequest,
 )
 
@@ -37,7 +39,7 @@ _IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
 
 class CodexCloudCliExecutor:
-    """Validate Cloud environment access without submitting or applying tasks."""
+    """Read Cloud task snapshots without submitting or applying tasks."""
 
     def __init__(self, *, codex_path: str | Path, timeout_seconds: float = 30.0) -> None:
         candidate = str(codex_path)
@@ -52,25 +54,13 @@ class CodexCloudCliExecutor:
         """Prove the environment is visible through the pinned JSON list command."""
         environment_id = _validate_identifier(environment_id, "environment_id")
         payload = self._list_payload(environment_id, limit=1)
-        tasks = payload["tasks"]
-        assert isinstance(tasks, list)
-        if tasks:
-            return PreflightResult(
-                False,
-                "non-empty Codex Cloud task schema has not passed a contract test",
-            )
+        self._parse_tasks(payload, environment_id)
         return PreflightResult(True, "environment is visible; submit remains disabled")
 
     def list_runs(self, environment_id: str) -> tuple[RemoteRun, ...]:
         environment_id = _validate_identifier(environment_id, "environment_id")
         payload = self._list_payload(environment_id, limit=20)
-        tasks = payload["tasks"]
-        assert isinstance(tasks, list)
-        if tasks:
-            raise CodexCloudCliError(
-                "non-empty Codex Cloud task schema has not passed a contract test"
-            )
-        return ()
+        return self._parse_tasks(payload, environment_id)
 
     def submit(self, request: SubmissionRequest) -> Never:
         raise CodexCloudCliWriteDisabledError(
@@ -126,11 +116,87 @@ class CodexCloudCliExecutor:
             raise CodexCloudCliError("codex cloud list cursor must be a string or null")
         return payload
 
+    def _parse_tasks(
+        self, payload: dict[str, Any], requested_environment_id: str
+    ) -> tuple[RemoteRun, ...]:
+        tasks = payload["tasks"]
+        assert isinstance(tasks, list)
+        parsed: list[RemoteRun] = []
+        seen_ids: set[str] = set()
+        for task in tasks:
+            if not isinstance(task, dict):
+                raise CodexCloudCliError("codex cloud list task must be an object")
+            required = {
+                "id",
+                "url",
+                "title",
+                "status",
+                "updated_at",
+                "environment_id",
+                "environment_label",
+                "summary",
+                "is_review",
+                "attempt_total",
+            }
+            if set(task) != required:
+                raise CodexCloudCliError("codex cloud list task has unexpected JSON fields")
+            task_id = _validate_identifier(_task_string(task, "id"), "external_task_id")
+            environment_id = _task_string(task, "environment_id")
+            if environment_id != requested_environment_id:
+                raise CodexCloudCliError("codex cloud list returned a different environment")
+            if task_id in seen_ids:
+                raise CodexCloudCliError("codex cloud list returned duplicate task IDs")
+            seen_ids.add(task_id)
+            for field in ("url", "title", "updated_at", "environment_label"):
+                _task_string(task, field)
+            status = _task_string(task, "status")
+            if task["summary"] is not None and not isinstance(task["summary"], str):
+                raise CodexCloudCliError("codex cloud list task summary has an invalid type")
+            if type(task["is_review"]) is not bool:
+                raise CodexCloudCliError("codex cloud list task is_review has an invalid type")
+            if type(task["attempt_total"]) is not int or task["attempt_total"] < 1:
+                raise CodexCloudCliError("codex cloud list task attempt_total is invalid")
+            parsed.append(
+                RemoteRun(
+                    task_id,
+                    None,
+                    environment_id,
+                    _normalize_status(status),
+                    "",
+                    task["url"],
+                    task["summary"],
+                )
+            )
+        return tuple(parsed)
+
 
 def _validate_identifier(value: str, field: str) -> str:
     if not isinstance(value, str) or _IDENTIFIER_RE.fullmatch(value) is None:
         raise ValueError(f"{field} has unsupported characters")
     return value
+
+
+def _task_string(task: dict[str, Any], field: str) -> str:
+    value = task[field]
+    if not isinstance(value, str) or not value:
+        raise CodexCloudCliError(f"codex cloud list task {field} must be non-empty")
+    return value
+
+
+def _normalize_status(value: str) -> RunStatus:
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    mapping = {
+        "queued": RunStatus.QUEUED,
+        "pending": RunStatus.QUEUED,
+        "running": RunStatus.RUNNING,
+        "in_progress": RunStatus.RUNNING,
+        "succeeded": RunStatus.SUCCEEDED,
+        "completed": RunStatus.SUCCEEDED,
+        "failed": RunStatus.FAILED,
+        "cancelled": RunStatus.CANCELLED,
+        "canceled": RunStatus.CANCELLED,
+    }
+    return mapping.get(normalized, RunStatus.UNKNOWN)
 
 
 def _command_failure(result: CommandResult) -> str:

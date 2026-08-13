@@ -23,7 +23,9 @@ Implemented in the current snapshot:
   repository attribute drivers disabled or rejected;
 - crash-recoverable initial task-branch publication: the immutable base SHA and deterministic
   branch name are committed to SQLite before the guarded remote ref creation, then verified before
-  the run advances to `branch_prepared`.
+  the run advances to `branch_prepared`;
+- a Cloud dispatch preparation boundary that verifies the immutable Prompt hash, snapshots known
+  remote Task IDs, and atomically advances SQLite to `dispatching` without calling `submit`.
 
 Explicitly deferred:
 
@@ -65,6 +67,11 @@ The `--contract` mode is also read-only. It checks exact `git`, `gh`, and `codex
 proves that each configured Cloud environment is visible through `codex cloud list --json`. The
 pinned CLI's non-empty task schema and write commands remain disabled until dedicated contract
 fixtures cover them.
+
+The pinned `codex cloud exec` command accepts its Prompt as a positional argument and does not offer
+structured submit output. Consequently the dispatcher will not invoke it: the full Prompt would be
+visible in the process argument list, and a crash could leave an unidentifiable remote Task. The
+pre-submit persistence boundary is implemented, but remote submission remains fail-closed.
 
 The repository does not yet select or add a third-party build backend. Run it from `src/` as shown
 above; packaging can be added as a separate, reviewable tooling decision.
