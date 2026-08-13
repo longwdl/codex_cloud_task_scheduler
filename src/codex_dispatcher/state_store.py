@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
 from codex_dispatcher.domain import Run, RunState, utc_now_iso
+
+
+_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
 
 
 class StateStore:
@@ -141,6 +145,117 @@ class StateStore:
         assert bound is not None
         return bound
 
+    def record_branch_anchor(
+        self,
+        run_id: str,
+        *,
+        base_sha: str,
+        task_branch: str,
+        updated_at: str | None = None,
+    ) -> Run:
+        """Persist the immutable branch anchor before any remote branch write."""
+        if not isinstance(base_sha, str) or re.fullmatch(r"[0-9a-f]{40,64}", base_sha) is None:
+            raise ValueError("base_sha must be a lowercase Git object ID")
+        if (
+            not isinstance(task_branch, str)
+            or _BRANCH_RE.fullmatch(task_branch) is None
+            or task_branch.startswith(("/", "."))
+            or task_branch.endswith(("/", ".", ".lock"))
+            or ".." in task_branch
+            or "//" in task_branch
+            or "@{" in task_branch
+        ):
+            raise ValueError("task_branch must be a safe Git branch name")
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"run not found: {run_id}")
+            run = self._row_to_run(row)
+            if run.state not in {RunState.CLAIMED, RunState.BRANCH_PREPARED}:
+                raise ValueError("branch anchor can only be recorded for a claimed run")
+            if run.base_sha is not None or run.task_branch is not None:
+                if run.base_sha != base_sha or run.task_branch != task_branch:
+                    raise ValueError(f"run {run_id} already has a different branch anchor")
+                return run
+            cursor = connection.execute(
+                "UPDATE runs SET base_sha = ?, task_branch = ?, updated_at = ? "
+                "WHERE run_id = ? AND state = ? AND base_sha IS NULL AND task_branch IS NULL",
+                (base_sha, task_branch, now, run_id, RunState.CLAIMED.value),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"concurrent branch anchor update detected for run: {run_id}")
+            self._insert_event(
+                connection,
+                run_id,
+                "branch_anchor_recorded",
+                {"base_sha": base_sha, "task_branch": task_branch},
+                now,
+            )
+        anchored = self.get_run(run_id)
+        assert anchored is not None
+        return anchored
+
+    def mark_branch_prepared(
+        self,
+        run_id: str,
+        *,
+        head_sha: str,
+        remote_reused: bool,
+        updated_at: str | None = None,
+    ) -> Run:
+        """Record verified remote branch creation and advance the run atomically."""
+        if not isinstance(head_sha, str) or re.fullmatch(r"[0-9a-f]{40,64}", head_sha) is None:
+            raise ValueError("head_sha must be a lowercase Git object ID")
+        if type(remote_reused) is not bool:
+            raise TypeError("remote_reused must be a bool")
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"run not found: {run_id}")
+            run = self._row_to_run(row)
+            if run.base_sha is None or run.task_branch is None:
+                raise ValueError("branch anchor must be persisted before branch completion")
+            if head_sha != run.base_sha:
+                raise ValueError("initial task branch HEAD must equal its persisted base SHA")
+            if run.state is RunState.BRANCH_PREPARED:
+                if run.head_sha != head_sha:
+                    raise ValueError(f"run {run_id} already has a different branch HEAD")
+                return run
+            if run.state is not RunState.CLAIMED:
+                raise ValueError("only a claimed run can complete branch preparation")
+            updated = run.transition_to(RunState.BRANCH_PREPARED, at=now)
+            cursor = connection.execute(
+                "UPDATE runs SET state = ?, head_sha = ?, updated_at = ? "
+                "WHERE run_id = ? AND state = ? AND base_sha = ? AND task_branch = ?",
+                (
+                    updated.state.value,
+                    head_sha,
+                    updated.updated_at,
+                    run_id,
+                    run.state.value,
+                    run.base_sha,
+                    run.task_branch,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"concurrent branch completion detected for run: {run_id}")
+            self._insert_event(
+                connection,
+                run_id,
+                "branch_prepared",
+                {
+                    "head_sha": head_sha,
+                    "remote_reused": remote_reused,
+                    "task_branch": run.task_branch,
+                },
+                now,
+            )
+        completed = self.get_run(run_id)
+        assert completed is not None
+        return completed
+
     def append_event(
         self,
         run_id: str,
@@ -155,17 +270,44 @@ class StateStore:
             payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
         with self._transaction() as connection:
-            cursor = connection.execute(
-                "INSERT INTO run_events"
-                "(run_id, event_type, event_time, payload_json) VALUES (?, ?, ?, ?)",
-                (run_id, event_type, event_time or utc_now_iso(), payload_json),
+            cursor = self._insert_event_json(
+                connection, run_id, event_type, payload_json, event_time or utc_now_iso()
             )
         assert cursor.lastrowid is not None
         return cursor.lastrowid
 
+    @staticmethod
+    def _insert_event(
+        connection: sqlite3.Connection,
+        run_id: str,
+        event_type: str,
+        payload: Mapping[str, Any],
+        event_time: str,
+    ) -> sqlite3.Cursor:
+        payload_json = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        return StateStore._insert_event_json(
+            connection, run_id, event_type, payload_json, event_time
+        )
+
+    @staticmethod
+    def _insert_event_json(
+        connection: sqlite3.Connection,
+        run_id: str,
+        event_type: str,
+        payload_json: str,
+        event_time: str,
+    ) -> sqlite3.Cursor:
+        return connection.execute(
+            "INSERT INTO run_events"
+            "(run_id, event_type, event_time, payload_json) VALUES (?, ?, ?, ?)",
+            (run_id, event_type, event_time, payload_json),
+        )
+
     def backup(self, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(destination) as destination_connection:
+        with closing(sqlite3.connect(destination)) as destination_connection:
             self._connection.backup(destination_connection)
 
     def integrity_check(self) -> str:

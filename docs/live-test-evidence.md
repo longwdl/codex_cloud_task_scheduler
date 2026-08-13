@@ -24,6 +24,14 @@ Fixture Issue `#1` was created with `agent:paused`, `exec:cloud`, and `priority:
 
 No branch, pull request, Codex Cloud task, merge, or deployment was created by this test.
 
+## Local task-branch recovery contract
+
+The branch publication protocol is tested against a temporary local bare Git repository. The test
+simulates a process failure after the remote branch is created but before SQLite advances the run,
+then verifies that retry reuses the exact persisted branch and Base SHA without another write. A
+second test advances `main` before recovery and verifies that the persisted Base SHA remains the
+task-branch anchor. These tests do not access either configured GitHub repository.
+
 ## Phase 3 GitHub write primitive contract
 
 Using the real adapter against Fixture Issue `#1`:

@@ -18,9 +18,17 @@ class GitWorkspaceTests(unittest.TestCase):
     def test_prepare_uses_safe_fixed_config_and_returns_clean_worktree(self) -> None:
         sha = "a" * 40
         calls: list[tuple[str, ...]] = []
+        environments: list[dict[str, str]] = []
 
-        def fake_run(argv: tuple[str, ...], **_: object) -> CommandResult:
+        def fake_run(argv: tuple[str, ...], **kwargs: object) -> CommandResult:
             calls.append(argv)
+            environments.append(dict(kwargs["env"]))  # type: ignore[arg-type]
+            if "ls-remote" in argv:
+                return CommandResult(0, "", "")
+            if "--git-common-dir" in argv:
+                return CommandResult(0, str(root / "mirrors" / "owner" / "repo.git") + "\n", "")
+            if "symbolic-ref" in argv:
+                return CommandResult(0, "agent/issue-1-run\n", "")
             if "rev-parse" in argv:
                 return CommandResult(0, sha + "\n", "")
             if "ls-tree" in argv:
@@ -48,7 +56,11 @@ class GitWorkspaceTests(unittest.TestCase):
             self.assertIn("core.hooksPath=/dev/null", call)
             self.assertIn("protocol.allow=never", call)
             self.assertIn("submodule.recurse=false", call)
-            self.assertTrue(any("extraheader=Authorization: Basic" in item for item in call))
+            self.assertFalse(any("github_pat_test_fixture" in item for item in call))
+            self.assertFalse(any("extraheader=Authorization: Basic" in item for item in call))
+        for environment in environments:
+            self.assertEqual("http.https://github.com/.extraheader", environment["GIT_CONFIG_KEY_0"])
+            self.assertTrue(environment["GIT_CONFIG_VALUE_0"].startswith("Authorization: Basic "))
 
     def test_unsafe_remote_branch_and_existing_worktree_fail_before_git(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -71,10 +83,21 @@ class GitWorkspaceTests(unittest.TestCase):
                     )
             runner.assert_not_called()
 
+            with patch("codex_dispatcher.git_workspace.run_command") as runner:
+                with self.assertRaisesRegex(ValueError, "expected_base_sha"):
+                    workspace.prepare(
+                        repository=REPOSITORY,
+                        remote_url=REMOTE,
+                        base_branch="main",
+                        task_branch="agent/run",
+                        expected_base_sha=123,  # type: ignore[arg-type]
+                    )
+            runner.assert_not_called()
+
             worktree = root / "worktrees" / "owner" / "repo" / "agent__run"
             worktree.mkdir(parents=True)
             with patch("codex_dispatcher.git_workspace.run_command") as runner:
-                with self.assertRaisesRegex(GitWorkspaceError, "already exists"):
+                with self.assertRaisesRegex(GitWorkspaceError, "linked Git worktree"):
                     workspace.prepare(
                         repository=REPOSITORY,
                         remote_url=REMOTE,

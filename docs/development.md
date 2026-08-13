@@ -20,13 +20,16 @@ Implemented in the current snapshot:
 - controlled GitHub claim/state/comment primitives with write-after-read verification;
 - exact tool-version and empty Codex Cloud environment contract checks;
 - safe local Git mirror/worktree preparation with hooks, custom protocols, submodules, and
-  repository attribute drivers disabled or rejected.
+  repository attribute drivers disabled or rejected;
+- crash-recoverable initial task-branch publication: the immutable base SHA and deterministic
+  branch name are committed to SQLite before the guarded remote ref creation, then verified before
+  the run advances to `branch_prepared`.
 
 Explicitly deferred:
 
 - unattended `gh` write orchestration (write primitives are not exposed by the CLI);
 - real `codex cloud exec`, status reconciliation, diff, or apply (all Cloud writes fail closed);
-- branch push and draft PR creation;
+- production GitHub branch-write orchestration and draft PR creation;
 - systemd installation or Linux hardening;
 - any merge, deployment, or production access.
 
@@ -67,4 +70,6 @@ above; packaging can be added as a separate, reviewable tooling decision.
 - External executables are replaced with temporary fake scripts.
 - Time, UUIDs, and external responses should be injectable where they affect determinism.
 - Failure-path tests must assert that no external write was attempted.
+- Git write/recovery tests use a temporary local bare repository and never a configured GitHub
+  repository.
 - Test fixtures may contain fake tokens, but never copy a real credential into a fixture.

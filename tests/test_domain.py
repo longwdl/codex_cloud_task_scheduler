@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from codex_dispatcher.domain import InvalidStateTransition, Run, RunState
 
@@ -42,6 +43,13 @@ class DomainTests(unittest.TestCase):
             self._new_run(issue_number=0)
         with self.assertRaisesRegex(ValueError, "SHA-256"):
             self._new_run(prompt_sha256="short")
+
+    def test_rejects_invalid_persisted_git_metadata(self) -> None:
+        run = self._new_run()
+        with self.assertRaisesRegex(ValueError, "base_sha"):
+            replace(run, base_sha="not-a-sha")
+        with self.assertRaisesRegex(ValueError, "task_branch"):
+            replace(run, task_branch="../unsafe")
 
     @staticmethod
     def _new_run(

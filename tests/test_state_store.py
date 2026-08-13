@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from codex_dispatcher.domain import Run, RunState
@@ -73,6 +74,83 @@ class StateStoreTests(unittest.TestCase):
                 restored.migrate()
                 self.assertIsNotNone(restored.get_run("run-3"))
                 self.assertEqual("ok", restored.integrity_check())
+
+    def test_branch_anchor_and_completion_are_atomic_and_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "state.db"
+            with StateStore(path) as store:
+                store.migrate()
+                run = make_run(4, run_id="run-4")
+                store.create_run(run)
+                store.update_state(run.run_id, RunState.CLAIMED)
+                anchored = store.record_branch_anchor(
+                    run.run_id,
+                    base_sha="b" * 40,
+                    task_branch="codex/issue-4-abcdef012345",
+                    updated_at="2026-01-01T00:00:00.000000Z",
+                )
+                self.assertEqual(RunState.CLAIMED, anchored.state)
+                self.assertEqual("b" * 40, anchored.base_sha)
+                self.assertEqual("codex/issue-4-abcdef012345", anchored.task_branch)
+                self.assertEqual(
+                    anchored,
+                    store.record_branch_anchor(
+                        run.run_id,
+                        base_sha="b" * 40,
+                        task_branch="codex/issue-4-abcdef012345",
+                    ),
+                )
+                with self.assertRaisesRegex(ValueError, "different branch anchor"):
+                    store.record_branch_anchor(
+                        run.run_id,
+                        base_sha="c" * 40,
+                        task_branch="codex/issue-4-abcdef012345",
+                    )
+
+                prepared = store.mark_branch_prepared(
+                    run.run_id,
+                    head_sha="b" * 40,
+                    remote_reused=False,
+                    updated_at="2026-01-01T00:00:01.000000Z",
+                )
+                self.assertEqual(RunState.BRANCH_PREPARED, prepared.state)
+                self.assertEqual("b" * 40, prepared.head_sha)
+                self.assertEqual(
+                    prepared,
+                    store.mark_branch_prepared(
+                        run.run_id, head_sha="b" * 40, remote_reused=True
+                    ),
+                )
+            with closing(sqlite3.connect(path)) as connection:
+                events = connection.execute(
+                    "SELECT event_type FROM run_events WHERE run_id = ? ORDER BY event_id",
+                    ("run-4",),
+                ).fetchall()
+            self.assertEqual(
+                [("branch_anchor_recorded",), ("branch_prepared",)],
+                events,
+            )
+
+    def test_branch_completion_rejects_missing_or_mismatched_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                run = make_run(5, run_id="run-5")
+                store.create_run(run)
+                store.update_state(run.run_id, RunState.CLAIMED)
+                with self.assertRaisesRegex(ValueError, "anchor must be persisted"):
+                    store.mark_branch_prepared(
+                        run.run_id, head_sha="d" * 40, remote_reused=False
+                    )
+                store.record_branch_anchor(
+                    run.run_id,
+                    base_sha="d" * 40,
+                    task_branch="codex/issue-5-abcdef012345",
+                )
+                with self.assertRaisesRegex(ValueError, "must equal"):
+                    store.mark_branch_prepared(
+                        run.run_id, head_sha="e" * 40, remote_reused=False
+                    )
 
 
 if __name__ == "__main__":

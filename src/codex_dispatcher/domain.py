@@ -10,6 +10,10 @@ from typing import Final
 from uuid import uuid4
 
 
+_GIT_SHA_RE = re.compile(r"[0-9a-f]{40,64}")
+_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
+
+
 def utc_now_iso() -> str:
     """Return an RFC 3339 timestamp in UTC with an explicit ``Z`` suffix."""
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
@@ -116,6 +120,21 @@ class Run:
             raise ValueError("retry_count must be a non-negative integer")
         if re.fullmatch(r"[0-9a-f]{64}", self.prompt_sha256) is None:
             raise ValueError("prompt_sha256 must be a lowercase SHA-256 digest")
+        for field, value in (("base_sha", self.base_sha), ("head_sha", self.head_sha)):
+            if value is not None and (
+                not isinstance(value, str) or _GIT_SHA_RE.fullmatch(value) is None
+            ):
+                raise ValueError(f"{field} must be a lowercase Git object ID or None")
+        if self.task_branch is not None and (
+            not isinstance(self.task_branch, str)
+            or _BRANCH_RE.fullmatch(self.task_branch) is None
+            or self.task_branch.startswith(("/", "."))
+            or self.task_branch.endswith(("/", ".", ".lock"))
+            or ".." in self.task_branch
+            or "//" in self.task_branch
+            or "@{" in self.task_branch
+        ):
+            raise ValueError("task_branch must be a safe Git branch name or None")
         if self.cloud_diff_sha256 is not None and re.fullmatch(
             r"[0-9a-f]{64}", self.cloud_diff_sha256
         ) is None:

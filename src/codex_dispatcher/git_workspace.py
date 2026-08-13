@@ -24,6 +24,13 @@ class PreparedWorktree:
     worktree_path: Path
 
 
+@dataclass(frozen=True, slots=True)
+class PublishedBranch:
+    branch_name: str
+    head_sha: str
+    reused: bool
+
+
 _REPOSITORY_RE = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,99})"
 )
@@ -66,12 +73,18 @@ class GitWorkspace:
         remote_url: str,
         base_branch: str,
         task_branch: str,
+        expected_base_sha: str | None = None,
     ) -> PreparedWorktree:
-        """Fetch a mirror and create one clean task worktree from the fetched base SHA."""
+        """Prepare a clean worktree, optionally recovering one persisted base anchor."""
         repository = _validate_repository(repository)
         remote_url = _validate_remote(remote_url, repository)
         base_branch = _validate_branch(base_branch, "base_branch")
         task_branch = _validate_branch(task_branch, "task_branch")
+        if expected_base_sha is not None and (
+            not isinstance(expected_base_sha, str)
+            or _SHA_RE.fullmatch(expected_base_sha) is None
+        ):
+            raise ValueError("expected_base_sha must be a lowercase Git object ID or None")
         if base_branch == task_branch:
             raise ValueError("task_branch must differ from base_branch")
 
@@ -80,8 +93,10 @@ class GitWorkspace:
         worktree = self._root / "worktrees" / owner / name / task_branch.replace("/", "__")
         self._assert_under_root(mirror)
         self._assert_under_root(worktree)
-        if worktree.exists():
-            raise GitWorkspaceError("task worktree already exists")
+        if worktree.exists() and (
+            not worktree.is_dir() or not (worktree / ".git").is_file()
+        ):
+            raise GitWorkspaceError("task worktree path is not a linked Git worktree")
         mirror.parent.mkdir(parents=True, exist_ok=True)
         worktree.parent.mkdir(parents=True, exist_ok=True)
 
@@ -107,24 +122,38 @@ class GitWorkspace:
             "origin",
             f"+refs/heads/{base_branch}:refs/remotes/origin/{base_branch}",
         )
-        base_sha = self._run(
+        current_base_sha = self._run(
             mirror, "rev-parse", "--verify", f"refs/remotes/origin/{base_branch}^{{commit}}"
         ).stdout.strip()
-        if _SHA_RE.fullmatch(base_sha) is None:
+        if _SHA_RE.fullmatch(current_base_sha) is None:
             raise GitWorkspaceError("git returned an invalid base SHA")
+        if expected_base_sha is not None:
+            self._run(mirror, "cat-file", "-e", f"{expected_base_sha}^{{commit}}")
+            merge_base = self._run(
+                mirror, "merge-base", expected_base_sha, current_base_sha
+            ).stdout.strip()
+            if merge_base != expected_base_sha:
+                raise GitWorkspaceError("persisted base SHA is not in the configured base branch")
+        base_sha = expected_base_sha or current_base_sha
+        remote_task_sha = self._remote_branch_sha(mirror, task_branch)
+        if remote_task_sha is not None:
+            if remote_task_sha != base_sha:
+                raise GitWorkspaceError("remote task branch differs from the persisted base SHA")
         self._reject_unsafe_tree(mirror, base_sha)
-        self._run(
-            mirror,
-            "worktree",
-            "add",
-            "--detach",
-            "--no-checkout",
-            str(worktree),
-            base_sha,
-        )
-        self._run(worktree, "checkout", "-B", task_branch, base_sha, "--")
-        if self._run(worktree, "status", "--porcelain=v1", "--untracked-files=all").stdout:
-            raise GitWorkspaceError("new task worktree is not clean")
+        if worktree.exists():
+            self._validate_worktree(worktree, mirror, task_branch, base_sha)
+        else:
+            self._run(
+                mirror,
+                "worktree",
+                "add",
+                "--detach",
+                "--no-checkout",
+                str(worktree),
+                base_sha,
+            )
+            self._run(worktree, "checkout", "-B", task_branch, base_sha, "--")
+            self._validate_worktree(worktree, mirror, task_branch, base_sha)
         return PreparedWorktree(
             repository,
             base_branch,
@@ -133,6 +162,79 @@ class GitWorkspace:
             mirror,
             worktree,
         )
+
+    def publish_task_branch(self, prepared: PreparedWorktree) -> PublishedBranch:
+        """Create the remote task branch without overwriting an existing different ref."""
+        if not isinstance(prepared, PreparedWorktree):
+            raise TypeError("prepared must be a PreparedWorktree")
+        _validate_repository(prepared.repository)
+        _validate_branch(prepared.task_branch, "task_branch")
+        if (
+            not isinstance(prepared.base_sha, str)
+            or _SHA_RE.fullmatch(prepared.base_sha) is None
+        ):
+            raise ValueError("prepared base SHA is invalid")
+        self._assert_under_root(prepared.mirror_path)
+        self._assert_under_root(prepared.worktree_path)
+        self._validate_worktree(
+            prepared.worktree_path,
+            prepared.mirror_path,
+            prepared.task_branch,
+            prepared.base_sha,
+        )
+        existing = self._remote_branch_sha(prepared.worktree_path, prepared.task_branch)
+        if existing is not None:
+            if existing != prepared.base_sha:
+                raise GitWorkspaceError("remote task branch already points to a different commit")
+            return PublishedBranch(prepared.task_branch, existing, True)
+
+        reference = f"refs/heads/{prepared.task_branch}"
+        self._run(
+            prepared.worktree_path,
+            "-c",
+            "remote.origin.mirror=false",
+            "push",
+            "--porcelain",
+            f"--force-with-lease={reference}:",
+            "origin",
+            f"{prepared.base_sha}:{reference}",
+        )
+        published = self._remote_branch_sha(prepared.worktree_path, prepared.task_branch)
+        if published != prepared.base_sha:
+            raise GitWorkspaceError("remote task branch verification failed")
+        return PublishedBranch(prepared.task_branch, published, False)
+
+    def _remote_branch_sha(self, repository: Path, branch: str) -> str | None:
+        reference = f"refs/heads/{branch}"
+        output = self._run(repository, "ls-remote", "--heads", "origin", reference).stdout
+        lines = tuple(line for line in output.splitlines() if line)
+        if not lines:
+            return None
+        if len(lines) != 1:
+            raise GitWorkspaceError("remote task branch lookup was ambiguous")
+        fields = lines[0].split("\t")
+        if len(fields) != 2 or fields[1] != reference or _SHA_RE.fullmatch(fields[0]) is None:
+            raise GitWorkspaceError("remote task branch lookup returned invalid data")
+        return fields[0]
+
+    def _validate_worktree(
+        self, worktree: Path, mirror: Path, task_branch: str, base_sha: str
+    ) -> None:
+        head = self._inspect_worktree(worktree, mirror, task_branch)
+        if head != base_sha:
+            raise GitWorkspaceError("task worktree HEAD does not match its anchor")
+
+    def _inspect_worktree(self, worktree: Path, mirror: Path, task_branch: str) -> str:
+        common_dir = self._run(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        if Path(common_dir.stdout.strip()).resolve(strict=False) != mirror.resolve(strict=False):
+            raise GitWorkspaceError("task worktree belongs to an unexpected Git repository")
+        branch = self._run(worktree, "symbolic-ref", "--short", "HEAD").stdout.strip()
+        head = self._run(worktree, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
+        if branch != task_branch or _SHA_RE.fullmatch(head) is None:
+            raise GitWorkspaceError("task worktree branch or HEAD is invalid")
+        if self._run(worktree, "status", "--porcelain=v1", "--untracked-files=all").stdout:
+            raise GitWorkspaceError("task worktree is not clean")
+        return head
 
     def _reject_unsafe_tree(self, mirror: Path, base_sha: str) -> None:
         paths = self._run(mirror, "ls-tree", "-r", "--name-only", "-z", base_sha).stdout
@@ -156,13 +258,15 @@ class GitWorkspace:
     def _run(self, repository: Path | None, *arguments: str) -> CommandResult:
         command_env = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
         secrets: tuple[str, ...] = ()
-        extra_config: tuple[str, ...] = ()
         if self._github_token is not None:
             basic = f"x-access-token:{self._github_token}"
             authorization = base64.b64encode(basic.encode("utf-8")).decode("ascii")
-            extra_config = (
-                "-c",
-                f"http.https://github.com/.extraheader=Authorization: Basic {authorization}",
+            command_env.update(
+                {
+                    "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+                    "GIT_CONFIG_VALUE_0": f"Authorization: Basic {authorization}",
+                }
             )
             secrets = (self._github_token, authorization)
         prefix = (
@@ -187,7 +291,6 @@ class GitWorkspace:
             "filter.lfs.smudge=",
             "-c",
             "filter.lfs.clean=",
-            *extra_config,
         )
         argv = prefix + (("-C", str(repository)) if repository is not None else ()) + arguments
         result = run_command(
