@@ -1,32 +1,41 @@
-# Codex Cloud Task Scheduler
+# Codex SSH CLI Task Scheduler
 
 A small, fail-closed control-plane service that turns explicitly approved GitHub issues into
-Codex Cloud tasks, reconciles their state, and eventually delivers changes as draft pull requests.
+persistent Codex CLI sessions on a dedicated Linux runner and delivers checkpoint commits as draft
+pull requests.
 
 The project is intentionally not a task board, deployment system, or long-running web service.
-GitHub stores human task and code facts; SQLite stores recoverable run state; a periodic oneshot
-dispatcher performs deterministic reconciliation.
+GitHub is the only human-input and project view. SQLite stores recoverable work-item and turn state.
+Slack is an outbound-only execution view. A single Linux dispatcher performs deterministic
+reconciliation through restricted SSH.
 
 ## Current status
 
-The repository is in its first implementation phase. The environment-independent core is being
-built first:
+The repository is migrating from an abandoned Codex Cloud design to a remote Linux Codex CLI
+executor. Existing environment-independent foundations include:
 
 - strict configuration parsing;
-- run state machine and SQLite persistence;
+- the legacy run state machine and additive SQLite persistence;
 - hardened local Git mirror and task-worktree preparation;
 - issue task-spec parsing and immutable prompt snapshots;
 - redaction and safe subprocess execution;
 - tracker/executor ports, offline fakes, and read-only candidate planning;
+
+The next offline increment adds:
+
+- stable WorkItem/Turn identity and persistence;
+- strict Runner and Publisher request contracts;
+- Codex JSONL session binding and resume planning;
+- deterministic task-directory and branch identity;
 - offline unit and integration tests.
 
-There is no enabled GitHub write sweep, Codex Cloud submission, systemd deployment, automatic PR
-creation, merge, or deployment in this revision. GitHub claim/state/comment primitives exist for
-controlled contract tests but are not exposed by the CLI.
+There is no enabled SSH Runner execution, Publisher push, Slack delivery, automatic PR creation,
+merge, or deployment in this revision. Existing Codex Cloud adapter code is retained only during
+migration; Cloud writes remain disabled and are not part of the target architecture.
 
 Candidate planning is exposed through a dependency-injected Python entry point and a read-only
 GitHub CLI dry-run command. The command performs tracker reads but does not claim issues, mutate
-labels, create branches, or submit Cloud tasks.
+labels, create branches, invoke a Runner, or publish commits.
 
 ## Requirements
 
@@ -65,7 +74,7 @@ approved; they are not needed for the offline core.
 
 ## Security model
 
-The dispatcher processes untrusted issue text and agent-generated code. It must never execute
-issue-provided commands on its control host, expose production credentials to Cloud tasks or PR CI,
-or interpret an unknown external state as success. Any ambiguous dispatch or delivery state is
-blocked for human reconciliation.
+The dispatcher processes untrusted issue text, Runner output, Git bundles, and agent-generated code.
+It must never execute issue-provided commands on its control host, expose GitHub write credentials
+to Codex, accept Slack as input, or interpret unknown external state as success. Any ambiguous
+execution or publication state is blocked for human reconciliation.

@@ -1,4 +1,8 @@
-# Live test evidence
+# Historical live test evidence
+
+> This file records the earlier Codex Cloud-oriented fixture checks. It is retained as historical
+> evidence only. `exec:cloud` and the Cloud Environment are not part of the current SSH CLI target
+> architecture.
 
 Snapshot date: 2026-08-13. This file records non-secret evidence from the dedicated private
 fixture. It is not a substitute for repeatable automated tests.

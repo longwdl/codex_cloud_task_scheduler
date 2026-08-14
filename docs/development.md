@@ -1,53 +1,65 @@
 # Development
 
-## Scope of the first implementation phase
+## Current implementation boundary
 
-The first phase is deliberately environment-independent. It must run without Linux, GitHub
-credentials, a Codex Cloud environment, network access, or third-party Python packages.
+The current phase is environment-independent. It must run without Linux-only isolation, network
+access, GitHub/Slack/OpenAI credentials, a running SSH server, or third-party Python packages.
 
-Implemented in the current snapshot:
+The existing repository already contains:
 
 - strict TOML configuration;
-- deterministic run state transitions;
-- SQLite migrations, constraints, events, integrity checks, and online backup;
-- issue task-spec parsing and path policy;
-- immutable prompt snapshots and hashes;
-- secret redaction and safe subprocess execution;
+- deterministic legacy run transitions and additive SQLite migrations;
+- issue task-spec parsing, path policy, prompt snapshots, redaction, and safe subprocess execution;
 - tracker and executor ports with offline fakes;
-- read-only candidate validation, priority ordering, and capacity planning;
-- local `doctor` and database `status` commands, plus dependency-injected and GitHub CLI dry-run
-  entry points;
-- controlled GitHub claim/state/comment primitives with write-after-read verification;
-- exact tool-version and empty Codex Cloud environment contract checks;
-- safe local Git mirror/worktree preparation with hooks, custom protocols, submodules, and
-  repository attribute drivers disabled or rejected;
-- crash-recoverable initial task-branch publication: the immutable base SHA and deterministic
-  branch name are committed to SQLite before the guarded remote ref creation, then verified before
-  the run advances to `branch_prepared`;
-- a Cloud dispatch preparation boundary that verifies the immutable Prompt hash, snapshots known
-  remote Task IDs, and atomically advances SQLite to `dispatching` without calling `submit`;
-- read-only applied-change validation that intersects Issue and repository path policies and rejects
-  hard-denied paths, Git behavior files, symbolic links, binary changes, and whitespace errors.
+- read-only GitHub candidate planning;
+- safe local Git mirror/worktree preparation and applied-change validation;
+- a disabled Codex Cloud adapter retained for migration compatibility.
+
+The next offline increment adds:
+
+- stable WorkItem and Turn domain objects;
+- deterministic branch and runner-directory identity per Issue;
+- one-session binding and ordered Turn planning;
+- versioned SSH Runner request/result contracts;
+- strict Codex JSONL event parsing;
+- Publisher request and pure publication-plan validation;
+- additive SQLite persistence for WorkItems and Turns;
+- outbound-only Slack message models and idempotency keys.
 
 Explicitly deferred:
 
-- unattended `gh` write orchestration (write primitives are not exposed by the CLI);
-- real `codex cloud exec`, status reconciliation, diff, or apply (all Cloud writes fail closed);
-- production GitHub branch-write orchestration and draft PR creation;
-- systemd installation or Linux hardening;
-- any merge, deployment, or production access.
+- networked SSH execution;
+- real `codex exec` invocation;
+- GitHub Publisher writes and Draft PR creation;
+- Slack API calls;
+- systemd deployment;
+- Docker isolation on the Runner;
+- any merge, deployment, release, or production access.
+
+## Architecture constraints for offline code
+
+- One GitHub Issue maps to one WorkItem, stable branch, directory, Codex session, Slack thread, and
+  Draft PR until completion.
+- A WorkItem may have multiple ordered Turns; Turn identity never changes branch or session identity.
+- Only one Turn may be active globally.
+- Missing or conflicting Codex session state is blocked, never replaced automatically.
+- Slack has no inbound adapter or command surface.
+- Codex has no GitHub write credential.
+- Publisher accepts only a WorkItem ID and expected full commit SHA. Repository, branch, remote, and
+  local paths are trusted lookups, not caller input.
+- Existing SQLite schema remains readable; migrations are additive.
 
 ## Local verification
 
-The supported runtime starts at Python 3.12. The tests use `unittest` so a clean interpreter is
-enough:
+The supported runtime starts at Python 3.12. Tests use only `unittest`:
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 PYTHONPATH=src python3 -m compileall -q src tests
+git diff --check
 ```
 
-Run the offline preflight check:
+Run the existing offline preflight check:
 
 ```bash
 PYTHONPATH=src python3 -m codex_dispatcher doctor --json
@@ -55,35 +67,18 @@ PYTHONPATH=src python3 -m codex_dispatcher doctor \
   --config config/dispatcher.example.toml --contract --json
 ```
 
-The networked dry-run against a private repository additionally requires `gh` authentication
-through `GH_TOKEN` or `GITHUB_TOKEN`. The token remains outside the TOML configuration and is passed
-only in the child-process environment. `doctor` still treats a missing `gh` executable as a later
-integration prerequisite rather than an offline-core failure.
-
-Git workspaces can authenticate over HTTPS with a token kept in the child-process environment, or
-over SSH using an explicitly supplied agent socket and protected SSH config file. The dispatcher
-does not inherit the caller's full environment or home directory; deployment must configure one
-credential path deliberately.
-
-The `--contract` mode is also read-only. It checks exact `git`, `gh`, and `codex` versions and
-proves that each configured Cloud environment is visible through `codex cloud list --json`. The
-pinned CLI's non-empty task schema and write commands remain disabled until dedicated contract
-fixtures cover them.
-
-The pinned `codex cloud exec` command accepts its Prompt as a positional argument and does not offer
-structured submit output. Consequently the dispatcher will not invoke it: the full Prompt would be
-visible in the process argument list, and a crash could leave an unidentifiable remote Task. The
-pre-submit persistence boundary is implemented, but remote submission remains fail-closed.
-
-The repository does not yet select or add a third-party build backend. Run it from `src/` as shown
-above; packaging can be added as a separate, reviewable tooling decision.
+The existing Cloud contract command is historical migration code. It must not be expanded or treated
+as the target executor contract.
 
 ## Test conventions
 
 - Unit tests must not use the network.
 - External executables are replaced with temporary fake scripts.
-- Time, UUIDs, and external responses should be injectable where they affect determinism.
-- Failure-path tests must assert that no external write was attempted.
-- Git write/recovery tests use a temporary local bare repository and never a configured GitHub
-  repository.
+- Time, UUIDs, paths, command results, and external responses are injected where they affect
+  determinism.
+- Failure-path tests assert that no external write was attempted.
+- Git tests use temporary local repositories and never a configured GitHub remote.
+- Runner tests operate on JSON/JSONL fixtures and temporary directories, not a real SSH daemon.
+- Publisher tests produce a publication plan or rejection; they do not push.
+- Slack tests cover only outbound rendering and deduplication; no inbound interface exists.
 - Test fixtures may contain fake tokens, but never copy a real credential into a fixture.

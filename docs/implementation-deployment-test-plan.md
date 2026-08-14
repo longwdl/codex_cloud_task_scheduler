@@ -1,911 +1,602 @@
-# Codex Cloud Task Scheduler：实施、部署与验收方案
+# Codex SSH CLI Task Scheduler：实施、部署与验收方案
 
-> 状态：规划基线（环境无关核心已开始实现）
+> 状态：已确认的实施基线
 >
-> 日期：2026-08-13
-> 需求来源：[ChatGPT 对话「Codex远程工作一致性」](https://chatgpt.com/s/t_6a7d2caae96481918a0f6ba442814c78)
+> 日期：2026-08-14
+>
+> 目标平台：Linux Control Host + 独立 Linux SSH Runner
 
-## 1. 结论
+## 1. 结论与范围
 
-本项目应实现为一个**无常驻 Web 服务的 systemd 薄调度器**：
+项目从 Codex Cloud 调度器调整为远程 Linux Codex CLI 调度器。Codex Cloud 不再处于执行
+主路径，已有 Cloud 代码在迁移期间可以保留但默认禁用。
 
 ```text
-GitHub Issues / Labels             人类任务事实与队列
-        │
-        ▼
-systemd timer + flock              周期触发与单实例保护
-        │
-        ▼
-Python dispatcher                  校验、认领、幂等、对账
-        │
-        ├── SQLite                 仅保存运行状态和恢复锚点
-        ├── gh CLI                 GitHub Issue/Branch/PR 适配器
-        └── Codex Cloud CLI        提交、查询、获取和应用 Diff
-                │
-                ▼
-Git branch + Draft PR + CI         代码事实与人工验收入口
+GitHub Issue / Label                 唯一人工输入和项目事实
+             │
+             ▼
+Linux Control Host
+├── Dispatcher                      单线程生命周期与对账
+├── SQLite                          WorkItem、Turn、恢复锚点
+├── Publisher                       机械校验并 push 确切 commit
+└── SlackReporter                   只读执行详情
+             │ restricted SSH
+             ▼
+Dedicated Linux Runner
+└── Codex CLI + per-Issue directory + per-Issue CODEX_HOME
+             │ bundle/result pulled by control host
+             ▼
+Stable branch + one Draft PR + CI   代码审核和人工合并入口
 ```
 
-第一版的明确边界：
+第一版明确边界：
 
-- Tracker 只实现 GitHub Issues；接口按可增加 Linear/Jira Adapter 设计。
-- Executor 只实现 Codex Cloud；为以后增加 Linux 本地 `codex exec` 保留接口。
-- 一台 Linux 控制节点；单个仓库最大并发为 1。
-- 调度器只创建任务分支和 Draft PR，不自动合并、不部署、不标记业务任务完成。
-- Issue、仓库内容、评论和 Cloud 输出均视为不可信输入。
-- SQLite 不是任务事实来源，只用于防重、恢复和审计。
-- Cloud Environment 默认禁用 Agent 阶段网络；确有需要时只允许任务所需域名和 HTTP 方法。
-- Agent 生成代码触发的 CI 属于不可信代码执行，CI 不得接触部署凭据、生产 Secret 或生产自托管 Runner。
-- 不开发自制看板、Redis、消息队列、多 Runner、Webhook Gateway 或 Kubernetes。
+- Tracker 只实现 GitHub Issues。
+- Executor 是通过 SSH 调用另一台 Linux 主机上的 `codex exec --json`。
+- Dispatcher、Publisher、SQLite 和 SlackReporter 位于同一台 Linux Control Host。
+- GitHub 是唯一人工输入渠道；Slack 严格只出不进。
+- 一个可执行 Issue 在完成前始终绑定同一个分支、目录、Codex session、Slack thread 和 PR。
+- 全局只允许一个活动 Codex turn，不按仓库并发。
+- Codex 负责修改、测试和本地 commit；Publisher 只校验并 push 已有 commit。
+- Codex Runner 没有 GitHub 写凭据。
+- 不自动 merge、release、deploy，也不接触生产基础设施或生产凭据。
+- 第一阶段 Runner 不做 Docker、UID 或 systemd 沙箱限制；整台 Runner 视为可丢弃边界。
+- Docker 隔离是后续加固阶段，不能作为第一阶段已经存在的安全控制。
 
-这与原始对话中的最终需求一致：MacBook 只用于下发任务和验收；长期在线 Linux 负责调度；Codex Cloud 负责执行；GitHub 保存可审查的任务和代码结果。
+## 2. 已确认的产品约定
 
-## 2. 当前事实与假设
+### 2.1 稳定 1:1:1 映射
 
-### 2.1 已核验事实
+```text
+1 executable Issue
+= 1 WorkItem
+= 1 stable branch
+= 1 runner directory
+= 1 CODEX_HOME
+= 1 Codex CLI session
+= 1 Slack thread
+= 0/1 Draft PR
+```
 
-- 当前工作目录为空，不是 Git 仓库；不存在源码、测试、CI、容器或部署配置。
-- 本机 `codex-cli` 版本为 `0.147.0`。
-- 该版本本机实测提供：
-  - `codex cloud exec`
-  - `codex cloud status`
-  - `codex cloud list --json`
-  - `codex cloud diff`
-  - `codex cloud apply`
-- 当前 `codex cloud exec` 没有 `--json`；`status` 也没有 JSON 输出。
-- 当前帮助中没有 Cloud Task 的 `wait`、`logs`、`message` 或 `cancel` 命令。
-- `codex exec --json` 是 Linux 本地非交互执行协议，不等于 `codex cloud exec`。
-- 本机尚未安装 `gh` CLI。
+Issue 中等待人工补充、重新进入 ready、规划、实现、测试、修复同一 PR 的过程都只是新的
+Turn，不产生新 WorkItem。只有原 Issue 完成且 PR 已合并后，新 bug 或新需求才创建新 Issue。
 
-这些是 2026-08-13 的本机快照，不应被当成永久 API 合同。部署前必须固定版本并运行合同测试。
+稳定分支不包含 attempt number：
 
-### 2.2 需要在实现前确认的配置
+```text
+codex/issue-<number>-<stable-issue-key-prefix>
+```
 
-以下信息不阻塞架构和测试开发，但阻塞真实 Cloud Smoke Test：
+`stable-issue-key-prefix` 从仓库身份和不可变 Issue 身份确定性计算，不能使用创建时间或本地
+随机数。相同 Issue 在任何状态流转后都解析成同一分支。
 
-1. 允许调度的 GitHub 仓库列表。
-2. 每个仓库的默认分支和 Codex Cloud Environment ID。
-3. 允许添加 `agent:ready` 的 GitHub 用户或团队。
-4. 每个仓库默认允许修改和禁止修改的路径。
-5. Draft PR 的必要 CI Check 名称。
-6. 日志和运行记录保留周期。
-7. Codex CLI 与 `gh` CLI 的首个固定版本。
+### 2.2 项目视角和任务视角
 
-### 2.3 绿地默认值
+- GitHub Issue/PR 是项目视角，也是所有人工输入和审批的入口。
+- Slack 是任务执行细节视角。Issue 保存 Slack thread 直达链接。
+- 人工 Slack 消息无论内容如何都不能进入 Prompt、改变状态或触发执行。
+- 建议一个项目使用一个私有 Slack channel，每个 WorkItem 使用一个 thread，避免 channel
+  数量无限增长。
 
-如果没有新的选择，第一版采用：
+### 2.3 单线程
 
-| 项目 | 默认值 |
-|---|---|
-| 运行时 | Python 3.12，运行时尽量只用标准库 |
-| 调度方式 | 每 2 分钟执行一次 oneshot sweep |
-| 全局并发 | 2 |
-| 单仓库并发 | 1 |
-| Tracker | GitHub Issues + Labels |
-| Executor | Codex Cloud |
-| 状态库 | SQLite，WAL 模式 |
-| 交付 | 独立分支 + Draft PR |
-| 自动合并/部署 | 禁止 |
-| Issue 评论输入 | 仅允许维护者的 `/codex-context` 评论 |
-| 失败策略 | 不确定时阻塞，禁止猜测性重试 |
+只有一个 Dispatcher 实例可以运行，只有一个 Turn 可以处于 `starting/running/publishing`。
+实现使用：
 
-## 3. 目标与非目标
+1. systemd 只启动一个服务实例；
+2. 进程启动时获取全局 `flock`；
+3. SQLite 唯一约束拒绝第二个活动 Turn；
+4. SSH Runner 再使用一个全局执行锁拒绝重入。
 
-### 3.1 MVP 目标
+SQLite 不承担多调度器租约或并发抢占协议。
 
-用户创建一张格式完整的 GitHub Issue，并由维护者添加 `exec:cloud` 和 `agent:ready` 后，调度器能够：
+## 3. 信任边界
 
-1. 确定性选取任务。
-2. 验证需求完整性和安全准入。
-3. 为运行生成唯一 `run_token`。
-4. 从记录的 `base_sha` 创建并推送任务分支。
-5. 向指定 Codex Cloud Environment 提交任务。
-6. 在后续 sweep 中对账 Cloud 状态。
-7. 完成后将 Cloud Diff 应用到任务分支。
-8. 检查修改路径、Diff 基础质量和敏感内容风险。
-9. 创建提交、推送分支并创建 Draft PR。
-10. 将 Issue 移到 `agent:review`，写回运行和 PR 链接。
-11. 在重启、超时或任一外部调用中断后安全恢复，且不静默重复提交。
+### 3.1 Control Host（高信任）
 
-### 3.2 非目标
+保存：
 
-- 不替代 GitHub Projects、Linear、Jira 或完整 Kanban。
-- 不托管聊天 UI；Codex session/task 只是一次运行记录。
-- 不在控制节点执行 Issue 中任意提供的测试命令。
-- 不直接连接 staging/production，不持有生产数据库或部署凭据。
-- 不自动处理数据库迁移、IAM、DNS、Kubernetes、Terraform Apply 等高风险工作。
-- 不提供多租户鉴权或公网服务。
-- 不承诺 exactly-once；目标是**可检测、可对账、默认不重复的 at-most-once 自动提交**。
+- GitHub App 私钥或受限凭据；
+- SQLite 和备份；
+- 仓库 mirror/quarantine；
+- Publisher；
+- Slack bot token；
+- Runner SSH 私钥和固定 host key。
 
-## 4. 事实来源与一致性规则
+不得执行：
 
-| 数据 | 权威来源 | SQLite 是否复制 |
-|---|---|---:|
-| 任务目标、范围、验收条件 | GitHub Issue | 保存提交时快照 Hash |
-| 队列状态 | GitHub `agent:*` Label | 保存期望状态 |
-| 人工决策 | 维护者 Issue 评论 | 保存纳入 Prompt 的评论 ID/Hash |
-| 代码基线 | Git `base_sha` | 是 |
-| Cloud 执行 | Codex Cloud Task ID | 是 |
-| 修改内容 | Git branch/commit | 保存 SHA |
-| 审核状态 | GitHub Draft PR/CI | 保存 PR 编号和最近 Check 状态 |
-| 调度过程 | SQLite + journald | 是 |
+- Issue 提供的验证命令；
+- Runner 返回的脚本或二进制；
+- Git hook、submodule helper、clean/smudge filter、textconv 或仓库自定义命令；
+- Agent 生成项目的构建和测试。
 
-一致性原则：
+### 3.2 Runner Host（低信任）
 
-- Issue 是任务主键；一次 Issue 可以有多次 Run。
-- Run 必须有独立 `run_token`、任务分支和 Cloud Task ID。
-- 认领时冻结 Issue 正文、允许评论 ID 和内容 Hash；运行过程中这些输入发生变化时，当前结果不得自动交付，必须阻塞并由人决定是否开启新 Run。
-- Cloud session/task 不是长期上下文的唯一来源；新 Run 应可从 Issue、Git 和上一 Run 摘要重建。
-- GitHub 与 SQLite 无法形成跨系统事务，所有写操作按 Saga 处理并提供对账逻辑。
-- 遇到外部结果不唯一或无法证明时，进入 `agent:blocked`，不自动再提交。
+第一阶段直接运行 Codex CLI，不增加 Docker 或 per-task UID 限制。每个 WorkItem 使用不同目录：
 
-## 5. GitHub 队列协议
+```text
+/srv/codex-runner/work-items/<repository-key>/issue-<number>/
+├── repo/
+├── codex-home/
+├── state/
+├── artifacts/
+└── tmp/
+```
 
-### 5.1 状态标签
+风险接受：运行用户能够访问的所有 Runner 数据都可能被删除或外传，磁盘可能被填满，Runner
+系统可能需要重建。Runner 因此不得保存：
 
-每张参与调度的 Issue 必须且只能存在一个 `agent:*` 状态：
+- GitHub 写凭据；
+- Control Host 登录凭据；
+- 生产、部署、数据库、云、Kubernetes 或个人凭据；
+- 个人文件或挂载的 Control Host 文件系统；
+- 能从 Runner 主动登录 Control Host 的 SSH key。
+
+Runner 丢失时，允许损失尚未 Publisher checkpoint 的改动和本地 Codex session 上下文。
+GitHub 已发布 commit、Issue/PR、Control Host SQLite 和审计记录不得受影响。
+
+### 3.3 后续 Docker 加固
+
+Docker 阶段才增加：
+
+- 每个活动 WorkItem 一个容器；
+- 只挂载该 WorkItem 目录；
+- 持久化 `repo/` 和 `codex-home/`；
+- CPU、内存、PID、磁盘和执行时限；
+- 丢弃 capabilities，禁止 `--privileged`；
+- 不挂载 Docker socket、SSH agent、Control Host 或其他 WorkItem；
+- 禁止访问内网和云 metadata，按需限制外网；
+- 容器内可拥有完成开发所需权限，但这些权限不能扩展到 Runner Host。
+
+Docker 不在当前离线逻辑和第一轮 SSH Fixture 的完成条件内。
+
+## 4. GitHub 协议
+
+### 4.1 状态标签
+
+每个参与调度的 Issue 必须恰好有一个状态标签：
 
 | 标签 | 含义 |
 |---|---|
-| `agent:ready` | 维护者确认可以自动执行 |
-| `agent:dispatching` | 已认领，正在建立运行和提交 Cloud Task |
-| `agent:running` | Cloud Task 已确定并执行/等待结果 |
-| `agent:review` | Draft PR 已创建，等待人工审核 |
-| `agent:needs-input` | 需求、范围或验收条件不完整 |
-| `agent:blocked` | 技术失败或状态存在歧义，需要人工处理 |
-| `agent:paused` | 不允许开始新运行 |
-| `agent:discard` | 当前结果不得应用或交付；当前 CLI 不保证能取消 Cloud Task |
+| `agent:ready` | 维护者确认可以开始或继续原 session |
+| `agent:dispatching` | 正在冻结输入并启动一个 Turn |
+| `agent:running` | 原 Codex session 正在执行 |
+| `agent:needs-input` | 原 session 暂停，等待 Issue 中补充信息 |
+| `agent:review` | Draft PR 等待人工审核，仍可恢复原 session |
+| `agent:blocked` | 外部状态歧义或安全校验失败 |
+| `agent:paused` | 人工暂停，不执行新 Turn |
+| `agent:completed` | PR 已合并且 WorkItem 关闭 |
 
 执行后端标签：
 
 ```text
-exec:cloud
-exec:local        # 仅保留，MVP 不实现
+exec:ssh-cli
 ```
 
-优先级标签：
+旧 `exec:cloud` 只用于历史记录，不触发新任务。
 
-```text
-priority:p0
-priority:p1
-priority:p2
-priority:p3
-```
+### 4.2 Issue 输入
 
-没有优先级时按 `p2`。选择顺序固定为：优先级升序（p0 最高）→ Issue 创建时间升序 → Issue 编号升序。
+Issue 模板继续使用：目标、背景、范围、非目标、验收条件、允许修改路径、验证命令、阻塞
+条件和部署限制。
 
-### 5.2 自动执行 Issue 模板
-
-以下段落必须存在且非空；`允许修改路径` 必须使用仓库相对路径：
-
-```markdown
-## 目标
-
-## 背景
-
-## 范围
-
-## 非目标
-
-## 验收条件
-- [ ] ...
-
-## 允许修改路径
-- src/...
-- tests/...
-
-## 验证命令
-~~~bash
-...
-~~~
-
-## 阻塞条件
-
-## 部署限制
-- 不部署 staging 或 production
-- 不自动合并 PR
-```
-
-验证命令是交给 Cloud Agent 和 CI 的任务要求，**控制节点不得直接执行 Issue 提供的命令**。
-
-### 5.3 安全准入
-
-只有同时满足以下条件才可调度：
-
-- 仓库位于静态 Allowlist。
-- Issue 为 Open。
-- 包含且仅包含一个状态标签 `agent:ready`。
-- 包含 `exec:cloud`，且不包含其他 `exec:*`。
-- `agent:ready` 由允许的维护者添加。
-- 通过 GitHub Timeline/Audit Event 验证最近一次 `agent:ready` 添加者；仅检查 Issue 当前 Label 不足以证明准入来源。
-- Issue 模板通过严格校验。
-- 不存在未完成的阻塞依赖。
-- 该仓库的活动 Run 数小于 `max_active`。
-- Issue 没有其他活动 Run。
-
-Prompt 只纳入：
+进入 Codex Prompt 的人工输入只有：
 
 - Issue 标题和正文；
-- 允许维护者发布、且以 `/codex-context` 开头的评论；
-- 调度器生成的固定约束；
-- Run Token、仓库、分支和 Base SHA。
+- allowlist 维护者发布的 `/codex-context` 评论；
+- 当前 PR 中经维护者确认并同步回 Issue 的处理要求；
+- Dispatcher 生成的固定安全约束和当前 Git 锚点。
 
-其他评论只用于人类讨论，不得进入 Prompt。
+其他 GitHub 评论和全部 Slack 内容不进入 Prompt。Issue 中的命令只是 Runner/Codex 的任务
+要求，Control Host 不能执行。
 
-## 6. 内部状态机与数据模型
+### 4.3 状态变化和输入漂移
 
-### 6.1 Run 状态
+每次 Turn 开始前冻结 Issue revision、允许评论 ID、Prompt SHA-256 和输入 HEAD。Turn 运行中
+Issue 再次变化时：
+
+- 不创建新 session、目录或分支；
+- 当前 Turn 结果不自动发布；
+- WorkItem 进入 `needs_input` 或 `blocked`；
+- 下一次显式 `agent:ready` 在原 session 中发送新的确定性输入。
+
+## 5. WorkItem、Turn 与状态机
+
+### 5.1 WorkItem 状态
 
 ```text
 discovered
-  → claimed
-  → branch_prepared
-  → dispatching
+  → preparing
+  → ready
   → running
-  → result_ready
-  → applying
-  → validating
-  → delivering
+  → waiting_input
   → review
+  → completed
 
-任意非终态
-  → needs_input | blocked | discarded
+任意非 completed 状态
+  → blocked | paused
+
+blocked | paused | waiting_input | review
+  → ready
 ```
 
-关键不变量：
+`completed` 是终态。自动化不得把 completed WorkItem 重新打开；新工作使用新 Issue。
 
-- 同一 `repository + issue_number` 最多一个活动 Run。
-- 同一仓库活动 Run 不超过配置的 `max_active`。
-- 未记录 `run_token` 前不得写外部状态。
-- 未记录 `base_sha` 和任务分支前不得提交 Cloud Task。
-- Cloud Task ID 不唯一或不可证明时不得再次自动提交。
-- Diff 未通过路径和安全校验时不得 commit/push/create PR。
-- PR 创建前必须能证明分支提交属于当前 Run。
+### 5.2 Turn 状态
 
-### 6.2 SQLite 最小表
+```text
+planned → starting → running → checkpointing → published → finished
+                     │              │
+                     └──────────────┴→ needs_input | failed | blocked | interrupted
+```
+
+一个 WorkItem 可以有多个 Turn，但同一时刻全局最多一个 Turn 活动。Turn number 只用于审计，
+不进入 branch、directory、session 或 PR 身份。
+
+### 5.3 最小持久化字段
+
+现有 `runs` 表保留以兼容已提交 schema。新增表使用 additive migration：
 
 ```sql
-CREATE TABLE runs (
-  run_id TEXT PRIMARY KEY,
+CREATE TABLE work_items (
+  work_item_id TEXT PRIMARY KEY,
   repository TEXT NOT NULL,
   issue_number INTEGER NOT NULL,
-  attempt_no INTEGER NOT NULL,
+  issue_node_id TEXT NOT NULL,
   state TEXT NOT NULL,
-  prompt_sha256 TEXT NOT NULL,
   base_branch TEXT NOT NULL,
-  base_sha TEXT,
-  task_branch TEXT,
-  cloud_environment_id TEXT NOT NULL,
-  cloud_task_id TEXT UNIQUE,
-  cloud_task_url TEXT,
-  cloud_diff_sha256 TEXT,
-  head_sha TEXT,
+  task_branch TEXT NOT NULL,
+  runner_directory TEXT NOT NULL,
+  codex_session_id TEXT UNIQUE,
+  slack_channel_id TEXT,
+  slack_thread_ts TEXT,
   pr_number INTEGER,
-  retry_count INTEGER NOT NULL DEFAULT 0,
+  base_sha TEXT NOT NULL,
+  last_published_sha TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  last_seen_at TEXT,
-  last_error_code TEXT,
-  last_error_redacted TEXT,
-  UNIQUE(repository, issue_number, attempt_no)
+  UNIQUE(repository, issue_number),
+  UNIQUE(repository, task_branch)
 );
 
-CREATE UNIQUE INDEX one_active_run_per_issue
-ON runs(repository, issue_number)
-WHERE state NOT IN ('review', 'needs_input', 'blocked', 'discarded');
-
-CREATE TABLE run_events (
-  event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id TEXT NOT NULL,
-  event_type TEXT NOT NULL,
-  event_time TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  FOREIGN KEY(run_id) REFERENCES runs(run_id)
+CREATE TABLE turns (
+  turn_id TEXT PRIMARY KEY,
+  work_item_id TEXT NOT NULL,
+  turn_number INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  issue_revision TEXT NOT NULL,
+  prompt_sha256 TEXT NOT NULL,
+  input_head_sha TEXT NOT NULL,
+  output_sha256 TEXT,
+  result_summary TEXT,
+  error_code TEXT,
+  started_at TEXT,
+  finished_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(work_item_id) REFERENCES work_items(work_item_id),
+  UNIQUE(work_item_id, turn_number)
 );
 ```
 
-正式实现使用版本化 migration；只做加法迁移。升级前备份 SQLite 文件，并执行 `PRAGMA integrity_check`。
+迁移只增加表、列和索引，不删除或重新解释既有 Cloud 字段。Cloud 数据保留为历史审计信息。
 
-### 6.3 外部写入幂等标记
+## 6. SSH Runner 协议
 
-- Branch：`codex/issue-<number>-<run-token-prefix>`
-- Commit trailer：`Codex-Run: <run_id>`
-- PR Head Branch：任务分支唯一对应一个 Run
-- Issue 评论：`<!-- codex-dispatcher:<run_id>:<event_type> -->`
-- Prompt 第一段包含：`Run token: <run_id>`
+### 6.1 第一阶段操作集合
 
-写评论、创建 PR 或切换标签前先查询对应标记；存在则复用，不重复创建。
-
-## 7. 一次 sweep 的确定性流程
-
-### 7.1 Preflight
-
-每次运行先检查：
-
-1. 配置 schema 和文件权限。
-2. SQLite migration 版本和完整性。
-3. `git`、`gh`、`codex` 版本与 Pin 一致。
-4. GitHub 凭据可读且仓库权限满足最小集合。
-5. `codex cloud list --env <id> --json` 返回合同测试支持的 Schema。
-6. 本地仓库 Mirror/Clone 没有未识别的脏状态。
-7. Base Branch 受保护，服务身份不能 Force Push、删除受保护分支或绕过 PR 审核。
-8. PR CI 的实际权限满足第 10.3 节的无 Secret 执行边界。
-
-任一全局 Preflight 失败：本轮不认领新任务，只允许进行不会放大风险的只读对账。
-
-### 7.2 先对账，再调度
-
-处理顺序固定：
-
-1. 对账 `dispatching/running/result_ready/applying/delivering` Run。
-2. 修复可证明的 GitHub Label/评论/PR 漂移。
-3. 处理已超时或结果歧义的 Run。
-4. 计算每个仓库剩余容量。
-5. 选择新的 `agent:ready` Issue。
-6. 每个仓库本轮最多认领一个新任务。
-
-### 7.3 认领与分支准备
-
-1. 在 SQLite 事务中创建 Run，生成 `run_id` 和 Prompt Hash。
-2. 把 GitHub Issue 从 `agent:ready` 切为 `agent:dispatching`。
-3. 冻结并记录 Issue/允许评论快照 Hash；后续任何输入变化都要求人工重启任务。
-4. 使用显式安全配置执行 `git fetch --prune --recurse-submodules=no`，解析并记录 `origin/<base_branch>` 的 `base_sha`。
-5. 从该 SHA 创建本地任务 worktree/branch。
-6. 推送空任务分支到 GitHub。
-7. 记录分支已准备完成。
-
-先推送任务分支的目的，是让 Cloud 从确定的输入分支运行，而不是在提交时临时解析不断变化的默认分支。
-
-### 7.4 Cloud 提交
-
-使用参数数组调用命令，禁止 `shell=True`。Prompt 优先从受限权限的标准输入或文件描述符传入，不放入命令行参数；若当前 CLI 不支持，Phase 0 必须评估 `/proc`/进程列表暴露并使用专用主机和 `hidepid` 等隔离后才能上线：
+SSH 远端入口只接受版本化 JSON 请求：
 
 ```text
-codex cloud exec
-  --env <environment_id>
-  --branch <task_branch>
-  <deterministic_prompt>
+prepare     创建或验证 WorkItem 目录
+start       启动首次 codex exec
+resume      恢复已绑定 session
+status      读取结构化状态
+export      输出 Git bundle 和结果 manifest
+stop        终止当前 Codex 进程，不删除目录
+archive     仅完成后的显式清理入口，第一阶段默认禁用
 ```
 
-提交前必须把 Run 标为 `dispatching` 并保存：
+即使第一阶段不做 Docker 限制，也必须从一开始禁止：
 
-- Environment ID
-- Task Branch
-- Prompt Hash
-- 提交开始时间
-- 提交前该 Environment 的 Task 列表快照 ID 集合
+- `shell=True`；
+- 将 Issue/Prompt 放进 argv；
+- 任意远端命令、路径、环境变量、Git URL 或 refspec；
+- 关闭 SSH host key 校验；
+- SSH agent、端口或 X11 转发；
+- Runner 主动连接 Control Host。
 
-提交成功后解析 Task ID，立即保存，再写 GitHub 评论和 `agent:running`。
+Prompt 和 JSON 请求通过 stdin 传输；输出设字节上限并做脱敏。
 
-#### Cloud 提交崩溃窗口
+### 6.2 Codex CLI 调用
 
-`cloud exec` 当前没有 JSON 输出和调用方提供的幂等键，因此“Cloud 已创建 Task，但本地尚未保存 Task ID”无法靠本地事务完全消除。
-
-恢复规则：
-
-1. 查询同 Environment 在提交时间窗后新增的 Task。
-2. 只有在 Branch、时间、标题/Prompt Token 等合同字段能唯一对应当前 Run 时才自动补记。
-3. 没有候选：允许在配置的短暂宽限期后重查。
-4. 多个候选或字段不足：转 `agent:blocked`，禁止自动重提。
-
-这是 fail-closed 的 at-most-once 策略：宁可需要人工绑定 Task ID，也不在夜间静默运行两份任务。
-
-### 7.5 Cloud 状态对账
-
-优先使用 `codex cloud list --env <id> --json` 的结构化输出；`status` 的文本输出只用于诊断，不作为未经合同测试的状态机输入。
-
-分类：
-
-- Running/Pending：更新 `last_seen_at`，结束本次 sweep。
-- Success/Ready：记录结果已准备，进入 Apply 阶段。
-- Failed：写脱敏错误摘要，进入 `agent:blocked`。
-- Unknown/Missing：达到宽限期前保持；超期后 `agent:blocked`。
-- Issue 已是 `agent:discard`：不得 Apply，不得建 PR；保存 Task 终态后进入 `discarded`。
-
-当前 CLI 无稳定 Cancel 命令，因此 `agent:discard` 的承诺是“不采纳结果”，不是“立即停止 Cloud 计费或运行”。
-
-### 7.6 Apply、校验与交付
-
-1. 确认 worktree 位于记录的任务分支和预期 Head。
-2. 再次计算 Issue/允许评论快照 Hash；与提交快照不一致时阻塞，不 Apply。
-3. 在 `0600` 的 Run 私有临时文件中接收 `codex cloud diff <task_id>`，流式计算 SHA-256；不得写入日志，保留期结束后安全删除。
-4. 在干净 worktree 中运行 `codex cloud apply <task_id>`。
-5. 如果在 Apply 阶段崩溃：
-   - worktree 干净：可重试 Apply；
-   - worktree Diff Hash 与 Cloud Diff 可证明一致：继续校验；
-   - 其他情况：阻塞，不自动清理或覆盖。
-6. 执行确定性的本地安全检查：
-   - `git diff --check`
-   - 修改文件集合为 `允许路径 ∩ 仓库配置 Allowlist`
-   - 不命中硬 Denylist
-   - 无子模块 URL、Git Hook、凭据文件或二进制异常增量
-   - 可选 Secret Scanner 通过
-7. 所有 Git 命令显式禁用 Hook 和危险本地配置：使用专用空 Git Config、`core.hooksPath=/dev/null`、禁用递归 Submodule，并拒绝仓库要求的未知 Clean/Smudge Filter、外部 Diff/Textconv 和自定义 Protocol。
-8. 不执行 Issue 中提供的任意 Shell 命令；业务验证由 Cloud 和无 Secret PR CI 执行。
-9. 创建包含 `Codex-Run` Trailer 的 Commit。
-10. Push 任务分支。
-11. 按 Head Branch 查询现有 PR；不存在才创建 Draft PR。
-12. PR Body 包含 Issue、Run ID、Base SHA、Cloud Task URL、Diff Hash、已运行的调度器检查和 CI 状态；未知或未完成的 CI 必须标为 Pending，不得写成通过。
-13. Issue 切为 `agent:review`，写回 PR。
-
-硬 Denylist 默认包含：
+首次 Turn：
 
 ```text
-.env
-.env.*
-*.pem
-*.key
-id_rsa*
-.git/**
-.github/workflows/**
-CODEOWNERS
-infra/production/**
-terraform/production/**
+cwd=<work-item>/repo
+CODEX_HOME=<work-item>/codex-home
+codex exec --json --output-schema <fixed-schema> -
 ```
 
-仓库可增加 Deny 条目，不得删除全局敏感条目。确需修改 CI、生产 IaC 或权限配置时，必须脱离无人值守队列人工执行。
+捕获 `thread.started.thread_id`，只能在 `codex_session_id IS NULL` 时绑定。
 
-## 8. 建议代码结构
+后续 Turn：
 
 ```text
-codex_cloud_task_scheduler/
-├── AGENTS.md
-├── README.md
-├── pyproject.toml
-├── src/codex_dispatcher/
-│   ├── __main__.py
-│   ├── cli.py
-│   ├── config.py
-│   ├── domain.py
-│   ├── scheduler.py
-│   ├── state_store.py
-│   ├── migrations/
-│   │   └── 001_initial.sql
-│   ├── prompt_builder.py
-│   ├── command_runner.py
-│   ├── redaction.py
-│   ├── trackers/
-│   │   ├── base.py
-│   │   └── github_cli.py
-│   ├── executors/
-│   │   ├── base.py
-│   │   └── codex_cloud_cli.py
-│   └── delivery/
-│       └── git_pr.py
-├── prompts/
-│   └── cloud-task.md
-├── config/
-│   └── dispatcher.example.toml
-├── systemd/
-│   ├── codex-dispatcher.service
-│   └── codex-dispatcher.timer
-├── tests/
-│   ├── unit/
-│   ├── integration/
-│   ├── contract/
-│   ├── fixtures/
-│   └── fake_bin/
-└── docs/
-    ├── architecture.md
-    ├── deployment.md
-    ├── runbook.md
-    └── test-plan.md
+cwd=<work-item>/repo
+CODEX_HOME=<work-item>/codex-home
+codex exec resume <recorded-session-id> --json --output-schema <fixed-schema> -
 ```
 
-适配器接口只暴露确定性语义，例如：
+禁止 `--last`、`--ephemeral` 和自动创建替代 session。JSONL 解析错误、缺少 `thread_id`、返回
+不同 session、超时或 SSH 中断都进入对账状态，不能盲目重放 Prompt。
 
-```python
-class Tracker:
-    def list_ready(self, repository): ...
-    def validate_task(self, task): ...
-    def claim(self, task, run_id): ...
-    def set_state(self, task, state): ...
-    def upsert_run_comment(self, task, event, body): ...
-    def find_pr_by_branch(self, repository, branch): ...
+### 6.3 Turn 结果 Schema
 
-class Executor:
-    def preflight(self, environment_id): ...
-    def submit(self, request): ...
-    def reconcile(self, external_task_id): ...
-    def fetch_diff(self, external_task_id): ...
-    def apply(self, external_task_id, worktree): ...
+最后结果至少包含：
+
+```json
+{
+  "status": "completed | needs_input | blocked",
+  "summary": "bounded text",
+  "needs_input": ["bounded question"],
+  "tests": [{"name": "...", "status": "passed | failed | not_run"}],
+  "changed_paths": ["repo/relative/path"],
+  "next_step": "bounded text"
+}
 ```
 
-Jira 后续通过 REST API 实现 `Tracker`，不应让模型或 MCP 负责认领、状态转换和幂等控制。MCP 可用于 Agent 获取语义上下文，但不是调度事务协议。
+该结果是 Agent 声明，不是 Control Host 已验证事实。Publisher 的机械校验和 GitHub CI 是独立
+证据。
 
-## 9. 分阶段实施步骤
+## 7. Publisher 协议
 
-### Phase 0：合同验证 Spike
+Publisher 与 Dispatcher 位于同一 Control Host。推荐不同 Unix 用户和本地 Unix socket；
+第一版也可以是严格隔离的模块，但接口不得扩展为任意 Git wrapper。
 
-目标：先证明外部 CLI 能支撑自动化，不写业务调度器。
+调用方只提供：
 
-交付：
+```json
+{
+  "work_item_id": "stable id",
+  "expected_head_sha": "full lowercase object id"
+}
+```
 
-- 固定 `codex`、`gh`、`git` 版本矩阵。
-- 保存脱敏的 `codex cloud list --json` Fixture 和 JSON Schema。
-- 验证 `cloud exec` 输出中 Task ID 的可解析方式。
-- 验证 Task List 是否包含可用于崩溃恢复的 Branch/时间/标题字段。
-- 验证 `cloud diff` 和 `cloud apply` 对同一 Task 的行为。
-- 建立一个专用私有 Fixture Repo 和测试 Cloud Environment。
+Publisher 从可信 SQLite/config 中解析 repository、branch、base、quarantine 路径和 remote。
+固定流程：
 
-Go/No-Go：
+1. 将 Runner bundle 放入新建的 quarantine 目录。
+2. `git bundle verify` 和 `git fsck`。
+3. 验证 expected head 存在且从记录的 base/last published SHA 可达。
+4. 验证仅包含允许的 commit 和路径，未命中硬 Denylist 和凭据检测。
+5. 禁用 hooks、submodule、自定义 protocol、filter、textconv、proxy 和任务提供的 Git config。
+6. 验证远端当前任务分支仍等于记录的 `last_published_sha`。
+7. 使用完整 SHA 推送到唯一记录的任务 ref；禁止 force、delete、tag 和其他 ref。
+8. 读回远端 ref，只有完全相等才记录 `last_published_sha`。
 
-- Task ID 可稳定获得，或提交后可唯一对账：Go。
-- 无法唯一识别提交结果：MVP 仍可做，但真实运行必须在该窗口 fail closed，并提供人工绑定命令。
-- `diff/apply` 无法稳定脚本化：停止自动 PR，MVP 降级为只提交 Cloud Task 和回写 URL。
+Publisher 不运行测试、不修改文件、不 stage、不 commit、不做语义代码审核，也不 merge。
 
-### Phase 1：领域模型、配置和 SQLite
+GitHub 凭据优先使用只安装到 allowlist 仓库的 GitHub App。App 私钥只在 Control Host，按操作
+生成短期 token：Dispatcher 使用 Issue/PR write + Contents read；Publisher 才使用 Contents
+write。Runner 不接收任何 GitHub write token。
 
-交付：
+## 8. SlackReporter
 
-- 配置解析与严格 Schema。
-- Run 状态机和转换守卫。
-- SQLite migration、事务和对账查询。
-- 结构化日志与脱敏。
-- `doctor`、`run-once --dry-run`、`status` 命令。
+SlackReporter 只调用出站消息 API：
 
-完成标准：所有领域逻辑可在无网络、无 GitHub、无 Codex 的测试中运行。
+- 第一次创建 thread root，保存 channel ID、thread timestamp 和 permalink；
+- 后续 Turn 向同一 thread 追加状态；
+- Issue 中写入 thread permalink；
+- 超时重试不能创建第二个 thread；
+- 发送前统一脱敏和长度限制；
+- 不发送 Prompt、推理、完整 stdout/stderr、完整 diff 或凭据。
 
-### Phase 2：GitHub Tracker Dry-run
+不实现 Slack Events API、Socket Mode、slash command、interaction endpoint 或消息读取权限。
+Slack 中人工消息对系统行为没有任何影响。
 
-交付：
+## 9. 确定性调度流程
 
-- `gh` 命令封装，全部使用参数数组和 JSON 输出。
-- Issue 模板解析、安全准入、排序和并发计算。
-- Dry-run 只报告“会认领哪张 Issue”，不修改 GitHub。
-- Fake `gh` 集成测试。
+每轮处理顺序固定：
 
-完成标准：在真实 Allowlist 仓库上连续运行 24 小时 Dry-run，无误选、无外部写入、无凭据泄漏。
+1. 获取全局进程锁。
+2. 检查 SQLite、磁盘、配置、工具版本和唯一活动 Turn。
+3. 对账上次 `starting/running/checkpointing` Turn；外部状态不明确则停止。
+4. 对账 Publisher push、Draft PR、Issue label 和 Slack 输出。
+5. 如果没有活动 Turn，按优先级、创建时间和 Issue number 选择一个 `agent:ready` Issue。
+6. 新 Issue 创建 WorkItem；既有 Issue 恢复原 WorkItem。
+7. 冻结 Issue revision、Prompt hash、input HEAD，创建下一个 Turn。
+8. 通过 SSH `start` 或 `resume` 原 session。
+9. 解析、脱敏并保存结构化结果。
+10. 若有安全且一致的 checkpoint，拉取 bundle 并调用 Publisher。
+11. 创建/更新唯一 Draft PR、Issue 和 Slack thread。
+12. 根据结构化结果进入 `needs_input`、`review` 或 `blocked`。
 
-### Phase 3：认领、分支和 Cloud Submit
+同一个 Issue 即使多次从 `needs_input/review` 回到 `ready`，步骤 6 也只能解析到原 WorkItem。
 
-交付：
+## 10. 实施阶段
 
-- GitHub 状态切换和幂等评论。
-- Mirror/Worktree/Branch 管理。
-- 确定性 Prompt Builder 和 Prompt Hash。
-- Cloud 提交、Task ID 保存与崩溃窗口恢复。
-- 暂不自动 Apply/PR；结果只回写 Cloud URL。
+### Phase A：文档与离线核心
 
-完成标准：Fixture Repo 连续处理 10 次测试 Run，无重复 Cloud Task；注入每个崩溃点后能恢复或明确阻塞。
+不需要 Linux、网络、GitHub/Slack/Codex 凭据：
 
-### Phase 4：Diff Apply 与 Draft PR
+- WorkItem/Turn 领域对象、状态机和确定性 ID；
+- 稳定 branch 和 runner directory 计算；
+- additive SQLite migration 和约束；
+- Runner/Publisher 请求与结果 Schema；
+- Codex JSONL session 事件解析；
+- Publisher 纯校验计划，不执行 push；
+- Slack 出站消息模型和去重键；
+- 全部 Fake 和故障路径单测。
 
-交付：
+### Phase B：本地 Git bundle/quarantine
 
-- Cloud Diff 获取与 Hash。
-- 安全 Apply、路径校验、Denylist 和 Secret Scan Hook。
-- Commit、Push、Draft PR、CI 状态回写。
-- `agent:discard` 行为。
-- 无 Secret CI 权限审计和恶意源码泄露测试。
+仍不访问 GitHub：
 
-完成标准：Fixture Repo 的只改 README 任务自动形成 Draft PR；越界路径、敏感文件和冲突 Patch 均被阻止。
+- 临时 bare repo 和独立 task repo；
+- base bundle、result bundle、verify/fsck；
+- commit ancestry、fast-forward、path policy；
+- hooks/config/protocol 防护；
+- 崩溃恢复和重复 import 幂等。
 
-### Phase 5：systemd 部署与运维
+### Phase C：Linux SSH Runner Fixture
 
-交付：
+- 两台 Linux：Control Host 和专用 Runner；
+- 固定 OpenSSH、Git、Codex CLI 版本；
+- forced-command Runner wrapper；
+- 首次 `codex exec --json` 和 session ID 捕获；
+- Runner 重启后从相同目录和 CODEX_HOME resume；
+- 第一阶段不增加 Docker 或 per-task OS 隔离。
 
-- 加固后的 service/timer。
-- 备份、升级、回滚和灾难恢复 Runbook。
-- 结构化 journald 查询示例。
-- 24～48 小时 Soak Test。
+### Phase D：Publisher + GitHub Fixture
 
-### Phase 6：可选扩展
+- GitHub App/PAT 权限合同；
+- Publisher 仅推任务分支；
+- Draft PR 和 Issue 状态；
+- 主分支保护可用性核验；
+- 故障注入：push 成功但 SQLite 未更新、PR 成功但评论未更新。
 
-按优先级：
+### Phase E：Slack 只读投影
 
-1. Jira/Linear Tracker Adapter。
-2. Linux 本地 `codex exec --json` Executor。
-3. 通知渠道。
-4. 多仓库并发优化。
+- 只出站 token 和权限；
+- thread 创建、复用、permalink 回写；
+- 脱敏、长度和重试幂等；
+- 证明 Slack 消息不能进入调度路径。
 
-多 Runner、自动合并和自动部署不因完成 MVP 而自动进入范围，必须重新做风险评审。
+### Phase F：Docker 加固
 
-## 10. Linux 部署步骤
+- 每任务容器和持久目录；
+- 资源、网络、capability、mount 和 secret 限制；
+- 不挂载 Docker socket，不使用 privileged；
+- 重做攻击面和恢复验收后才用于高价值仓库。
 
-### 10.1 主机规格
+## 11. Linux 部署基准
 
-Cloud 控制面建议：
+### 11.1 主机规格
+
+| 角色 | Fixture 最低 | 推荐长期使用 |
+|---|---:|---:|
+| Control Host | 2 vCPU / 4 GiB / 50 GiB SSD | 4 vCPU / 8 GiB / 100 GiB |
+| Runner Host | 4 vCPU / 8 GiB / 100 GiB SSD | 8 vCPU / 16 GiB / 500 GiB NVMe |
+
+无须 GPU。全局单 Turn 使 CPU/RAM 不随开放 Issue 数量增长；磁盘按 repo、依赖缓存和 session
+数量增长。Runner 可用空间低于 15% 时不得启动新 Turn。
+
+### 11.2 Control Host 目录
 
 ```text
-1 vCPU
-2 GiB RAM
-20～30 GiB SSD（仓库较大时按 Clone/Worktree 容量增加）
-1 GiB swap
-Debian/Ubuntu Server，无 GUI
+/opt/codex-dispatcher/releases/<version>/
+/opt/codex-dispatcher/current
+/etc/codex-dispatcher/config.toml
+/var/lib/codex-dispatcher/state.db
+/var/lib/codex-dispatcher/repos/
+/var/lib/codex-dispatcher/quarantine/
+/var/lib/codex-dispatcher/backups/
+/run/codex-dispatcher/dispatcher.lock
 ```
 
-这只适用于 Cloud Executor。若启用本地 `codex exec` 并在 Linux 上构建目标项目，资源需求由目标项目决定，建议从 4 vCPU / 8 GiB RAM 起评估。
+SQLite 使用 Online Backup API；WAL 模式下禁止仅复制主 DB 文件。GitHub、Slack 和 SSH 凭据
+不写 TOML、仓库、Issue、Prompt 或日志。
 
-### 10.2 目录和身份
-
-使用专用 Unix 用户，不与个人 Shell 或生产服务共用：
+### 11.3 Runner 目录
 
 ```text
-/opt/codex-dispatcher/                 只读应用版本
-/etc/codex-dispatcher/config.toml      非敏感配置
-/var/lib/codex-dispatcher/state.db     SQLite
-/var/lib/codex-dispatcher/repos/       Mirror/Worktree
-/var/lib/codex-dispatcher/codex-home/  专用 Codex 登录状态
-/run/codex-dispatcher/                 锁文件
+/opt/codex-runner/runnerctl
+/etc/codex-runner/config.json
+/srv/codex-runner/work-items/
+/run/codex-runner/active.lock
 ```
 
-GitHub Token 使用 systemd Credential 或权限为 `0600` 的独立凭据文件，不写入 TOML、仓库、Prompt、Issue 或 EnvironmentFile。
+Runner 的 SSH host key 固定在 Control Host。禁止 `StrictHostKeyChecking=no`、agent forwarding、
+port forwarding 和 X11 forwarding。
 
-### 10.3 凭据权限
+### 11.4 资源和保留
 
-优先使用专用 GitHub App Installation Token；个人 MVP 也可使用 Fine-grained PAT，但必须限制到 Allowlist 仓库。注意：GitHub Token 的 Contents 权限通常是**仓库级**，不能真正限制为“仅任务分支”；分支级边界必须由受保护分支、Ruleset、专用服务身份和禁止 Force Push/Delete 共同实现。最低需要：
+- 单个 WorkItem 默认磁盘预算 20 GiB；大型项目显式提高。
+- completed WorkItem 默认保留 7 天后归档。
+- `repo/`、`codex-home/` 和 manifest 同生共灭。
+- 不自动删除 `blocked` 或 `needs_input` WorkItem。
+- Control Host 每日 SQLite online backup，并保留 GitHub/Slack 映射。
 
-- Metadata：Read
-- Issues：Read/Write
-- Contents：Read/Write（权限技术上覆盖仓库内容；应用只允许写任务分支）
-- Pull requests：Read/Write
-- Checks/Actions：Read（如果需要读取 CI）
+## 12. 可测试验收标准
 
-Codex 登录属于 `codex-dispatcher` 用户，并将 `CODEX_HOME` 指向专用 StateDirectory。Cloud Environment 不配置生产数据库、生产 SSH、部署或高权限云凭据。
-
-PR CI 必须满足：
-
-- `GITHUB_TOKEN` 默认 `contents: read`，仅给 Check 所需的最小权限。
-- 不向 `pull_request` 工作流提供仓库/环境 Secret；禁止使用会在不可信代码上暴露 Secret 的 `pull_request_target` 设计。
-- 不调度到可访问内网、生产网络或主机持久凭据的自托管 Runner；Fixture/初期业务仓库优先使用 GitHub 托管 Runner。
-- 构建容器没有 Docker Socket、云实例角色、Kubeconfig、SSH Agent 或持久 Volume。
-- CI 结果只是 PR 审核证据；调度器不能把“Job 已启动”或“状态未知”表述为测试通过。
-
-### 10.4 安装和 Preflight
-
-部署时执行而不是在本文档阶段执行：
-
-1. 安装并固定 Python、Git、`gh` 和 `codex` 版本。
-2. 以专用用户完成 `codex login`。
-3. 配置 GitHub Credential。
-4. 部署版本化应用目录和虚拟环境。
-5. 写入配置，权限设为 root 可写、服务用户可读。
-6. 运行：
+### 12.1 离线门槛
 
 ```bash
-codex-dispatcher doctor --config /etc/codex-dispatcher/config.toml
-codex-dispatcher run-once --dry-run --config /etc/codex-dispatcher/config.toml
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+PYTHONPATH=src python3 -m compileall -q src tests
+git diff --check
 ```
 
-7. `doctor` 必须检查版本 Pin、凭据可用性、Environment JSON Schema、仓库权限、磁盘空间、SQLite 和工作目录权限。
+测试不得依赖网络、真实 GitHub/Slack/OpenAI 凭据或 Linux-only 功能。外部命令使用临时 fake
+可执行文件，Git 测试只使用临时本地仓库。
 
-### 10.5 systemd 单元建议
-
-```ini
-# /etc/systemd/system/codex-dispatcher.service
-[Unit]
-Description=Codex Cloud task dispatcher sweep
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-User=codex-dispatcher
-Group=codex-dispatcher
-WorkingDirectory=/opt/codex-dispatcher/current
-StateDirectory=codex-dispatcher
-RuntimeDirectory=codex-dispatcher
-UMask=0077
-Environment=PYTHONUNBUFFERED=1
-Environment=CODEX_HOME=/var/lib/codex-dispatcher/codex-home
-LoadCredential=github_token:/etc/credstore/codex-dispatcher-github-token
-ExecStart=/usr/bin/flock -n /run/codex-dispatcher/dispatcher.lock /opt/codex-dispatcher/current/.venv/bin/codex-dispatcher run-once --config /etc/codex-dispatcher/config.toml
-NoNewPrivileges=true
-PrivateTmp=true
-PrivateDevices=true
-ProtectSystem=strict
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
-LockPersonality=true
-```
-
-```ini
-# /etc/systemd/system/codex-dispatcher.timer
-[Unit]
-Description=Run Codex Cloud task dispatcher periodically
-
-[Timer]
-OnBootSec=2min
-OnUnitInactiveSec=2min
-Persistent=true
-RandomizedDelaySec=15s
-Unit=codex-dispatcher.service
-
-[Install]
-WantedBy=timers.target
-```
-
-正式启用前应使用 `systemd-analyze security codex-dispatcher.service` 检查加固项，并验证 `StateDirectory` 在 `ProtectSystem=strict` 下仍可写。
-
-### 10.6 发布策略
-
-```text
-/opt/codex-dispatcher/releases/<version>
-/opt/codex-dispatcher/current -> releases/<version>
-```
-
-发布流程：
-
-1. 停止 Timer，等待当前 oneshot 结束。
-2. 使用 SQLite Online Backup API 或 `sqlite3 state.db '.backup ...'` 备份（WAL 模式下禁止只复制主 DB 文件），并执行 Integrity Check。
-3. 安装新版本到独立 Release 目录。
-4. 执行 migration dry-run、单元/合同测试和 `doctor`。
-5. 切换 `current` Symlink。
-6. 手工运行一次 Dry-run，再运行一次真实 Sweep。
-7. 恢复 Timer，观察至少两个周期。
-
-生产启用、停用或切换版本属于外部状态变更，执行前仍需明确授权。
-
-## 11. 可测试的验收标准
-
-### 11.1 单元与集成测试门槛
-
-- Python 类型检查、Lint、单元测试全部通过。
-- 核心状态机、排序、模板解析、幂等和恢复分支覆盖率不低于 95%。
-- 全项目语句覆盖率不低于 85%；不得通过排除核心文件或弱化断言达标。
-- 所有时间、UUID、命令和外部响应均可注入 Fake，测试不得依赖真实网络。
-- 集成测试使用临时 Git Repo、临时 SQLite 和 Fake `gh`/`codex` 可执行文件。
-
-### 11.2 验收用例矩阵
+### 12.2 验收矩阵
 
 | ID | 场景 | 可观察通过标准 |
 |---|---|---|
-| AC-001 | 空队列 | Sweep 退出码 0；无 GitHub/Cloud 写调用 |
-| AC-002 | 非 Allowlist 仓库 | Issue 不被认领；记录拒绝原因 |
-| AC-003 | 缺少必填段落 | Issue 进入 `agent:needs-input`；Cloud 调用数为 0 |
-| AC-004 | Ready Label 非允许维护者添加 | 不认领；记录安全拒绝事件 |
-| AC-005 | 多个 `agent:*` 状态 | 不认领；进入可诊断异常，不自行猜状态 |
-| AC-006 | 优先级排序 | p0 先于 p1/p2/p3；同级按创建时间和编号稳定排序 |
-| AC-007 | 单仓库并发 | 已有 Active Run 时，同仓库第二张 Issue 不提交 |
-| AC-008 | 跨仓库并发 | 未超过全局上限时，两个仓库可各运行一个任务 |
-| AC-009 | Dry-run | 输出候选和原因；GitHub、Git Remote、Cloud 写调用均为 0 |
-| AC-010 | 认领崩溃恢复 | SQLite 已有 Run、Issue 仍 Ready 时，下轮补齐状态而不新建 Run |
-| AC-011 | 分支幂等 | 同 Run 重试复用相同分支和 Base SHA，不新建第二分支 |
-| AC-012 | Cloud 正常提交 | Task ID 在任何 `agent:running` 写入前持久化 |
-| AC-013 | Cloud 提交后崩溃且唯一候选 | 下轮唯一关联原 Task，Cloud Submit 调用总数为 1 |
-| AC-014 | Cloud 提交后崩溃且候选歧义 | Run 进入 Blocked；Cloud Submit 调用总数保持 1 |
-| AC-015 | Cloud Task 运行中 | 只更新 Last Seen；不 Apply、不建 PR |
-| AC-016 | Cloud Task 失败 | Issue 进入 Blocked；评论包含脱敏错误码和 Task URL |
-| AC-017 | Discard 运行结果 | 不调用 Apply、不 Commit、不 Push、不建 PR |
-| AC-018 | Apply 正常 | Applied Diff Hash 与记录的 Cloud Diff Hash 一致 |
-| AC-019 | Apply 中途崩溃且 Diff 一致 | 下轮从校验继续，不重复 Apply |
-| AC-020 | Apply 后出现未知脏改动 | Run Blocked；不清理、不覆盖、不交付 |
-| AC-021 | 越界路径 | 修改路径超 Allowlist 时 Blocked；无 Commit/Push/PR |
-| AC-022 | 命中硬 Denylist | `.env`/密钥/Workflow/生产 IaC 修改被拒绝 |
-| AC-023 | Diff 格式错误 | `git diff --check` 失败时不交付 |
-| AC-024 | PR 创建前崩溃 | 若分支已 Push，下轮按 Head Branch 创建一次 PR |
-| AC-025 | PR 创建后崩溃 | 下轮发现既有 PR，不创建重复 PR，补齐 Issue 状态 |
-| AC-026 | 评论幂等 | 同 Run/Event Marker 最多一条评论 |
-| AC-027 | 日志脱敏 | PAT、Authorization Header、Codex Auth、Prompt 全文不出现在日志 |
-| AC-028 | Issue Shell 注入 | 验证命令只进入 Cloud Prompt；控制节点不执行该命令 |
-| AC-029 | CLI Schema 漂移 | `doctor` 失败；本轮禁止新 Dispatch |
-| AC-030 | CLI 版本漂移 | 与 Pin 不一致时 Preflight 失败，除非显式更新合同 Fixture |
-| AC-031 | SQLite 损坏 | 不认领新任务；给出恢复指引；不自动新建空库覆盖 |
-| AC-032 | 磁盘空间不足 | 低于阈值时不认领；已有任务只做只读对账 |
-| AC-033 | Timer 重叠 | 第二实例因 systemd/flock 不运行；无重复提交 |
-| AC-034 | 主机重启 | 下一周期恢复 Running Run；不重复 Cloud Submit |
-| AC-035 | 无自动高风险动作 | 全链路不存在 merge、deploy、release、生产 DDL/DML 调用 |
-| AC-036 | Issue 快照漂移 | 运行中修改正文或允许评论后，结果不得 Apply；Run 进入 Blocked/Needs Input |
-| AC-037 | Ready 准入审计 | 非允许维护者添加或重新添加 Ready Label 时不认领 |
-| AC-038 | Git Hook/Filter 注入 | 仓库 Hook、未知 Filter、递归 Submodule 或自定义 Protocol 均不执行 |
-| AC-039 | Prompt 进程可见性 | Prompt 不出现在日志；若作为 argv 传递，非服务用户无法从进程列表读取 |
-| AC-040 | PR CI Secret 隔离 | 恶意源码尝试读取 Secret/云身份/内网时均不可得且测试失败可见 |
-| AC-041 | 受保护分支 | 服务身份对默认分支的 Direct/Force Push/Delete 均被 GitHub 拒绝 |
-| AC-042 | WAL 一致备份 | 并发写入期间生成的备份可通过 Integrity Check 并恢复全部已提交 Run |
+| AC-001 | 首次发现 Issue | 只创建一个 WorkItem，branch/directory 稳定 |
+| AC-002 | 同 Issue 再次 ready | 复用原 WorkItem、branch、directory，不创建第二个 |
+| AC-003 | 首次 Codex Turn | 只接受一个 `thread.started`，绑定 session ID |
+| AC-004 | 后续补充 | 使用原 session ID 和 `resume`，turn number +1 |
+| AC-005 | session ID 冲突 | WorkItem blocked，不自动新建 session |
+| AC-006 | 已 completed Issue 再次 ready | 拒绝执行，要求新 Issue |
+| AC-007 | 全局单线程 | 第二个活动 Turn 被 SQLite 和进程锁拒绝 |
+| AC-008 | Prompt 确定性 | 相同输入得到相同 bytes 和 SHA-256 |
+| AC-009 | Issue 运行中漂移 | 当前结果不发布；仍保留原 session/branch |
+| AC-010 | Slack 人工消息 | 系统没有入站处理接口，Codex 调用数为 0 |
+| AC-011 | Slack thread 幂等 | 重试复用同一个 thread/permalink |
+| AC-012 | Runner 无 GitHub 写权限 | Codex 环境中无 GitHub write token/SSH key |
+| AC-013 | Publisher 参数注入 | 任意 URL/ref/path/option 字段在解析阶段拒绝 |
+| AC-014 | Publisher 主分支写入 | 即使请求伪造也只能解析到记录的任务 branch |
+| AC-015 | 非 fast-forward | 不 push，WorkItem blocked |
+| AC-016 | 修改路径越界 | 不 push、不建 PR，记录脱敏原因 |
+| AC-017 | Git bundle 损坏 | verify/fsck 失败；不污染主 mirror |
+| AC-018 | 恶意 Git hook/config | hook 不执行，proxy/filter/protocol 不生效 |
+| AC-019 | push 后崩溃 | 读回远端 ref 后幂等补记，不重复 commit |
+| AC-020 | PR 创建后崩溃 | 按 head branch 找回原 Draft PR，不创建第二个 |
+| AC-021 | SSH 中断 | Turn 进入 interrupted/reconcile，不盲目重放 Prompt |
+| AC-022 | Runner 重启 | 同目录、CODEX_HOME、session ID 可以 resume |
+| AC-023 | Runner 磁盘丢失 | 已发布 commit/PR/Issue/SQLite 不受影响 |
+| AC-024 | 输出包含凭据 | 日志、GitHub、Slack 仅出现脱敏值 |
+| AC-025 | Docker 未部署 | 诊断明确报告 first-phase risk accepted，不虚报隔离 |
 
-### 11.3 Live Smoke Test
+### 12.3 Live Fixture 顺序
 
-使用专用 Fixture Repo，不得直接用真实业务仓库做首测：
+1. SSH 只读连接与 host key 固定。
+2. 创建 Fixture WorkItem 目录和独立 repo。
+3. 首次 `codex exec --json` 获得 session ID。
+4. 在 Issue 添加维护者 `/codex-context` 并再次 ready。
+5. 证明使用同一个 Issue、branch、directory、session 和 Slack thread。
+6. Codex 创建本地 commit，Control Host 拉取 bundle。
+7. Publisher 将精确 SHA 推到任务分支并创建唯一 Draft PR。
+8. 重复所有对账命令，证明不新增 session、branch 或 PR。
+9. 中断 SSH、Dispatcher 和 Publisher 各一次，验证 fail-closed 恢复。
+10. 人工审核并合并后，Issue 进入 completed；后续变化必须新建 Issue。
 
-1. Fixture Repo 有 `README.md` 和一个验证 README 标记的 CI。
-2. 创建 Issue：只允许修改 README 中一个确定位置。
-3. 添加 `exec:cloud` 和 `agent:ready`。
-4. 预期在两个 Timer 周期内出现 Cloud Task URL。
-5. Cloud Task 完成后出现唯一任务分支和唯一 Draft PR。
-6. PR 仅修改 README 指定位置。
-7. CI 通过；Issue 为 `agent:review`。
-8. 重跑多个 Sweep，不新增 Cloud Task、Branch、Commit、PR 或重复评论。
+## 13. 主要风险与回滚
 
-然后执行负向 Smoke：
-
-- 要求修改 `.github/workflows/ci.yml`，预期被 Denylist 阻止。
-- 在 Cloud Submit 后、保存 Task ID 前注入进程退出，验证唯一恢复或 Blocked。
-- 在 PR 创建后、Issue 更新前退出，验证复用 PR。
-
-### 11.4 Soak 与上线门槛
-
-上线真实业务仓库前必须满足：
-
-- 24 小时 Dry-run，无误选任务。
-- Fixture Repo 至少 10 个成功 Run、5 个故障注入 Run。
-- 48 小时 Timer Soak，无重复 Cloud Task 或 PR。
-- 主机重启恢复测试通过。
-- 日志抽检无 Secret、Authorization Header 或完整 Prompt。
-- 回滚演练通过。
-- 人工确认第一批真实任务均为低风险、可回滚、小 Diff。
-
-## 12. 可观测性与运维接口
-
-每条结构化日志至少包含：
-
-```text
-timestamp
-level
-event
-run_id
-repository
-issue_number
-state_before
-state_after
-external_command
-duration_ms
-result_code
-error_code
-```
-
-不得记录：
-
-- Token、Cookie、Authorization Header。
-- `.env` 内容。
-- 完整 Issue/Prompt/Cloud 输出。
-- 任意私钥或生产日志。
-
-CLI 运维入口：
-
-```text
-codex-dispatcher doctor
-codex-dispatcher run-once --dry-run
-codex-dispatcher status [--run-id ...]
-codex-dispatcher reconcile [--run-id ...]
-codex-dispatcher bind-cloud-task --run-id ... --task-id ...
-codex-dispatcher retry --run-id ...      # 仅对明确可重试的本地步骤
-```
-
-`bind-cloud-task` 是提交崩溃窗口的人工恢复入口；必须校验 Environment、Branch 和时间范围并写审计事件。
-
-## 13. 风险与缓解
-
-| 风险 | 影响 | 缓解 |
+| 风险 | 影响 | 控制 |
 |---|---|---|
-| Codex Cloud CLI 为实验性/Schema 漂移 | 自动化误判 | 固定版本、合同 Fixture、Preflight Fail Closed |
-| `cloud exec` 无 JSON/幂等键 | 重复 Cloud Task | 提交前落库、前后 Task 集合、唯一对账、歧义即阻塞 |
-| GitHub Label 非事务认领 | 状态短暂漂移 | 单主机 + flock + SQLite Saga + 对账 |
-| Issue/评论 Prompt Injection | 越权修改或泄密 | 维护者准入、固定 Prompt、路径 Allow/Deny、无生产凭据 |
-| Cloud 测试结果不可结构化获取 | 虚假“测试通过” | 不声称未知结果；PR CI 为自动验收事实 |
-| Apply 后控制节点被注入命令 | 主机失陷 | 不执行 Issue 命令；只运行固定 Git/Codex/GH 参数数组 |
-| Base Branch 漂移 | PR 冲突 | 先推送固定 Base SHA 的任务分支；冲突可见，不自动 Rebase |
-| SQLite 单点损坏 | 丢失运行映射 | 定期备份、Integrity Check、GitHub/Cloud 对账 Runbook |
-| 主机或网络离线 | 延迟 | systemd Persistent Timer；恢复后对账；Cloud Run 不依赖控制节点在线 |
-| 自动化范围扩大到生产 | 高风险状态变化 | 代码级禁止 merge/deploy/生产路径，需另行人工流程 |
+| 第一阶段 Runner 无隔离 | Runner 数据或系统损坏 | 专用可重建主机、无 GitHub 写/生产凭据、接受 fixture 风险 |
+| Codex 凭据泄漏或滥用 | API 费用和账户风险 | 专用低额度凭据、出站限制列入 Docker 阶段、轮换和费用告警 |
+| 私有源码外传 | 仓库机密性损失 | 只接入批准仓库、Runner 不接触生产 Secret、后续网络隔离 |
+| Publisher 权限仓库级 | 未保护 ref 被修改 | token 不给 Codex、固定参数、精确 SHA、无 force/delete/tag、分支保护 |
+| 恶意 bundle/Git 配置 | Control Host 命令执行或凭据泄漏 | quarantine、固定 Git 配置、禁 hook/filter/protocol、保持 Git 补丁更新 |
+| session 丢失 | 上下文和未发布工作损失 | 同目录/CODEX_HOME、每 Turn checkpoint、丢失时 blocked 不替换 |
+| SQLite 损坏 | 映射和恢复锚点损失 | online backup、integrity check、GitHub/Runner 对账 |
+| Slack 故障 | 详情不可见 | GitHub/SQLite 仍为事实来源，恢复后幂等补发 |
 
-## 14. 回滚与停机
+紧急停止：停止 Dispatcher systemd service/timer，撤销 GitHub App installation token，保留
+SQLite、quarantine、Runner 目录、分支和 Draft PR。停止不会 merge、delete branch 或删除
+Runner 数据。恢复前只做只读对账。
 
-最安全的紧急停止方式是停用 Timer；不会取消已经运行的 Cloud Task，但会停止新任务和结果应用。
+## 14. 当前不做
 
-回滚原则：
-
-1. 不删除 Cloud Task、任务分支、Commit 或 Draft PR。
-2. 保留 SQLite 备份和 journald 审计日志。
-3. 将 `agent:dispatching/running` Issue 切到人工 `agent:paused` 前先记录 Run ID。
-4. 回滚应用版本时使用旧 Release Symlink；数据库 migration 必须保持向后兼容。
-5. 已创建 Draft PR 由人类关闭或保留，不自动删除。
-6. 恢复后先运行 `doctor` 和 `reconcile --dry-run`，再恢复 Timer。
-
-## 15. 最终完成定义
-
-只有同时满足以下条件，MVP 才算完成：
-
-- 本文 Phase 0～5 的交付物存在并通过审查。
-- AC-001～AC-042 全部自动化或有明确的 Live Test 证据。
-- Fixture Repo Smoke、故障注入、重启恢复和 48 小时 Soak 通过。
-- 真实业务仓库只启用低风险任务，且首批全部由人工检查 Draft PR。
-- 没有自动 Merge、Deploy、生产凭据或高风险路径写入能力。
-- 任一外部状态不确定时，系统能明确 Blocked，而不是重复执行或宣称成功。
-
-项目成功标准不是“夜里一直有模型运行”，而是：
-
-> 一张范围完整、可验证的 GitHub Issue，能在不依赖 MacBook 在线状态的情况下，确定性地产生一个可审查、可追踪、可回滚且不自动进入生产的 Draft PR；任何失败都能被定位和安全恢复。
+- Codex Cloud task 创建、续接或状态同步；
+- Slack 入站控制；
+- 多 Dispatcher、多活或并发 Turn；
+- 自动 merge、release、deploy；
+- Runner 第一阶段的 Docker/VM/per-task UID 隔离；
+- 生产凭据、内网或生产自托管 CI；
+- 让 Dispatcher 成为语义代码审核器。
