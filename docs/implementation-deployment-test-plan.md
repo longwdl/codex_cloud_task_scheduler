@@ -315,7 +315,8 @@ Prompt 和 JSON 请求通过 stdin 传输；输出设字节上限并做脱敏。
 ```text
 cwd=<work-item>/repo
 CODEX_HOME=<work-item>/codex-home
-codex exec --json --output-schema <fixed-schema> -
+codex exec --json --dangerously-bypass-approvals-and-sandbox \
+  --output-schema <fixed-schema> -
 ```
 
 捕获 `thread.started.thread_id`，只能在 `codex_session_id IS NULL` 时绑定。
@@ -325,10 +326,13 @@ codex exec --json --output-schema <fixed-schema> -
 ```text
 cwd=<work-item>/repo
 CODEX_HOME=<work-item>/codex-home
-codex exec resume <recorded-session-id> --json --output-schema <fixed-schema> -
+codex exec resume <recorded-session-id> --json \
+  --dangerously-bypass-approvals-and-sandbox --output-schema <fixed-schema> -
 ```
 
-禁止 `--last`、`--ephemeral` 和自动创建替代 session。JSONL 解析错误、缺少 `thread_id`、返回
+`--dangerously-bypass-approvals-and-sandbox` 只允许出现在已接受整机损失风险的第一阶段专用
+Runner；Docker 阶段继续在容器内使用，但由容器提供外部边界。禁止 `--last`、`--ephemeral`
+和自动创建替代 session。JSONL 解析错误、缺少 `thread_id`、返回
 不同 session、超时或 SSH 中断都进入对账状态，不能盲目重放 Prompt。
 
 ### 6.3 Turn 结果 Schema
@@ -371,7 +375,7 @@ Publisher 从可信 SQLite/config 中解析 repository、branch、base、quarant
 3. 验证 expected head 存在且从记录的 base/last published SHA 可达。
 4. 验证仅包含允许的 commit 和路径，未命中硬 Denylist 和凭据检测。
 5. 禁用 hooks、submodule、自定义 protocol、filter、textconv、proxy 和任务提供的 Git config。
-6. 验证远端当前任务分支仍等于记录的 `last_published_sha`。
+6. 首次发布验证远端任务分支不存在；后续发布验证它仍等于记录的 `last_published_sha`。
 7. 使用完整 SHA 推送到唯一记录的任务 ref；禁止 force、delete、tag 和其他 ref。
 8. 读回远端 ref，只有完全相等才记录 `last_published_sha`。
 

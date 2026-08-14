@@ -101,10 +101,13 @@ Slack is output-only:
 
 ## Codex CLI session protocol
 
-The first turn runs `codex exec --json` with the prompt on standard input. The Dispatcher captures
+The first turn runs `codex exec --json --dangerously-bypass-approvals-and-sandbox` with the prompt
+on standard input. The dedicated, disposable Runner host is the external boundary for this explicit
+first-phase risk acceptance. The Dispatcher captures
 the `thread.started.thread_id` event and binds it exactly once to the work item. Later turns run
-`codex exec resume <session-id> --json -` from the same repository directory with the same
-task-specific `CODEX_HOME`.
+`codex exec resume <session-id> --json --dangerously-bypass-approvals-and-sandbox -` from the same
+repository directory with the same task-specific `CODEX_HOME`. After Docker is introduced, the
+container becomes the external boundary and the Codex invocation remains unrestricted inside it.
 
 `--ephemeral` and `resume --last` are forbidden. Missing, conflicting, or ambiguous session state
 becomes `blocked`; the scheduler never creates a replacement session automatically.
