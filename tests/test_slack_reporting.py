@@ -4,6 +4,7 @@ import unittest
 
 from codex_dispatcher.slack_reporting import (
     MAX_SLACK_TEXT_CHARS,
+    SlackDeliveryReceipt,
     SlackReportKind,
     build_slack_report,
 )
@@ -70,6 +71,37 @@ class SlackReportingTests(unittest.TestCase):
                 kind=SlackReportKind.RESULT,
                 channel_id="C0BR2D0MS8Y",
                 text="invalid",
+            )
+        with self.assertRaisesRegex(TypeError, "kind"):
+            build_slack_report(
+                work_item_id=WORK_ITEM,
+                kind="root",  # type: ignore[arg-type]
+                channel_id="C0BR2D0MS8Y",
+                text="invalid",
+            )
+
+    def test_receipt_requires_exact_slack_message_permalink(self) -> None:
+        with self.assertRaisesRegex(ValueError, "message conflicts"):
+            SlackDeliveryReceipt(
+                deduplication_key=f"slack:{WORK_ITEM}:root",
+                channel_id="C0BR2D0MS8Y",
+                message_ts="1700000000.000001",
+                thread_ts="1700000000.000001",
+                permalink=(
+                    "https://fixture.slack.com/archives/C0BR2D0MS8Y/"
+                    "p1700000000000002"
+                ),
+            )
+        with self.assertRaisesRegex(ValueError, "Slack permalink"):
+            SlackDeliveryReceipt(
+                deduplication_key=f"slack:{WORK_ITEM}:root",
+                channel_id="C0BR2D0MS8Y",
+                message_ts="1700000000.000001",
+                thread_ts="1700000000.000001",
+                permalink=(
+                    "https://attacker.example/archives/C0BR2D0MS8Y/"
+                    "p1700000000000001"
+                ),
             )
 
 

@@ -8,11 +8,19 @@ import sqlite3
 from collections.abc import Iterator, Mapping
 from contextlib import closing, contextmanager
 from dataclasses import replace
+from hashlib import sha256
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
 from codex_dispatcher.domain import Run, RunState, utc_now_iso
+from codex_dispatcher.slack_reporting import (
+    SlackDeliveryReceipt,
+    SlackDeliveryRecord,
+    SlackDeliveryState,
+    SlackReport,
+    SlackReportKind,
+)
 from codex_dispatcher.work_items import (
     ACTIVE_TURN_STATES,
     TaskBranchSource,
@@ -534,6 +542,200 @@ class StateStore:
                 now,
             )
         return updated
+
+    def prepare_slack_delivery(
+        self,
+        report: SlackReport,
+        *,
+        created_at: str | None = None,
+    ) -> SlackDeliveryRecord:
+        """Persist one immutable outbound payload identity before sending it."""
+        if not isinstance(report, SlackReport):
+            raise TypeError("report must be a SlackReport")
+        now = created_at or utc_now_iso()
+        payload_sha256 = sha256(report.text.encode("utf-8")).hexdigest()
+        prepared = SlackDeliveryRecord(
+            deduplication_key=report.deduplication_key,
+            work_item_id=report.work_item_id,
+            kind=report.kind,
+            channel_id=report.channel_id,
+            payload_sha256=payload_sha256,
+            state=SlackDeliveryState.PREPARED,
+            created_at=now,
+            updated_at=now,
+            turn_id=report.turn_id,
+            thread_ts=report.thread_ts,
+        )
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM slack_deliveries WHERE deduplication_key = ?",
+                (prepared.deduplication_key,),
+            ).fetchone()
+            if row is not None:
+                existing = self._row_to_slack_delivery(row)
+                if (
+                    existing.work_item_id != prepared.work_item_id
+                    or existing.turn_id != prepared.turn_id
+                    or existing.kind is not prepared.kind
+                    or existing.channel_id != prepared.channel_id
+                    or existing.thread_ts != prepared.thread_ts
+                    or existing.payload_sha256 != prepared.payload_sha256
+                ):
+                    raise ValueError(
+                        "Slack delivery key is already bound to a different payload"
+                    )
+                return existing
+            connection.execute(
+                "INSERT INTO slack_deliveries "
+                "(deduplication_key, work_item_id, turn_id, kind, channel_id, "
+                "thread_ts, payload_sha256, state, message_ts, permalink, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    prepared.deduplication_key,
+                    prepared.work_item_id,
+                    prepared.turn_id,
+                    prepared.kind.value,
+                    prepared.channel_id,
+                    prepared.thread_ts,
+                    prepared.payload_sha256,
+                    prepared.state.value,
+                    None,
+                    None,
+                    prepared.created_at,
+                    prepared.updated_at,
+                ),
+            )
+        return prepared
+
+    def get_slack_delivery(
+        self,
+        deduplication_key: str,
+    ) -> SlackDeliveryRecord | None:
+        row = self._connection.execute(
+            "SELECT * FROM slack_deliveries WHERE deduplication_key = ?",
+            (deduplication_key,),
+        ).fetchone()
+        return self._row_to_slack_delivery(row) if row is not None else None
+
+    def complete_slack_delivery(
+        self,
+        deduplication_key: str,
+        receipt: SlackDeliveryReceipt,
+        *,
+        updated_at: str | None = None,
+    ) -> SlackDeliveryRecord:
+        """Atomically bind a proven root thread and record one delivery receipt."""
+        if not isinstance(receipt, SlackDeliveryReceipt):
+            raise TypeError("receipt must be a SlackDeliveryReceipt")
+        if receipt.deduplication_key != deduplication_key:
+            raise ValueError("Slack receipt key conflicts with the requested delivery")
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM slack_deliveries WHERE deduplication_key = ?",
+                (deduplication_key,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Slack delivery not found: {deduplication_key}")
+            delivery = self._row_to_slack_delivery(row)
+            if receipt.channel_id != delivery.channel_id:
+                raise ValueError("Slack receipt channel conflicts with the outbox")
+            expected_thread = (
+                receipt.message_ts
+                if delivery.kind is SlackReportKind.ROOT
+                else delivery.thread_ts
+            )
+            if receipt.thread_ts != expected_thread:
+                raise ValueError("Slack receipt thread conflicts with the outbox")
+            if delivery.state is SlackDeliveryState.DELIVERED:
+                if (
+                    delivery.message_ts != receipt.message_ts
+                    or delivery.permalink != receipt.permalink
+                ):
+                    raise ValueError(
+                        "Slack delivery is already bound to a different receipt"
+                    )
+                return delivery
+
+            work_item_row = connection.execute(
+                "SELECT * FROM work_items WHERE work_item_id = ?",
+                (delivery.work_item_id,),
+            ).fetchone()
+            if work_item_row is None:
+                raise KeyError(f"work item not found: {delivery.work_item_id}")
+            work_item = self._row_to_work_item(work_item_row)
+            if delivery.kind is SlackReportKind.ROOT:
+                bound = work_item.bind_slack_thread(
+                    receipt.channel_id,
+                    receipt.message_ts,
+                    at=now,
+                )
+                if bound is not work_item:
+                    cursor = connection.execute(
+                        "UPDATE work_items SET slack_channel_id = ?, slack_thread_ts = ?, "
+                        "updated_at = ? WHERE work_item_id = ? AND "
+                        "slack_channel_id IS NULL AND slack_thread_ts IS NULL",
+                        (
+                            receipt.channel_id,
+                            receipt.message_ts,
+                            now,
+                            delivery.work_item_id,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError(
+                            "concurrent Slack thread binding detected: "
+                            f"{delivery.work_item_id}"
+                        )
+                    self._insert_work_item_event(
+                        connection,
+                        delivery.work_item_id,
+                        None,
+                        "slack_thread_bound",
+                        {
+                            "channel_id": receipt.channel_id,
+                            "thread_ts": receipt.message_ts,
+                        },
+                        now,
+                    )
+            elif (
+                work_item.slack_channel_id != receipt.channel_id
+                or work_item.slack_thread_ts != receipt.thread_ts
+            ):
+                raise ValueError(
+                    "Slack Turn receipt conflicts with the WorkItem thread binding"
+                )
+            cursor = connection.execute(
+                "UPDATE slack_deliveries SET state = ?, message_ts = ?, permalink = ?, "
+                "updated_at = ? WHERE deduplication_key = ? AND state = ?",
+                (
+                    SlackDeliveryState.DELIVERED.value,
+                    receipt.message_ts,
+                    receipt.permalink,
+                    now,
+                    deduplication_key,
+                    SlackDeliveryState.PREPARED.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    f"concurrent Slack delivery completion detected: {deduplication_key}"
+                )
+            self._insert_work_item_event(
+                connection,
+                delivery.work_item_id,
+                delivery.turn_id,
+                "slack_report_delivered",
+                {
+                    "deduplication_key": deduplication_key,
+                    "kind": delivery.kind.value,
+                    "message_ts": receipt.message_ts,
+                },
+                now,
+            )
+        completed = self.get_slack_delivery(deduplication_key)
+        assert completed is not None
+        return completed
 
     def bind_draft_pr(
         self, work_item_id: str, pr_number: int, *, updated_at: str | None = None
@@ -1139,6 +1341,13 @@ class StateStore:
             raw_allowed_paths, "persisted Turn allowed paths"
         )
         return Turn(**values)
+
+    @staticmethod
+    def _row_to_slack_delivery(row: sqlite3.Row) -> SlackDeliveryRecord:
+        values = dict(row)
+        values["kind"] = SlackReportKind(values["kind"])
+        values["state"] = SlackDeliveryState(values["state"])
+        return SlackDeliveryRecord(**values)
 
     @staticmethod
     def _parse_string_tuple(value: object, field: str) -> tuple[str, ...]:

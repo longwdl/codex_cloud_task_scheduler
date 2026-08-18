@@ -302,6 +302,24 @@ CREATE TABLE turns (
   FOREIGN KEY(work_item_id) REFERENCES work_items(work_item_id),
   UNIQUE(work_item_id, turn_number)
 );
+
+CREATE TABLE slack_deliveries (
+  deduplication_key TEXT PRIMARY KEY,
+  work_item_id TEXT NOT NULL,
+  turn_id TEXT,
+  kind TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  thread_ts TEXT,
+  payload_sha256 TEXT NOT NULL,
+  state TEXT NOT NULL,
+  message_ts TEXT,
+  permalink TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(work_item_id) REFERENCES work_items(work_item_id),
+  FOREIGN KEY(turn_id) REFERENCES turns(turn_id),
+  UNIQUE(channel_id, message_ts)
+);
 ```
 
 迁移只增加表、列和索引，不删除或重新解释既有 Cloud 字段。Cloud 数据保留为历史审计信息。
@@ -464,6 +482,12 @@ SlackReporter 只调用出站消息 API：
 不实现 Slack Events API、Socket Mode、slash command、interaction endpoint 或消息读取权限。
 Slack 中人工消息对系统行为没有任何影响。
 
+发送前只持久化 deduplication key、payload SHA-256 和目标 thread，不持久化消息正文。root 成功
+回执与 WorkItem thread binding 在同一 SQLite 事务完成；Turn 消息按 Turn/kind 使用独立固定 key。
+提供方端口必须保证相同 key 和 payload 的重试返回原消息回执。Slack 当前公开
+`chat.postMessage` 参数表没有给出可直接依赖的幂等键合同，因此真实 HTTP adapter 在 live
+fixture 证明前保持禁用，也不通过增加 message-history 权限来找回消息。
+
 ## 9. 确定性调度流程
 
 每轮处理顺序固定：
@@ -480,12 +504,14 @@ Slack 中人工消息对系统行为没有任何影响。
    session。
 9. 先读取允许评论，再重新读取 Issue；只有 Issue identity、状态和 revision 稳定时才冻结
    comment IDs、Prompt hash、input HEAD 和下一个 turn number。漂移时不启动 Turn，下一轮重试。
-10. 通过 SSH `start` 或 `resume` 原 session；SSH 回执不明确时只允许 `status` 对账，不重放
+10. 创建或找回唯一 Slack root 并将 permalink 写入固定 Issue 状态评论；回执不明确时尚未
+    启动 Codex。
+11. 通过 SSH `start` 或 `resume` 原 session；SSH 回执不明确时只允许 `status` 对账，不重放
     Prompt。
-11. 解析、脱敏并保存结构化结果。
-12. 若有安全且一致的 checkpoint，拉取 bundle 并调用 Publisher。
-13. 创建/更新唯一 Draft PR、Issue 和 Slack thread。
-14. 根据结构化结果进入 `needs_input`、`review` 或 `blocked`。
+12. 解析、脱敏并保存结构化结果。
+13. 若有安全且一致的 checkpoint，拉取 bundle 并调用 Publisher。
+14. 创建/更新唯一 Draft PR、Issue 和 Slack Turn report。
+15. 根据结构化结果进入 `needs_input`、`review` 或 `blocked`。
 
 同一个 Issue 即使多次从 `needs_input/review` 回到 `ready`，步骤 6 也只能解析到原 WorkItem。
 
@@ -560,6 +586,11 @@ Fixture 通过。该结果尚不代表 GitHub 调度、Publisher 或 Slack 端�
 - thread 创建、复用、permalink 回写；
 - 脱敏、长度和重试幂等；
 - 证明 Slack 消息不能进入调度路径。
+
+状态：消息/回执模型、payload-hash outbox、root 原子绑定、GitHub permalink 投影、Turn 终态
+消息和两类回执丢失恢复已经离线实现并接入可注入 sweep。尚未实现或启用真实 Slack HTTP
+publisher；live fixture 必须先证明相同 key/payload 的提供方重试不会创建第二条消息。若该合同
+无法证明，则保持 fail-closed，不增加 message-history/search 权限绕过。
 
 ### Phase F：Docker 加固
 
@@ -690,6 +721,8 @@ git diff --check
 | AC-047 | push 记账后、Turn 终态前崩溃 | 依据已落库的 exact SHA 完成 Turn，不重新 EXPORT、不重复 push、不重启 Codex |
 | AC-048 | Draft PR 创建回执丢失 | 按持久化 task branch 找回并绑定同一 PR，不重启 Codex、不重复 push、不创建第二个 PR |
 | AC-049 | Issue 状态评论回执丢失 | 保持 Issue 在 dispatching/running；按固定 marker 幂等补写后才更新终态 label |
+| AC-050 | Slack root 回执丢失 | Codex 尚未 START；以同一 key/payload 找回同一 root 并原子绑定，不创建第二个 thread |
+| AC-051 | Slack 终态回执丢失 | commit/PR 保持不变；只重试同一 Turn report，不重启 Codex、不重复 push/PR，成功后才写终态 label |
 
 ### 12.3 Live Fixture 顺序
 

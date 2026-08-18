@@ -110,10 +110,19 @@ Slack is output-only:
 
 - no Slack message, reaction, button, command, or modal can trigger or modify a task;
 - the service does not subscribe to Slack message events;
+- the service has no conversation-history or message-search adapter;
 - one project channel contains one thread per work item;
 - the GitHub issue stores a direct link to the Slack thread;
 - Slack contains redacted status, questions, summaries, tests, and GitHub links, not full prompts,
   reasoning traces, credentials, or full diffs.
+
+Before the first Codex Turn starts, the control host persists the root report key and payload hash,
+publishes the root through an idempotent outbound-only port, and atomically binds the returned channel
+and root timestamp. It then exposes the validated Slack permalink in the fixed GitHub status comment.
+Terminal reports use a Turn-scoped key and the same root timestamp. The outbox stores hashes and
+receipts, not report text. An ambiguous response is retried only through a publisher contract that
+must return the original receipt for the same key and payload; a real provider adapter stays disabled
+until that behavior is proven without granting message-history access.
 
 ## Codex CLI session protocol
 
@@ -190,6 +199,10 @@ If Draft PR creation succeeds but its response is lost, the next sweep finds the
 task branch and binds it instead of creating another. The terminal Issue label is written only after
 the PR binding and idempotent status comment succeed; a delivery interruption therefore remains a
 recoverable dispatching/running Issue and cannot trigger a new Turn.
+Likewise, an ambiguous Slack root response is reconciled before Codex starts. An ambiguous terminal
+Slack response is retried from the durable Turn and outbox identity after the commit/PR work is
+already complete; it cannot restart Codex, repeat a push, or create another PR. The terminal Issue
+label is written only after the terminal Slack projection succeeds when that optional port is enabled.
 Migration gives historical Turns an empty frozen policy. A pre-migration Turn that is still waiting
 at a checkpoint is therefore rejected rather than inferring permissions from the current Issue.
 

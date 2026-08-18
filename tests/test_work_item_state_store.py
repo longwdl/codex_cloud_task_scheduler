@@ -66,7 +66,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
                 legacy_runs = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
-                self.assertEqual([(1,), (2,), (3,), (4,), (5,)], versions)
+                self.assertEqual([(1,), (2,), (3,), (4,), (5,), (6,)], versions)
             self.assertEqual(0, legacy_runs)
 
     def test_additive_migration_persists_one_issue_identity_and_bindings(self) -> None:
@@ -132,7 +132,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 versions = connection.execute(
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
-                self.assertEqual([(1,), (2,), (3,), (4,), (5,)], versions)
+                self.assertEqual([(1,), (2,), (3,), (4,), (5,), (6,)], versions)
 
     def test_persists_a_verified_migrated_task_branch_binding(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

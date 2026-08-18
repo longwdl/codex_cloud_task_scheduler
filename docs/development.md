@@ -26,7 +26,7 @@ The environment-independent core now additionally contains:
 - strict Codex JSONL event parsing;
 - Publisher request and pure publication-plan validation;
 - additive SQLite persistence for WorkItems and Turns;
-- outbound-only Slack message models and idempotency keys;
+- outbound-only Slack message/receipt models, idempotency keys, and a payload-hash outbox;
 - a strict Runner response and artifact-manifest contract;
 - length-prefixed request/Prompt and response/artifact wire framing;
 - a stateful fake SSH Runner that records only Prompt hashes and sizes;
@@ -59,6 +59,9 @@ The environment-independent core now additionally contains:
 - a strict GitHub CLI Draft PR adapter and delivery coordinator that read back the exact task branch,
   bind one PR in SQLite, upsert one fixed Issue status comment, and recover lost write receipts before
   changing the terminal Issue label;
+- a provider-independent Slack coordinator that creates one root before Codex starts, binds its
+  receipt atomically, projects the link to GitHub, and retries terminal reports without replaying the
+  Runner or Publisher;
 - a double-opt-in `ssh-run-once` CLI whose Git/gh/OpenSSH version checks and local SQLite integrity check
   complete before the sweep can claim an Issue.
 
@@ -67,8 +70,9 @@ Runner protocol has also completed the disposable SSH/real-Codex fixture recorde
 `docs/live-test-evidence.md`. The offline Control Host sweep and runtime assembly are covered through
 injected fakes, including Publisher and Draft PR lost-receipt, Issue projection ordering, and
 post-record crash recovery. The trusted-mirror command boundary, Publisher push, Draft PR, and Issue
-writes are covered without network access. The next phase is a bounded live GitHub
-claim/Runner/Publisher/PR fixture, followed by Slack delivery.
+writes are covered without network access. Slack root/result receipt loss and outbox recovery are
+also covered through an idempotent fake publisher. The next phase is a bounded live GitHub
+claim/Runner/Publisher/PR fixture, followed by proof of the real Slack publisher contract.
 The Runner must not receive GitHub write or production credentials.
 
 Explicitly deferred:
@@ -76,7 +80,7 @@ Explicitly deferred:
 - systemd/timer activation of the one-sweep entry point;
 - live GitHub claim/reconciliation in the SSH workflow;
 - live GitHub Publisher, Draft PR, and Issue projection verification;
-- Slack API calls;
+- a live Slack HTTP publisher or Slack API calls;
 - systemd deployment;
 - Docker isolation on the Runner;
 - any merge, deployment, release, or production access.
@@ -128,5 +132,6 @@ as the target executor contract.
 - Git tests use temporary local repositories and never a configured GitHub remote.
 - Runner tests operate on JSON/JSONL fixtures and temporary directories, not a real SSH daemon.
 - Publisher tests push only to temporary local bare repositories and never to GitHub.
-- Slack tests cover only outbound rendering and deduplication; no inbound interface exists.
+- Slack tests cover outbound rendering, durable payload identity, atomic root binding, terminal
+  projection ordering, and lost-receipt retries; no inbound or message-history interface exists.
 - Test fixtures may contain fake tokens, but never copy a real credential into a fixture.

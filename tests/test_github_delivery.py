@@ -158,6 +158,46 @@ class GitHubDeliveryCoordinatorTests(unittest.TestCase):
             len([call for call in tracker.calls if call.method == "create_draft_pr"]),
         )
 
+    def test_running_execution_link_is_fixed_and_does_not_touch_pull_requests(self) -> None:
+        tracker = FakeTracker()
+        coordinator = GitHubDeliveryCoordinator(store=self.store, tracker=tracker)
+        bound = self.store.bind_slack_thread(
+            self.item.work_item_id,
+            channel_id="C0BR2D0MS8Y",
+            thread_ts="1700000000.000001",
+        )
+        permalink = (
+            "https://fixture.slack.com/archives/C0BR2D0MS8Y/"
+            "p1700000000000001"
+        )
+
+        coordinator.reconcile_execution_link(
+            self.task,
+            work_item=bound,
+            slack_permalink=permalink,
+        )
+
+        self.assertEqual(["upsert_run_comment"], [call.method for call in tracker.calls])
+        self.assertIn(permalink, tracker.calls[0].args[-1])
+
+        tracker.calls.clear()
+        with self.assertRaisesRegex(GitHubDeliveryRejected, "permalink"):
+            coordinator.reconcile_execution_link(
+                self.task,
+                work_item=bound,
+                slack_permalink="https://attacker.example/thread",
+            )
+        with self.assertRaisesRegex(GitHubDeliveryRejected, "permalink"):
+            coordinator.reconcile_execution_link(
+                self.task,
+                work_item=bound,
+                slack_permalink=(
+                    "https://fixture.slack.com/archives/C0BR2D0MS8Y/"
+                    "p1700000000000002"
+                ),
+            )
+        self.assertEqual([], tracker.calls)
+
     def test_closed_or_wrong_branch_pr_is_rejected_without_rebinding(self) -> None:
         existing = PullRequest(
             number=9,

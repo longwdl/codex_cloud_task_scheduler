@@ -124,10 +124,16 @@ restrictions remain mandatory.
 The existing official Codex Slack binding is not the Dispatcher integration. A custom outbound-only
 Slack app will eventually need:
 
-- permission to post in the selected private project channel;
+- the bot-only [`chat:write`](https://docs.slack.dev/reference/methods/chat.postMessage/) scope and
+  membership in the selected private project channel;
 - a bot token stored only on the Control Host;
 - no Events API subscription, Socket Mode, slash commands, interactions, message-history input, or
   task-control capability.
+
+Slack documents [`chat.getPermalink`](https://docs.slack.dev/reference/methods/chat.getPermalink/)
+as requiring no additional scope. The real publisher must remain disabled until a live fixture
+proves that retrying its stable delivery key returns the original message receipt. Do not add
+conversation-history or search scopes to compensate for an ambiguous write response.
 
 The GitHub Issue will store a direct Slack thread link. Human task input remains in GitHub only.
 

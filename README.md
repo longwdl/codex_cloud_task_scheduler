@@ -33,7 +33,8 @@ executor. The environment-independent implementation now includes:
 - strict same-repository Draft PR lookup/creation, branch read-back, SQLite binding, and ordered
   Issue status projection with lost-receipt recovery;
 - a double-opt-in `ssh-run-once` entry point that assembles only fixed GitHub, mirror, and SSH ports;
-- outbound-only Slack projection models and offline integration tests.
+- a hashed Slack outbox, unique root/thread binding, redacted terminal reports, and offline
+  lost-receipt recovery behind an idempotent outbound publisher port.
 
 The Runner path has now been exercised against the private Fixture through the real pinned SSH
 transport and Codex CLI 0.147.0 using ChatGPT login. A migrated Issue binding completed PREPARE,
@@ -44,9 +45,11 @@ installed on `s3`, but remains user-owned because the Fixture account has no pas
 The live dependency assembly now includes exact-SHA task-branch publication, unique Draft PR
 reconciliation, and ordered Issue comment/label delivery, but the write-enabled entry point has not
 yet been exercised against the Fixture. The trusted-mirror fetch, Publisher push, and GitHub writes
-are therefore still offline-tested only. Slack delivery, merge, and production deployment remain
-absent. Existing Codex Cloud adapter code is retained only during migration; Cloud writes remain
-disabled and are not part of the target architecture.
+are therefore still offline-tested only. The Slack coordination core is wired only through injected
+ports; a real Slack HTTP publisher remains disabled until its provider-side deduplication behavior is
+proven in a live fixture. Merge and production deployment remain absent. Existing Codex Cloud
+adapter code is retained only during migration; Cloud writes remain disabled and are not part of the
+target architecture.
 
 Candidate planning is exposed through a dependency-injected Python entry point and a read-only
 GitHub CLI dry-run command. The command performs tracker reads but does not claim issues, mutate

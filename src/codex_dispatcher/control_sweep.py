@@ -9,6 +9,7 @@ from typing import Protocol
 from codex_dispatcher.config import Config, RepositoryConfig
 from codex_dispatcher.dispatcher_lock import DispatcherProcessLock
 from codex_dispatcher.github_delivery import GitHubDeliveryCoordinator
+from codex_dispatcher.slack_delivery import SlackDeliveryCoordinator
 from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_dispatch_service import (
     CheckpointPublicationInterrupted,
@@ -22,7 +23,7 @@ from codex_dispatcher.ssh_recovery import (
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.trackers.base import TaskState, Tracker, TrackerComment, TrackerTask
 from codex_dispatcher.turn_orchestration import TaskBranchPublisher, TurnProgress
-from codex_dispatcher.work_items import TurnState, WorkItem, WorkItemState
+from codex_dispatcher.work_items import Turn, TurnState, WorkItem, WorkItemState
 
 
 class SourceSnapshotProvider(Protocol):
@@ -69,6 +70,7 @@ class SshControlSweep:
         process_lock: DispatcherProcessLock,
         publisher: TaskBranchPublisher | None = None,
         delivery: GitHubDeliveryCoordinator | None = None,
+        slack_delivery: SlackDeliveryCoordinator | None = None,
         claimant: str = "codex-dispatcher",
         runner_root: str = "/srv/codex-runner/work-items",
     ) -> None:
@@ -89,6 +91,7 @@ class SshControlSweep:
         self._lock = process_lock
         self._publisher = publisher
         self._delivery = delivery
+        self._slack_delivery = slack_delivery
         self._claimant = claimant
         self._runner_root = runner_root
         self._repositories = {item.slug: item for item in config.repositories}
@@ -165,16 +168,19 @@ class SshControlSweep:
         if recovery.action is SshRecoveryAction.SYNC_TRACKER_STATE:
             assert recovery.task is not None
             assert recovery.desired_task_state is not None
-            if self._delivery is not None and recovery.desired_task_state in {
+            work_item = recovery.work_item
+            if recovery.desired_task_state in {
                 TaskState.REVIEW,
                 TaskState.NEEDS_INPUT,
                 TaskState.BLOCKED,
             }:
-                assert recovery.work_item is not None
-                self._delivery.reconcile(
+                assert work_item is not None
+                turns = self._store.list_turns(work_item.work_item_id)
+                work_item = self._deliver_terminal(
                     recovery.task,
-                    work_item=recovery.work_item,
+                    work_item=work_item,
                     desired_task_state=recovery.desired_task_state,
+                    turn=turns[-1] if turns else None,
                 )
             updated = self._set_task_state(
                 recovery.task,
@@ -183,7 +189,7 @@ class SshControlSweep:
             return _task_result(
                 ControlSweepStatus.STATE_SYNCHRONIZED,
                 updated,
-                work_item=recovery.work_item,
+                work_item=work_item,
             )
         if recovery.action is SshRecoveryAction.RESUME_PUBLICATION:
             assert recovery.task is not None
@@ -280,6 +286,23 @@ class SshControlSweep:
                 ),
                 reason="issue_snapshot_changed_during_freeze",
             )
+        if self._slack_delivery is not None:
+            work_item = self._store.get_work_item_by_issue(
+                stable_task.repository,
+                stable_task.issue_number,
+            )
+            if work_item is None:
+                raise RuntimeError("claimed Issue has no persistent WorkItem")
+            slack_root = self._slack_delivery.ensure_root(
+                stable_task,
+                work_item=work_item,
+            )
+            if self._delivery is not None:
+                self._delivery.reconcile_execution_link(
+                    stable_task,
+                    work_item=slack_root.work_item,
+                    slack_permalink=slack_root.root_permalink,
+                )
         progress = self._dispatch.run_claimed_turn(
             stable_task,
             comments=comments,
@@ -342,21 +365,23 @@ class SshControlSweep:
                 reason="turn_state_requires_manual_recovery",
             )
         status, desired_state = outcome
-        if self._delivery is not None and status in {
+        work_item = progress.work_item
+        if status in {
             ControlSweepStatus.REVIEW,
             ControlSweepStatus.NEEDS_INPUT,
             ControlSweepStatus.BLOCKED,
         }:
-            self._delivery.reconcile(
+            work_item = self._deliver_terminal(
                 task,
-                work_item=progress.work_item,
+                work_item=work_item,
                 desired_task_state=desired_state,
+                turn=progress.turn,
             )
         updated = self._set_task_state(task, desired_state)
         return _task_result(
             status,
             updated,
-            work_item=progress.work_item,
+            work_item=work_item,
             turn_id=progress.turn.turn_id,
         )
 
@@ -389,6 +414,40 @@ class SshControlSweep:
         if task.state is state:
             return task
         return self._tracker.set_state(task.repository, task.task_id, state)
+
+    def _deliver_terminal(
+        self,
+        task: TrackerTask,
+        *,
+        work_item: WorkItem,
+        desired_task_state: TaskState,
+        turn: Turn | None,
+    ) -> WorkItem:
+        slack_permalink: str | None = None
+        if self._slack_delivery is not None:
+            slack_root = self._slack_delivery.ensure_root(
+                task,
+                work_item=work_item,
+            )
+            work_item = slack_root.work_item
+            slack_permalink = slack_root.root_permalink
+        if self._delivery is not None:
+            github = self._delivery.reconcile(
+                task,
+                work_item=work_item,
+                desired_task_state=desired_task_state,
+                slack_permalink=slack_permalink,
+            )
+            work_item = github.work_item
+        if self._slack_delivery is not None:
+            slack = self._slack_delivery.reconcile_terminal(
+                task,
+                work_item=work_item,
+                desired_task_state=desired_task_state,
+                turn=turn,
+            )
+            work_item = slack.work_item
+        return work_item
 
     def _repository(self, slug: str) -> RepositoryConfig:
         try:

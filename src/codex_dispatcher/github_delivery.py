@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from codex_dispatcher.slack_reporting import validate_slack_permalink
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.trackers.base import (
     DraftPullRequestRequest,
@@ -41,8 +42,11 @@ class GitHubDeliveryCoordinator:
         *,
         work_item: WorkItem,
         desired_task_state: TaskState,
+        slack_permalink: str | None = None,
     ) -> GitHubDeliveryResult:
         self._validate_binding(task, work_item, desired_task_state)
+        if slack_permalink is not None:
+            self._validate_slack_permalink(work_item, slack_permalink)
         pull_request: PullRequest | None = None
         if work_item.last_published_sha is not None:
             work_item, pull_request = self._ensure_pull_request(task, work_item)
@@ -58,9 +62,36 @@ class GitHubDeliveryCoordinator:
                 work_item,
                 pull_request,
                 desired_task_state,
+                slack_permalink,
             ),
         )
         return GitHubDeliveryResult(work_item, pull_request)
+
+    def reconcile_execution_link(
+        self,
+        task: TrackerTask,
+        *,
+        work_item: WorkItem,
+        slack_permalink: str,
+    ) -> None:
+        """Expose the output-only Slack thread before the first Codex Turn starts."""
+        self._validate_issue_identity(task, work_item)
+        if task.state not in {TaskState.DISPATCHING, TaskState.RUNNING}:
+            raise GitHubDeliveryRejected(
+                "Issue state cannot receive running execution metadata"
+            )
+        self._validate_slack_permalink(work_item, slack_permalink)
+        self._tracker.upsert_run_comment(
+            work_item.repository,
+            str(work_item.issue_number),
+            f"work-item:{work_item.work_item_id}:status",
+            self._render_comment(
+                work_item,
+                None,
+                task.state,
+                slack_permalink,
+            ),
+        )
 
     def _ensure_pull_request(
         self,
@@ -132,17 +163,46 @@ class GitHubDeliveryCoordinator:
             WorkItemState.WAITING_INPUT: TaskState.NEEDS_INPUT,
             WorkItemState.BLOCKED: TaskState.BLOCKED,
         }.get(work_item.state)
+        GitHubDeliveryCoordinator._validate_issue_identity(task, work_item)
+        if expected_state is None or desired_task_state is not expected_state:
+            raise GitHubDeliveryRejected(
+                "Issue delivery state conflicts with the terminal WorkItem state"
+            )
+
+    @staticmethod
+    def _validate_issue_identity(task: TrackerTask, work_item: WorkItem) -> None:
+        if not isinstance(task, TrackerTask) or not isinstance(work_item, WorkItem):
+            raise TypeError("delivery inputs must use dispatcher DTOs")
         if (
-            task.repository != work_item.repository
+            not task.is_open
+            or task.repository != work_item.repository
             or task.issue_number != work_item.issue_number
             or task.task_id != str(work_item.issue_number)
             or task.issue_node_id != work_item.issue_node_id
         ):
             raise GitHubDeliveryRejected("Issue identity conflicts with the WorkItem")
-        if expected_state is None or desired_task_state is not expected_state:
+
+    @staticmethod
+    def _validate_slack_permalink(
+        work_item: WorkItem,
+        slack_permalink: str,
+    ) -> None:
+        if (
+            work_item.slack_channel_id is None
+            or work_item.slack_thread_ts is None
+        ):
             raise GitHubDeliveryRejected(
-                "Issue delivery state conflicts with the terminal WorkItem state"
+                "Slack permalink has no WorkItem thread binding"
             )
+        try:
+            validate_slack_permalink(
+                slack_permalink,
+                channel_id=work_item.slack_channel_id,
+                message_ts=work_item.slack_thread_ts,
+                thread_ts=work_item.slack_thread_ts,
+            )
+        except ValueError as exc:
+            raise GitHubDeliveryRejected("Slack permalink is invalid") from exc
 
     @staticmethod
     def _validate_pull_request(
@@ -175,6 +235,7 @@ class GitHubDeliveryCoordinator:
         work_item: WorkItem,
         pull_request: PullRequest | None,
         desired_task_state: TaskState,
+        slack_permalink: str | None,
     ) -> str:
         lines = [
             f"Codex work item `{work_item.work_item_id}`",
@@ -190,4 +251,6 @@ class GitHubDeliveryCoordinator:
                 f"- Published checkpoint: `{work_item.last_published_sha}`"
             )
             lines.append(f"- Pull request: {pull_request.url}")
+        if slack_permalink is not None:
+            lines.append(f"- Slack execution thread: {slack_permalink}")
         return "\n".join(lines)

@@ -21,6 +21,12 @@ from codex_dispatcher.git_publisher import GitPublicationInterrupted
 from codex_dispatcher.github_delivery import GitHubDeliveryCoordinator
 from codex_dispatcher.publisher import VerifiedBundle
 from codex_dispatcher.runner_protocol import RunnerOperation, parse_agent_result
+from codex_dispatcher.slack_delivery import SlackDeliveryCoordinator
+from codex_dispatcher.slack_reporting import (
+    SlackDeliveryReceipt,
+    SlackReport,
+    SlackReportKind,
+)
 from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_dispatch_service import OfflineSshDispatchService
 from codex_dispatcher.state_store import StateStore
@@ -192,6 +198,49 @@ class _RecordingPublisher:
         return SimpleNamespace(observed_remote_sha=plan.source_sha)
 
 
+class _InterruptingSlackPublisher:
+    def __init__(
+        self,
+        *,
+        interrupt_kind_once: SlackReportKind | None = None,
+    ) -> None:
+        self.interrupt_kind_once = interrupt_kind_once
+        self.calls: list[SlackReport] = []
+        self.messages: dict[str, tuple[SlackReport, SlackDeliveryReceipt]] = {}
+
+    def publish(self, report: SlackReport) -> SlackDeliveryReceipt:
+        self.calls.append(report)
+        existing = self.messages.get(report.deduplication_key)
+        if existing is None:
+            index = len(self.messages) + 1
+            message_ts = f"1700000000.{index:06d}"
+            thread_ts = report.thread_ts or message_ts
+            query = (
+                ""
+                if report.kind is SlackReportKind.ROOT
+                else f"?thread_ts={thread_ts}&cid={report.channel_id}"
+            )
+            receipt = SlackDeliveryReceipt(
+                report.deduplication_key,
+                report.channel_id,
+                message_ts,
+                thread_ts,
+                (
+                    f"https://fixture.slack.com/archives/{report.channel_id}/"
+                    f"p{message_ts.replace('.', '')}{query}"
+                ),
+            )
+            self.messages[report.deduplication_key] = (report, receipt)
+        else:
+            original, receipt = existing
+            if original != report:
+                raise AssertionError("Slack retry changed the persisted payload")
+        if self.interrupt_kind_once is report.kind:
+            self.interrupt_kind_once = None
+            raise RuntimeError("fixture lost Slack receipt")
+        return receipt
+
+
 class SshControlSweepTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -221,6 +270,7 @@ class SshControlSweepTests(unittest.TestCase):
         source: _RecordingSource,
         publisher: _RecordingPublisher | None = None,
         delivery: GitHubDeliveryCoordinator | None = None,
+        slack_delivery: SlackDeliveryCoordinator | None = None,
     ) -> SshControlSweep:
         return SshControlSweep(
             config=make_config(global_max_active=4),
@@ -231,6 +281,7 @@ class SshControlSweepTests(unittest.TestCase):
             process_lock=DispatcherProcessLock(self.lock_path),
             publisher=publisher,
             delivery=delivery,
+            slack_delivery=slack_delivery,
         )
 
     def _register_checkpoint(
@@ -480,12 +531,19 @@ class SshControlSweepTests(unittest.TestCase):
         )
         publisher = _RecordingPublisher()
         delivery = GitHubDeliveryCoordinator(store=self.store, tracker=tracker)
+        slack_publisher = _InterruptingSlackPublisher()
+        slack_delivery = SlackDeliveryCoordinator(
+            store=self.store,
+            publisher=slack_publisher,
+            channel_id="C0BR2D0MS8Y",
+        )
 
         result = self._sweep(
             tracker,
             _RecordingSource(),
             publisher=publisher,
             delivery=delivery,
+            slack_delivery=slack_delivery,
         ).run_once(turn_id=TURN_ID)
 
         self.assertEqual(ControlSweepStatus.REVIEW, result.status)
@@ -501,17 +559,134 @@ class SshControlSweepTests(unittest.TestCase):
         assert item is not None
         self.assertEqual(head_sha, item.last_published_sha)
         self.assertEqual(1, item.pr_number)
+        self.assertEqual("1700000000.000001", item.slack_thread_ts)
+        self.assertEqual(
+            [SlackReportKind.ROOT, SlackReportKind.RESULT],
+            [report.kind for report in slack_publisher.calls],
+        )
         methods = [call.method for call in tracker.calls]
+        comment_writes = [
+            index
+            for index, method in enumerate(methods)
+            if method == "upsert_run_comment"
+        ]
+        self.assertEqual(2, len(comment_writes))
+        self.assertLess(
+            comment_writes[0],
+            methods.index("create_draft_pr"),
+        )
         self.assertLess(
             methods.index("create_draft_pr"),
-            methods.index("upsert_run_comment"),
+            comment_writes[-1],
         )
         review_write = next(
             index
             for index, call in enumerate(tracker.calls)
             if call.method == "set_state" and call.args[-1] is TaskState.REVIEW
         )
-        self.assertLess(methods.index("upsert_run_comment"), review_write)
+        self.assertLess(comment_writes[-1], review_write)
+        issue_comment = next(
+            call for call in tracker.calls if call.method == "upsert_run_comment"
+        )
+        self.assertIn("fixture.slack.com", issue_comment.args[-1])
+
+    def test_lost_slack_root_receipt_recovers_before_starting_codex(self) -> None:
+        tracker = FakeTracker()
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        work_item_id = self._expected_work_item_id(task)
+        self.transport.queue_turn(
+            work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, _blocked_result()),
+        )
+        slack_publisher = _InterruptingSlackPublisher(
+            interrupt_kind_once=SlackReportKind.ROOT
+        )
+        slack_delivery = SlackDeliveryCoordinator(
+            store=self.store,
+            publisher=slack_publisher,
+            channel_id="C0BR2D0MS8Y",
+        )
+        sweep = self._sweep(
+            tracker,
+            _RecordingSource(),
+            slack_delivery=slack_delivery,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "lost Slack receipt"):
+            sweep.run_once(turn_id=TURN_ID)
+
+        self.assertEqual(
+            [RunnerOperation.PREPARE],
+            [call.operation for call in self.transport.calls],
+        )
+        recovered = sweep.run_once(turn_id=TURN_ID)
+
+        self.assertEqual(ControlSweepStatus.BLOCKED, recovered.status)
+        self.assertEqual(
+            [RunnerOperation.PREPARE, RunnerOperation.START],
+            [call.operation for call in self.transport.calls],
+        )
+        self.assertEqual(2, len(slack_publisher.messages))
+        self.assertEqual(
+            [SlackReportKind.ROOT, SlackReportKind.ROOT, SlackReportKind.FAILURE],
+            [report.kind for report in slack_publisher.calls],
+        )
+
+    def test_lost_slack_terminal_receipt_recovers_before_issue_label(self) -> None:
+        tracker = FakeTracker()
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        artifact = b"fixture-lost-slack-terminal"
+        head_sha = "b" * 40
+        self._register_checkpoint(artifact, head_sha)
+        work_item_id = self._expected_work_item_id(task)
+        self.transport.queue_turn(
+            work_item_id,
+            FakeTurnFixture(SESSION, head_sha, _completed_result(), artifact),
+        )
+        publisher = _RecordingPublisher()
+        delivery = GitHubDeliveryCoordinator(store=self.store, tracker=tracker)
+        slack_publisher = _InterruptingSlackPublisher(
+            interrupt_kind_once=SlackReportKind.RESULT
+        )
+        slack_delivery = SlackDeliveryCoordinator(
+            store=self.store,
+            publisher=slack_publisher,
+            channel_id="C0BR2D0MS8Y",
+        )
+        sweep = self._sweep(
+            tracker,
+            _RecordingSource(),
+            publisher=publisher,
+            delivery=delivery,
+            slack_delivery=slack_delivery,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "lost Slack receipt"):
+            sweep.run_once(turn_id=TURN_ID)
+
+        interrupted = self.store.get_work_item(work_item_id)
+        assert interrupted is not None
+        self.assertEqual(WorkItemState.REVIEW, interrupted.state)
+        self.assertEqual(1, interrupted.pr_number)
+        self.assertEqual(TaskState.DISPATCHING, tracker.tasks[task.task_id].state)
+        runner_calls = tuple(self.transport.calls)
+
+        recovered = sweep.run_once()
+
+        self.assertEqual(ControlSweepStatus.STATE_SYNCHRONIZED, recovered.status)
+        self.assertEqual(TaskState.REVIEW, tracker.tasks[task.task_id].state)
+        self.assertEqual(runner_calls, tuple(self.transport.calls))
+        self.assertEqual(1, len(publisher.calls))
+        self.assertEqual(2, len(slack_publisher.messages))
+        self.assertEqual(3, len(slack_publisher.calls))
+        self.assertEqual(
+            1,
+            sum(call.method == "create_draft_pr" for call in tracker.calls),
+        )
 
     def test_lost_draft_pr_receipt_is_recovered_without_reexecution(self) -> None:
         tracker = _InterruptingDeliveryTracker(interrupt_create_once=True)
