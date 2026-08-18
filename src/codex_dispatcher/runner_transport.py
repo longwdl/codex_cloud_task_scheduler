@@ -1,0 +1,338 @@
+"""Strict responses and the environment-independent SSH Runner transport port."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from enum import StrEnum
+from hashlib import sha256
+from typing import Any, Protocol
+
+from codex_dispatcher.runner_protocol import (
+    PROTOCOL_VERSION,
+    AgentResult,
+    RunnerOperation,
+    RunnerProtocolError,
+    RunnerRequest,
+    agent_result_to_json,
+    agent_result_to_mapping,
+    parse_agent_result,
+)
+from codex_dispatcher.work_items import (
+    validate_git_sha,
+    validate_session_id,
+    validate_sha256,
+    validate_turn_id,
+    validate_work_item_id,
+)
+
+
+MAX_RESPONSE_BYTES = 512 * 1024
+MAX_ARTIFACT_BYTES = 100 * 1024 * 1024
+
+
+class RunnerTransportError(RuntimeError):
+    """Base class for failures at the Runner transport boundary."""
+
+
+class RunnerTransportInterrupted(RunnerTransportError):
+    """The caller cannot know whether the Runner accepted the request."""
+
+
+class RunnerTransportRejected(RunnerTransportError):
+    """The Runner definitively rejected the request without a usable response."""
+
+
+@dataclass(frozen=True, slots=True)
+class RunnerWireOutput:
+    payload: bytes
+    artifact: bytes | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.payload, bytes) or not self.payload:
+            raise RunnerProtocolError("Runner response payload must be non-empty bytes")
+        if len(self.payload) > MAX_RESPONSE_BYTES or b"\x00" in self.payload:
+            raise RunnerProtocolError("Runner response payload exceeds its safe boundary")
+        if self.artifact is not None and (
+            not isinstance(self.artifact, bytes)
+            or not self.artifact
+            or len(self.artifact) > MAX_ARTIFACT_BYTES
+        ):
+            raise RunnerProtocolError("Runner artifact exceeds its safe boundary")
+
+
+class RunnerTransport(Protocol):
+    def invoke(
+        self,
+        request: RunnerRequest,
+        *,
+        stdin: bytes = b"",
+        source_artifact: bytes | None = None,
+    ) -> RunnerWireOutput: ...
+
+
+@dataclass(frozen=True, slots=True)
+class RunnerAck:
+    operation: RunnerOperation
+    work_item_id: str
+    version: int = PROTOCOL_VERSION
+
+    def __post_init__(self) -> None:
+        if self.operation not in {
+            RunnerOperation.PREPARE,
+            RunnerOperation.STOP,
+            RunnerOperation.ARCHIVE,
+        }:
+            raise RunnerProtocolError("operation does not return an acknowledgement")
+        if type(self.version) is not int or self.version != PROTOCOL_VERSION:
+            raise RunnerProtocolError("unsupported Runner response version")
+        validate_work_item_id(self.work_item_id)
+
+    def to_json(self) -> str:
+        return _dump(
+            {
+                "version": self.version,
+                "op": self.operation.value,
+                "work_item_id": self.work_item_id,
+                "state": "ok",
+            }
+        )
+
+
+def parse_runner_ack(value: str | bytes) -> RunnerAck:
+    payload = _load(value)
+    if set(payload) != {"version", "op", "work_item_id", "state"}:
+        raise RunnerProtocolError("Runner acknowledgement fields are invalid")
+    if payload["state"] != "ok":
+        raise RunnerProtocolError("Runner acknowledgement is not successful")
+    try:
+        return RunnerAck(
+            operation=RunnerOperation(payload["op"]),
+            work_item_id=payload["work_item_id"],
+            version=payload["version"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise RunnerProtocolError(str(exc)) from exc
+
+
+class RunnerTurnRemoteState(StrEnum):
+    RUNNING = "running"
+    FINISHED = "finished"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class RunnerTurnReply:
+    operation: RunnerOperation
+    work_item_id: str
+    turn_id: str
+    state: RunnerTurnRemoteState
+    session_id: str | None = None
+    head_sha: str | None = None
+    output_sha256: str | None = None
+    result: AgentResult | None = None
+    error_code: str | None = None
+    version: int = PROTOCOL_VERSION
+
+    def __post_init__(self) -> None:
+        if self.operation not in {
+            RunnerOperation.START,
+            RunnerOperation.RESUME,
+            RunnerOperation.STATUS,
+        }:
+            raise RunnerProtocolError("operation does not return a Turn reply")
+        if type(self.version) is not int or self.version != PROTOCOL_VERSION:
+            raise RunnerProtocolError("unsupported Runner response version")
+        validate_work_item_id(self.work_item_id)
+        validate_turn_id(self.turn_id)
+        if not isinstance(self.state, RunnerTurnRemoteState):
+            raise RunnerProtocolError("Runner Turn state is invalid")
+        if self.session_id is not None:
+            validate_session_id(self.session_id)
+        if self.head_sha is not None:
+            validate_git_sha(self.head_sha, "head_sha")
+        if self.output_sha256 is not None:
+            validate_sha256(self.output_sha256, "output_sha256")
+        if self.error_code is not None and (
+            not isinstance(self.error_code, str)
+            or not self.error_code
+            or len(self.error_code) > 128
+            or any(ord(character) < 32 or ord(character) == 127 for character in self.error_code)
+        ):
+            raise RunnerProtocolError("Runner error_code is invalid")
+
+        final_fields = (self.head_sha, self.output_sha256, self.result)
+        if self.state is RunnerTurnRemoteState.FINISHED:
+            if self.session_id is None or any(value is None for value in final_fields):
+                raise RunnerProtocolError("finished Runner Turn is missing result fields")
+            if self.error_code is not None:
+                raise RunnerProtocolError("finished Runner Turn cannot contain error_code")
+            assert self.result is not None
+            canonical = agent_result_to_json(self.result)
+            if sha256(canonical.encode("utf-8")).hexdigest() != self.output_sha256:
+                raise RunnerProtocolError("Runner result hash does not match its canonical JSON")
+        elif self.state is RunnerTurnRemoteState.RUNNING:
+            if self.session_id is None or any(value is not None for value in final_fields):
+                raise RunnerProtocolError("running Runner Turn fields are invalid")
+            if self.error_code is not None:
+                raise RunnerProtocolError("running Runner Turn cannot contain error_code")
+        else:
+            if any(value is not None for value in final_fields) or self.error_code is None:
+                raise RunnerProtocolError("failed or unknown Runner Turn fields are invalid")
+
+    def to_json(self) -> str:
+        payload: dict[str, object] = {
+            "version": self.version,
+            "op": self.operation.value,
+            "work_item_id": self.work_item_id,
+            "turn_id": self.turn_id,
+            "state": self.state.value,
+        }
+        optional: tuple[tuple[str, object | None], ...] = (
+            ("session_id", self.session_id),
+            ("head_sha", self.head_sha),
+            ("output_sha256", self.output_sha256),
+            (
+                "result",
+                agent_result_to_mapping(self.result) if self.result is not None else None,
+            ),
+            ("error_code", self.error_code),
+        )
+        payload.update((name, value) for name, value in optional if value is not None)
+        return _dump(payload)
+
+
+def parse_runner_turn_reply(value: str | bytes) -> RunnerTurnReply:
+    payload = _load(value)
+    base = {"version", "op", "work_item_id", "turn_id", "state"}
+    try:
+        state = RunnerTurnRemoteState(payload.get("state"))
+    except (TypeError, ValueError) as exc:
+        raise RunnerProtocolError("Runner Turn response state is unsupported") from exc
+    expected = {
+        RunnerTurnRemoteState.RUNNING: base | {"session_id"},
+        RunnerTurnRemoteState.FINISHED: base
+        | {"session_id", "head_sha", "output_sha256", "result"},
+        RunnerTurnRemoteState.FAILED: base | {"error_code"},
+        RunnerTurnRemoteState.UNKNOWN: base | {"error_code"},
+    }[state]
+    if state in {RunnerTurnRemoteState.FAILED, RunnerTurnRemoteState.UNKNOWN} and (
+        "session_id" in payload
+    ):
+        expected = expected | {"session_id"}
+    if set(payload) != expected:
+        raise RunnerProtocolError("Runner Turn response fields are invalid")
+    result: AgentResult | None = None
+    if "result" in payload:
+        result = parse_agent_result(_dump(payload["result"]))
+    try:
+        return RunnerTurnReply(
+            operation=RunnerOperation(payload["op"]),
+            work_item_id=payload["work_item_id"],
+            turn_id=payload["turn_id"],
+            state=state,
+            session_id=payload.get("session_id"),
+            head_sha=payload.get("head_sha"),
+            output_sha256=payload.get("output_sha256"),
+            result=result,
+            error_code=payload.get("error_code"),
+            version=payload["version"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise RunnerProtocolError(str(exc)) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class RunnerExportReply:
+    work_item_id: str
+    head_sha: str
+    bundle_sha256: str
+    size_bytes: int
+    version: int = PROTOCOL_VERSION
+    operation: RunnerOperation = RunnerOperation.EXPORT
+
+    def __post_init__(self) -> None:
+        if self.operation is not RunnerOperation.EXPORT:
+            raise RunnerProtocolError("operation does not return an export reply")
+        if type(self.version) is not int or self.version != PROTOCOL_VERSION:
+            raise RunnerProtocolError("unsupported Runner response version")
+        validate_work_item_id(self.work_item_id)
+        validate_git_sha(self.head_sha, "head_sha")
+        validate_sha256(self.bundle_sha256, "bundle_sha256")
+        if type(self.size_bytes) is not int or not 1 <= self.size_bytes <= MAX_ARTIFACT_BYTES:
+            raise RunnerProtocolError("Runner export size is invalid")
+
+    def to_json(self) -> str:
+        return _dump(
+            {
+                "version": self.version,
+                "op": self.operation.value,
+                "work_item_id": self.work_item_id,
+                "head_sha": self.head_sha,
+                "bundle_sha256": self.bundle_sha256,
+                "size_bytes": self.size_bytes,
+            }
+        )
+
+    def validate_artifact(self, artifact: bytes | None) -> bytes:
+        if artifact is None or len(artifact) != self.size_bytes:
+            raise RunnerProtocolError("Runner export artifact size does not match its manifest")
+        if sha256(artifact).hexdigest() != self.bundle_sha256:
+            raise RunnerProtocolError("Runner export artifact hash does not match its manifest")
+        return artifact
+
+
+def parse_runner_export_reply(value: str | bytes) -> RunnerExportReply:
+    payload = _load(value)
+    expected = {
+        "version",
+        "op",
+        "work_item_id",
+        "head_sha",
+        "bundle_sha256",
+        "size_bytes",
+    }
+    if set(payload) != expected or payload.get("op") != RunnerOperation.EXPORT.value:
+        raise RunnerProtocolError("Runner export response fields are invalid")
+    try:
+        return RunnerExportReply(
+            work_item_id=payload["work_item_id"],
+            head_sha=payload["head_sha"],
+            bundle_sha256=payload["bundle_sha256"],
+            size_bytes=payload["size_bytes"],
+            version=payload["version"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise RunnerProtocolError(str(exc)) from exc
+
+
+def _load(value: str | bytes) -> dict[str, Any]:
+    if isinstance(value, str):
+        raw = value.encode("utf-8")
+    elif isinstance(value, bytes):
+        raw = value
+    else:
+        raise RunnerProtocolError("Runner response must be UTF-8 JSON")
+    if not raw or len(raw) > MAX_RESPONSE_BYTES or b"\x00" in raw:
+        raise RunnerProtocolError("Runner response exceeds its safe boundary")
+    try:
+        parsed = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RunnerProtocolError("Runner response must be valid UTF-8 JSON") from exc
+    if not isinstance(parsed, dict):
+        raise RunnerProtocolError("Runner response must be a JSON object")
+    return parsed
+
+
+def _dump(value: object) -> str:
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise RunnerProtocolError(f"duplicate Runner response field: {key}")
+        result[key] = value
+    return result

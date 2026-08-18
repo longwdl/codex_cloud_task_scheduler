@@ -23,7 +23,7 @@ Linux Control Host
              │ restricted SSH
              ▼
 Dedicated Linux Runner
-└── Codex CLI + per-Issue directory + per-Issue CODEX_HOME
+└── Codex CLI + per-Issue directory + runner-wide CODEX_HOME
              │ bundle/result pulled by control host
              ▼
 Stable branch + one Draft PR + CI   代码审核和人工合并入口
@@ -52,7 +52,6 @@ Stable branch + one Draft PR + CI   代码审核和人工合并入口
 = 1 WorkItem
 = 1 stable branch
 = 1 runner directory
-= 1 CODEX_HOME
 = 1 Codex CLI session
 = 1 Slack thread
 = 0/1 Draft PR
@@ -115,13 +114,24 @@ SQLite 不承担多调度器租约或并发抢占协议。
 第一阶段直接运行 Codex CLI，不增加 Docker 或 per-task UID 限制。每个 WorkItem 使用不同目录：
 
 ```text
+/srv/codex-runner/
+├── etc/
+├── run/
+├── work-items/
+└── auth.json / sessions / other Codex-managed state
+
 /srv/codex-runner/work-items/<repository-key>/issue-<number>/
 ├── repo/
-├── codex-home/
-├── state/
-├── artifacts/
-└── tmp/
+└── runner-state/
 ```
+
+`CODEX_HOME=/srv/codex-runner` 在 Runner 范围共享，权限为 `0700`；Codex 登录状态只在该目录
+原地初始化和刷新，不复制到 WorkItem。WorkItem 与 Codex 上下文的绑定由持久化的精确 session
+ID 完成。
+
+`work-items/.registry/` 保存 WorkItem 到上述确定性相对目录的严格映射；`.staging/` 和
+`.exports/` 仅保存同文件系统上的短期原子安装/导出文件。source bundle 在 PREPARE 完成前
+删除，result bundle 在响应 frame 生成后删除。
 
 风险接受：运行用户能够访问的所有 Runner 数据都可能被删除或外传，磁盘可能被填满，Runner
 系统可能需要重建。Runner 因此不得保存：
@@ -141,12 +151,15 @@ Docker 阶段才增加：
 
 - 每个活动 WorkItem 一个容器；
 - 只挂载该 WorkItem 目录；
-- 持久化 `repo/` 和 `codex-home/`；
+- 持久化 `repo/` 和 `runner-state/`；
 - CPU、内存、PID、磁盘和执行时限；
 - 丢弃 capabilities，禁止 `--privileged`；
 - 不挂载 Docker socket、SSH agent、Control Host 或其他 WorkItem；
 - 禁止访问内网和云 metadata，按需限制外网；
 - 容器内可拥有完成开发所需权限，但这些权限不能扩展到 Runner Host。
+
+共享认证状态如何安全提供给容器必须在 Docker 阶段单独设计；不能把整个 Runner 级
+`CODEX_HOME` 无条件挂载给所有容器并宣称已经隔离。
 
 Docker 不在当前离线逻辑和第一轮 SSH Fixture 的完成条件内。
 
@@ -225,13 +238,16 @@ blocked | paused | waiting_input | review
 ### 5.2 Turn 状态
 
 ```text
-planned → starting → running → checkpointing → published → finished
-                     │              │
-                     └──────────────┴→ needs_input | failed | blocked | interrupted
+planned → starting → running ───────────────→ checkpointing → published → finished
+              │        │                              │             │
+              └────────┴→ reconciling ────────────────┘             └→ needs_input
+                           │
+                           └→ running | needs_input | failed | blocked | interrupted
 ```
 
 一个 WorkItem 可以有多个 Turn，但同一时刻全局最多一个 Turn 活动。Turn number 只用于审计，
-不进入 branch、directory、session 或 PR 身份。
+不进入 branch、directory、session 或 PR 身份。`reconciling` 仍属于活动 Turn 并占用全局唯一
+槽位；它只能发送 `status`，不得再次发送原 Prompt。
 
 ### 5.3 最小持久化字段
 
@@ -256,7 +272,8 @@ CREATE TABLE work_items (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(repository, issue_number),
-  UNIQUE(repository, task_branch)
+  UNIQUE(repository, task_branch),
+  UNIQUE(repository, pr_number)
 );
 
 CREATE TABLE turns (
@@ -268,6 +285,8 @@ CREATE TABLE turns (
   prompt_sha256 TEXT NOT NULL,
   input_head_sha TEXT NOT NULL,
   output_sha256 TEXT,
+  output_head_sha TEXT,
+  result_status TEXT,
   result_summary TEXT,
   error_code TEXT,
   started_at TEXT,
@@ -306,7 +325,32 @@ archive     仅完成后的显式清理入口，第一阶段默认禁用
 - SSH agent、端口或 X11 转发；
 - Runner 主动连接 Control Host。
 
-Prompt 和 JSON 请求通过 stdin 传输；输出设字节上限并做脱敏。
+Control Host 的 OpenSSH 调用固定忽略用户配置，启用 batch/public-key 和严格 host-key 校验，
+固定 `known_hosts`、identity、用户、主机、端口与 `codex-runner-v1`，并关闭 agent/X11/全部
+forward、ProxyJump、local command 和 TTY。生产默认固定 `ProxyCommand=none`。当前 Mac
+Fixture 因多级跳板加速可显式配置受保护的 `/opt/homebrew/bin/assh`，此时适配器只生成固定
+形状 `assh connect --port=%p %h`，并要求显式、受保护的 `assh_home`，只将该目录作为 `HOME`
+传给 SSH 子进程以定位 assh 配置；不继承其他 Dispatcher 环境，也不提供通用 ProxyCommand
+字符串入口。Issue、Prompt、路径、Git URL 和任意 Runner 参数都不能进入 SSH argv。
+
+JSON 请求、Prompt 和 source bundle 通过同一个 stdin 的三个独立长度字段传输；response JSON
+和可选 result bundle 使用两个独立长度字段。frame 包含协议 magic/version 和各部分 byte
+length。PREPARE 必须携带 `repository/issue_number/task_branch/base_sha` 以及 source bundle 的
+size/SHA-256；START/RESUME 只能携带 Prompt；其他请求不能携带输入 artifact。解析器拒绝未知
+版本、长度不符、尾随字节、操作/内容错配和 hash 不符。输出设字节上限并做脱敏。
+
+Control Host 从可信 mirror 将精确 `base_sha` 复制到一次性 bare repository，再生成只公布固定
+base ref 的 self-contained bundle；不在 mirror 中创建临时 ref。Runner 只从该 bundle 导入，
+拒绝 submodule 和声明 filter/diff/working-tree-encoding driver 的 `.gitattributes`，创建固定任务
+分支且不配置 remote。因此 Runner 无需任何 GitHub 凭据。
+
+远端 forced command `codex-runner-v1` 不接受参数，只读取权限受保护、字段严格的
+`/srv/codex-runner/etc/config.json`。可执行文件和 output schema 必须解析到不可被 group/world
+写入的普通文件；配置的 runner-wide `CODEX_HOME` 必须是当前用户拥有且权限不超过 `0700`
+的目录。每次 START/RESUME 在运行 Codex 前原子持久化请求，运行期间持有全局非阻塞
+`flock`，完成后先持久化 canonical reply 再写 SSH 响应。相同 `turn_id` 的完全相同请求只读回
+结果；冲突请求被拒绝；残留 `executing` 记录只返回 `unknown`。wrapper 忽略 SIGHUP 以提高 SSH
+断线后落盘结果的概率，但主机/进程崩溃仍按未知结果处理。
 
 ### 6.2 Codex CLI 调用
 
@@ -314,7 +358,7 @@ Prompt 和 JSON 请求通过 stdin 传输；输出设字节上限并做脱敏。
 
 ```text
 cwd=<work-item>/repo
-CODEX_HOME=<work-item>/codex-home
+CODEX_HOME=/srv/codex-runner
 codex exec --json --dangerously-bypass-approvals-and-sandbox \
   --output-schema <fixed-schema> -
 ```
@@ -325,7 +369,7 @@ codex exec --json --dangerously-bypass-approvals-and-sandbox \
 
 ```text
 cwd=<work-item>/repo
-CODEX_HOME=<work-item>/codex-home
+CODEX_HOME=/srv/codex-runner
 codex exec resume <recorded-session-id> --json \
   --dangerously-bypass-approvals-and-sandbox --output-schema <fixed-schema> -
 ```
@@ -334,6 +378,14 @@ codex exec resume <recorded-session-id> --json \
 Runner；Docker 阶段继续在容器内使用，但由容器提供外部边界。禁止 `--last`、`--ephemeral`
 和自动创建替代 session。JSONL 解析错误、缺少 `thread_id`、返回
 不同 session、超时或 SSH 中断都进入对账状态，不能盲目重放 Prompt。
+
+每个 Turn 在启动前先使用相同共享 `CODEX_HOME` 执行固定的 `codex login status`。状态检查和
+`codex exec` 都通过固定 CLI 配置覆盖强制 `forced_login_method="chatgpt"` 以及
+`cli_auth_credentials_store="file"`，不依赖 WorkItem 或可变环境。当前固定 CLI 版本还必须返回
+精确的 `Logged in using ChatGPT`；API key、未登录、状态输出漂移、超时或命令失败都返回
+`codex_auth_invalid`，不启动 `codex exec`。检查器不读取或复制 `auth.json`。配置项语义以
+[OpenAI Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+为准。
 
 ### 6.3 Turn 结果 Schema
 
@@ -433,6 +485,8 @@ Slack 中人工消息对系统行为没有任何影响。
 - Slack 出站消息模型和去重键；
 - 全部 Fake 和故障路径单测。
 
+状态：离线实现完成，尚未接真实外部服务。
+
 ### Phase B：本地 Git bundle/quarantine
 
 仍不访问 GitHub：
@@ -443,14 +497,24 @@ Slack 中人工消息对系统行为没有任何影响。
 - hooks/config/protocol 防护；
 - 崩溃恢复和重复 import 幂等。
 
+离线实现要求 Runner 输出 self-contained bundle。Verifier 将其写入一次性 quarantine bare
+repository，使用固定 Git 配置执行 `bundle verify`、`fsck`、anchor ancestry、commit/path/mode、
+文本、大小和凭据检查；不执行 checkout、hook、filter、textconv、submodule 或仓库代码。
+
+状态：source/result bundle、Runner workspace 和 Control Host quarantine 的本地 Git fixture 已
+完成；未访问 GitHub。
+
 ### Phase C：Linux SSH Runner Fixture
 
 - 两台 Linux：Control Host 和专用 Runner；
 - 固定 OpenSSH、Git、Codex CLI 版本；
 - forced-command Runner wrapper；
 - 首次 `codex exec --json` 和 session ID 捕获；
-- Runner 重启后从相同目录和 CODEX_HOME resume；
+- Runner 重启后从相同目录、runner-wide CODEX_HOME 和精确 session ID resume；
 - 第一阶段不增加 Docker 或 per-task OS 隔离。
+
+状态：forced-command 服务、严格配置、OpenSSH adapter、Codex argv/JSONL parser 和 fake Codex
+集成已经离线实现；两台 Linux、真实 SSH、Codex 登录与真实 session resume 仍待 live fixture。
 
 ### Phase D：Publisher + GitHub Fixture
 
@@ -459,6 +523,10 @@ Slack 中人工消息对系统行为没有任何影响。
 - Draft PR 和 Issue 状态；
 - 主分支保护可用性核验；
 - 故障注入：push 成功但 SQLite 未更新、PR 成功但评论未更新。
+
+状态：Publisher 的 bundle import、精确 SHA、精确 `--force-with-lease`、远端 read-back、push
+回执丢失恢复和竞态拒绝已在本地 bare remote 完成；真实 GitHub 凭据合同、Draft PR 与 Issue
+写入仍待 live fixture。
 
 ### Phase E：Slack 只读投影
 
@@ -506,9 +574,10 @@ SQLite 使用 Online Backup API；WAL 模式下禁止仅复制主 DB 文件。Gi
 
 ```text
 /opt/codex-runner/runnerctl
-/etc/codex-runner/config.json
+/srv/codex-runner/etc/config.json
+/srv/codex-runner/etc/agent-result.schema.json
 /srv/codex-runner/work-items/
-/run/codex-runner/active.lock
+/srv/codex-runner/run/active.lock
 ```
 
 Runner 的 SSH host key 固定在 Control Host。禁止 `StrictHostKeyChecking=no`、agent forwarding、
@@ -518,7 +587,8 @@ port forwarding 和 X11 forwarding。
 
 - 单个 WorkItem 默认磁盘预算 20 GiB；大型项目显式提高。
 - completed WorkItem 默认保留 7 天后归档。
-- `repo/`、`codex-home/` 和 manifest 同生共灭。
+- 每个 WorkItem 的 `repo/`、`runner-state/` 和 manifest 同生共灭；共享 `CODEX_HOME` 不随单个
+  WorkItem 清理。
 - 不自动删除 `blocked` 或 `needs_input` WorkItem。
 - Control Host 每日 SQLite online backup，并保留 GitHub/Slack 映射。
 
@@ -560,10 +630,16 @@ git diff --check
 | AC-019 | push 后崩溃 | 读回远端 ref 后幂等补记，不重复 commit |
 | AC-020 | PR 创建后崩溃 | 按 head branch 找回原 Draft PR，不创建第二个 |
 | AC-021 | SSH 中断 | Turn 进入 interrupted/reconcile，不盲目重放 Prompt |
-| AC-022 | Runner 重启 | 同目录、CODEX_HOME、session ID 可以 resume |
+| AC-022 | Runner 重启 | 同目录、共享 CODEX_HOME、精确 session ID 可以 resume |
+| AC-030 | Mac Fixture assh 代理 | `assh` 路径与 home 必须成对显式配置，只生成固定 `assh connect --port=%p %h`；默认无代理且不能注入任意命令 |
+| AC-031 | ChatGPT 登录门槛 | 每个 Turn 前固定状态检查；API key、未登录或输出漂移均不启动 `codex exec` |
 | AC-023 | Runner 磁盘丢失 | 已发布 commit/PR/Issue/SQLite 不受影响 |
 | AC-024 | 输出包含凭据 | 日志、GitHub、Slack 仅出现脱敏值 |
 | AC-025 | Docker 未部署 | 诊断明确报告 first-phase risk accepted，不虚报隔离 |
+| AC-026 | PREPARE source bundle | 只接受 size/SHA 匹配且仅公布精确 base SHA 的自包含 bundle |
+| AC-027 | 相同 Turn 重试 | 返回同一持久化结果，Codex 调用数和 commit 数不增加 |
+| AC-028 | Turn 请求冲突 | 相同 turn ID 的不同 Prompt/session/anchor 被拒绝，不执行 Codex |
+| AC-029 | Runner 输入残留 executing | STATUS 返回 unknown；Dispatcher 保持 reconcile 且不重放 Prompt |
 
 ### 12.3 Live Fixture 顺序
 
@@ -587,7 +663,8 @@ git diff --check
 | 私有源码外传 | 仓库机密性损失 | 只接入批准仓库、Runner 不接触生产 Secret、后续网络隔离 |
 | Publisher 权限仓库级 | 未保护 ref 被修改 | token 不给 Codex、固定参数、精确 SHA、无 force/delete/tag、分支保护 |
 | 恶意 bundle/Git 配置 | Control Host 命令执行或凭据泄漏 | quarantine、固定 Git 配置、禁 hook/filter/protocol、保持 Git 补丁更新 |
-| session 丢失 | 上下文和未发布工作损失 | 同目录/CODEX_HOME、每 Turn checkpoint、丢失时 blocked 不替换 |
+| session 丢失 | 上下文和未发布工作损失 | 同目录/共享 CODEX_HOME/精确 session ID、每 Turn checkpoint、丢失时 blocked 不替换 |
+| 共享 CODEX_HOME 被破坏 | 所有本地 session 和 ChatGPT 登录状态丢失 | 目录 0700、单 Turn、Runner 无高价值凭据、主机可重建；Docker 阶段重做认证隔离 |
 | SQLite 损坏 | 映射和恢复锚点损失 | online backup、integrity check、GitHub/Runner 对账 |
 | Slack 故障 | 详情不可见 | GitHub/SQLite 仍为事实来源，恢复后幂等补发 |
 

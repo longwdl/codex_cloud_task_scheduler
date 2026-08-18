@@ -12,6 +12,13 @@ from pathlib import Path
 from typing import Any
 
 from codex_dispatcher.domain import Run, RunState, utc_now_iso
+from codex_dispatcher.work_items import (
+    Turn,
+    TurnState,
+    WorkItem,
+    WorkItemState,
+    validate_git_sha,
+)
 
 
 _BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
@@ -54,26 +61,36 @@ class StateStore:
             self._connection.commit()
 
     def migrate(self) -> None:
-        migration_sql = (
-            files("codex_dispatcher.migrations")
-            .joinpath("001_initial.sql")
-            .read_text(encoding="utf-8")
-        )
         with self._transaction() as connection:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS schema_migrations "
                 "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
             )
-            applied = connection.execute(
-                "SELECT 1 FROM schema_migrations WHERE version = 1"
-            ).fetchone()
-            if applied is None:
+            applied = {
+                int(row[0])
+                for row in connection.execute("SELECT version FROM schema_migrations")
+            }
+            migration_root = files("codex_dispatcher.migrations")
+            migrations: list[tuple[int, str]] = []
+            for resource in migration_root.iterdir():
+                match = re.fullmatch(r"([0-9]{3})_[A-Za-z0-9_]+\.sql", resource.name)
+                if match is not None:
+                    migrations.append((int(match.group(1)), resource.read_text(encoding="utf-8")))
+            versions = [version for version, _ in migrations]
+            if len(set(versions)) != len(versions):
+                raise RuntimeError("duplicate SQLite migration version")
+            unknown_applied = applied - set(versions)
+            if unknown_applied:
+                raise RuntimeError("database contains an unsupported SQLite migration version")
+            for version, migration_sql in sorted(migrations):
+                if version in applied:
+                    continue
                 for statement in migration_sql.split(";"):
                     if statement.strip():
                         connection.execute(statement)
                 connection.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                    (1, utc_now_iso()),
+                    (version, utc_now_iso()),
                 )
 
     def create_run(self, run: Run) -> None:
@@ -315,6 +332,564 @@ class StateStore:
         assert dispatching is not None
         return dispatching
 
+    def create_work_item(self, work_item: WorkItem) -> None:
+        """Persist one stable Issue-to-session identity."""
+        fields = (
+            "work_item_id",
+            "repository",
+            "issue_number",
+            "issue_node_id",
+            "state",
+            "base_branch",
+            "task_branch",
+            "runner_directory",
+            "codex_session_id",
+            "slack_channel_id",
+            "slack_thread_ts",
+            "pr_number",
+            "base_sha",
+            "last_published_sha",
+            "created_at",
+            "updated_at",
+        )
+        values = tuple(
+            getattr(work_item, field).value if field == "state" else getattr(work_item, field)
+            for field in fields
+        )
+        with self._transaction() as connection:
+            connection.execute(
+                f"INSERT INTO work_items ({', '.join(fields)}) "
+                f"VALUES ({', '.join('?' for _ in fields)})",
+                values,
+            )
+            self._insert_work_item_event(
+                connection,
+                work_item.work_item_id,
+                None,
+                "work_item_created",
+                {
+                    "repository": work_item.repository,
+                    "issue_number": work_item.issue_number,
+                    "task_branch": work_item.task_branch,
+                },
+                work_item.created_at,
+            )
+
+    def get_work_item(self, work_item_id: str) -> WorkItem | None:
+        row = self._connection.execute(
+            "SELECT * FROM work_items WHERE work_item_id = ?", (work_item_id,)
+        ).fetchone()
+        return self._row_to_work_item(row) if row is not None else None
+
+    def get_work_item_by_issue(self, repository: str, issue_number: int) -> WorkItem | None:
+        row = self._connection.execute(
+            "SELECT * FROM work_items WHERE repository = ? AND issue_number = ?",
+            (repository, issue_number),
+        ).fetchone()
+        return self._row_to_work_item(row) if row is not None else None
+
+    def update_work_item_state(
+        self, work_item_id: str, state: WorkItemState, *, updated_at: str | None = None
+    ) -> WorkItem:
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM work_items WHERE work_item_id = ?", (work_item_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"work item not found: {work_item_id}")
+            work_item = self._row_to_work_item(row)
+            if work_item.state is state:
+                return work_item
+            updated = work_item.transition_to(state, at=now)
+            cursor = connection.execute(
+                "UPDATE work_items SET state = ?, updated_at = ? "
+                "WHERE work_item_id = ? AND state = ?",
+                (state.value, updated.updated_at, work_item_id, work_item.state.value),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"concurrent work-item update detected: {work_item_id}")
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "work_item_state_changed",
+                {"from": work_item.state.value, "to": state.value},
+                now,
+            )
+        return updated
+
+    def bind_codex_session(
+        self, work_item_id: str, session_id: str, *, updated_at: str | None = None
+    ) -> WorkItem:
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM work_items WHERE work_item_id = ?", (work_item_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"work item not found: {work_item_id}")
+            work_item = self._row_to_work_item(row)
+            updated = work_item.bind_session(session_id, at=now)
+            if updated is work_item:
+                return work_item
+            cursor = connection.execute(
+                "UPDATE work_items SET codex_session_id = ?, updated_at = ? "
+                "WHERE work_item_id = ? AND codex_session_id IS NULL",
+                (session_id, now, work_item_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"concurrent session binding detected: {work_item_id}")
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "codex_session_bound",
+                {"session_id": session_id},
+                now,
+            )
+        return updated
+
+    def bind_slack_thread(
+        self,
+        work_item_id: str,
+        *,
+        channel_id: str,
+        thread_ts: str,
+        updated_at: str | None = None,
+    ) -> WorkItem:
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM work_items WHERE work_item_id = ?", (work_item_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"work item not found: {work_item_id}")
+            work_item = self._row_to_work_item(row)
+            updated = work_item.bind_slack_thread(channel_id, thread_ts, at=now)
+            if updated is work_item:
+                return work_item
+            cursor = connection.execute(
+                "UPDATE work_items SET slack_channel_id = ?, slack_thread_ts = ?, updated_at = ? "
+                "WHERE work_item_id = ? AND slack_channel_id IS NULL AND slack_thread_ts IS NULL",
+                (channel_id, thread_ts, now, work_item_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"concurrent Slack binding detected: {work_item_id}")
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "slack_thread_bound",
+                {"channel_id": channel_id, "thread_ts": thread_ts},
+                now,
+            )
+        return updated
+
+    def bind_draft_pr(
+        self, work_item_id: str, pr_number: int, *, updated_at: str | None = None
+    ) -> WorkItem:
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM work_items WHERE work_item_id = ?", (work_item_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"work item not found: {work_item_id}")
+            work_item = self._row_to_work_item(row)
+            if type(pr_number) is not int or pr_number <= 0:
+                raise ValueError("pr_number must be a positive integer")
+            if work_item.pr_number is not None:
+                if work_item.pr_number != pr_number:
+                    raise ValueError("work item is already bound to a different Draft PR")
+                return work_item
+            cursor = connection.execute(
+                "UPDATE work_items SET pr_number = ?, updated_at = ? "
+                "WHERE work_item_id = ? AND pr_number IS NULL",
+                (pr_number, now, work_item_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"concurrent Draft PR binding detected: {work_item_id}")
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "draft_pr_bound",
+                {"pr_number": pr_number},
+                now,
+            )
+        updated = self.get_work_item(work_item_id)
+        assert updated is not None
+        return updated
+
+    def record_published_sha(
+        self,
+        work_item_id: str,
+        *,
+        previous_sha: str,
+        head_sha: str,
+        updated_at: str | None = None,
+    ) -> WorkItem:
+        previous_sha = validate_git_sha(previous_sha, "previous_sha")
+        head_sha = validate_git_sha(head_sha, "head_sha")
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM work_items WHERE work_item_id = ?", (work_item_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"work item not found: {work_item_id}")
+            work_item = self._row_to_work_item(row)
+            current_anchor = work_item.last_published_sha or work_item.base_sha
+            if work_item.last_published_sha == head_sha:
+                return work_item
+            if previous_sha != current_anchor:
+                raise ValueError("publication anchor no longer matches the work item")
+            if head_sha == current_anchor:
+                raise ValueError("published SHA must advance the work item anchor")
+            cursor = connection.execute(
+                "UPDATE work_items SET last_published_sha = ?, updated_at = ? "
+                "WHERE work_item_id = ? AND "
+                "((last_published_sha IS NULL AND base_sha = ?) OR last_published_sha = ?)",
+                (head_sha, now, work_item_id, previous_sha, previous_sha),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"concurrent publication update detected: {work_item_id}")
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "commit_published",
+                {"head_sha": head_sha, "previous_sha": previous_sha},
+                now,
+            )
+        updated = self.get_work_item(work_item_id)
+        assert updated is not None
+        return updated
+
+    def plan_turn(
+        self,
+        work_item_id: str,
+        *,
+        issue_revision: str,
+        prompt_sha256: str,
+        input_head_sha: str,
+        turn_id: str | None = None,
+        created_at: str | None = None,
+    ) -> Turn:
+        """Allocate the next ordered Turn while enforcing one active Turn globally."""
+        now = created_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM work_items WHERE work_item_id = ?", (work_item_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"work item not found: {work_item_id}")
+            work_item = self._row_to_work_item(row)
+            if work_item.state is not WorkItemState.READY:
+                raise ValueError("work item must be ready before planning a Turn")
+            next_number = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(turn_number), 0) + 1 FROM turns WHERE work_item_id = ?",
+                    (work_item_id,),
+                ).fetchone()[0]
+            )
+            turn = Turn.new(
+                turn_id=turn_id,
+                work_item_id=work_item_id,
+                turn_number=next_number,
+                issue_revision=issue_revision,
+                prompt_sha256=prompt_sha256,
+                input_head_sha=input_head_sha,
+                at=now,
+            )
+            self._insert_turn(connection, turn)
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                turn.turn_id,
+                "turn_planned",
+                {
+                    "input_head_sha": input_head_sha,
+                    "issue_revision": issue_revision,
+                    "prompt_sha256": prompt_sha256,
+                    "turn_number": next_number,
+                },
+                now,
+            )
+        return turn
+
+    def begin_turn(
+        self,
+        work_item_id: str,
+        *,
+        issue_revision: str,
+        prompt_sha256: str,
+        input_head_sha: str,
+        turn_id: str | None = None,
+        created_at: str | None = None,
+    ) -> tuple[WorkItem, Turn]:
+        """Atomically mark a ready WorkItem running and allocate its next Turn."""
+        now = created_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM work_items WHERE work_item_id = ?", (work_item_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"work item not found: {work_item_id}")
+            work_item = self._row_to_work_item(row)
+            if work_item.state is not WorkItemState.READY:
+                raise ValueError("work item must be ready before beginning a Turn")
+            next_number = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(turn_number), 0) + 1 FROM turns WHERE work_item_id = ?",
+                    (work_item_id,),
+                ).fetchone()[0]
+            )
+            turn = Turn.new(
+                turn_id=turn_id,
+                work_item_id=work_item_id,
+                turn_number=next_number,
+                issue_revision=issue_revision,
+                prompt_sha256=prompt_sha256,
+                input_head_sha=input_head_sha,
+                at=now,
+            )
+            self._insert_turn(connection, turn)
+            cursor = connection.execute(
+                "UPDATE work_items SET state = ?, updated_at = ? "
+                "WHERE work_item_id = ? AND state = ?",
+                (
+                    WorkItemState.RUNNING.value,
+                    now,
+                    work_item_id,
+                    WorkItemState.READY.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"concurrent WorkItem Turn start detected: {work_item_id}")
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                turn.turn_id,
+                "turn_begun",
+                {
+                    "input_head_sha": input_head_sha,
+                    "issue_revision": issue_revision,
+                    "prompt_sha256": prompt_sha256,
+                    "turn_number": next_number,
+                },
+                now,
+            )
+        running = work_item.transition_to(WorkItemState.RUNNING, at=now)
+        return running, turn
+
+    def get_turn(self, turn_id: str) -> Turn | None:
+        row = self._connection.execute(
+            "SELECT * FROM turns WHERE turn_id = ?", (turn_id,)
+        ).fetchone()
+        return self._row_to_turn(row) if row is not None else None
+
+    def list_turns(self, work_item_id: str) -> tuple[Turn, ...]:
+        return tuple(
+            self._row_to_turn(row)
+            for row in self._connection.execute(
+                "SELECT * FROM turns WHERE work_item_id = ? ORDER BY turn_number",
+                (work_item_id,),
+            )
+        )
+
+    def update_turn_state(
+        self, turn_id: str, state: TurnState, *, updated_at: str | None = None
+    ) -> Turn:
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute("SELECT * FROM turns WHERE turn_id = ?", (turn_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"turn not found: {turn_id}")
+            turn = self._row_to_turn(row)
+            if turn.state is state:
+                return turn
+            updated = turn.transition_to(state, at=now)
+            cursor = connection.execute(
+                "UPDATE turns SET state = ?, started_at = ?, finished_at = ?, updated_at = ? "
+                "WHERE turn_id = ? AND state = ?",
+                (
+                    updated.state.value,
+                    updated.started_at,
+                    updated.finished_at,
+                    updated.updated_at,
+                    turn_id,
+                    turn.state.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"concurrent Turn update detected: {turn_id}")
+            self._insert_work_item_event(
+                connection,
+                turn.work_item_id,
+                turn_id,
+                "turn_state_changed",
+                {"from": turn.state.value, "to": state.value},
+                now,
+            )
+        return updated
+
+    def record_turn_result(
+        self,
+        turn_id: str,
+        *,
+        output_sha256: str,
+        output_head_sha: str,
+        result_status: str,
+        result_summary: str,
+        error_code: str | None = None,
+        updated_at: str | None = None,
+    ) -> Turn:
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute("SELECT * FROM turns WHERE turn_id = ?", (turn_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"turn not found: {turn_id}")
+            turn = self._row_to_turn(row)
+            if turn.state is TurnState.PLANNED:
+                raise ValueError("a planned Turn cannot record an execution result")
+            candidate = Turn(
+                turn_id=turn.turn_id,
+                work_item_id=turn.work_item_id,
+                turn_number=turn.turn_number,
+                state=turn.state,
+                issue_revision=turn.issue_revision,
+                prompt_sha256=turn.prompt_sha256,
+                input_head_sha=turn.input_head_sha,
+                output_sha256=output_sha256,
+                output_head_sha=output_head_sha,
+                result_status=result_status,
+                result_summary=result_summary,
+                error_code=error_code,
+                started_at=turn.started_at,
+                finished_at=turn.finished_at,
+                created_at=turn.created_at,
+                updated_at=now,
+            )
+            if turn.output_sha256 is not None:
+                if (
+                    turn.output_sha256 != candidate.output_sha256
+                    or turn.output_head_sha != candidate.output_head_sha
+                    or turn.result_status != candidate.result_status
+                    or turn.result_summary != candidate.result_summary
+                    or turn.error_code != candidate.error_code
+                ):
+                    raise ValueError("Turn already has a different recorded result")
+                return turn
+            cursor = connection.execute(
+                "UPDATE turns SET output_sha256 = ?, output_head_sha = ?, result_status = ?, "
+                "result_summary = ?, error_code = ?, "
+                "updated_at = ? WHERE turn_id = ? AND output_sha256 IS NULL",
+                (
+                    output_sha256,
+                    output_head_sha,
+                    result_status,
+                    result_summary,
+                    error_code,
+                    now,
+                    turn_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"concurrent Turn result update detected: {turn_id}")
+            self._insert_work_item_event(
+                connection,
+                turn.work_item_id,
+                turn_id,
+                "turn_result_recorded",
+                {
+                    "error_code": error_code,
+                    "output_head_sha": output_head_sha,
+                    "output_sha256": output_sha256,
+                    "result_status": result_status,
+                },
+                now,
+            )
+        return candidate
+
+    def finalize_turn(
+        self,
+        turn_id: str,
+        *,
+        turn_state: TurnState,
+        work_item_state: WorkItemState,
+        updated_at: str | None = None,
+    ) -> tuple[WorkItem, Turn]:
+        """Atomically finalize a Turn and move its WorkItem to the matching state."""
+        if turn_state not in {TurnState.FINISHED, TurnState.NEEDS_INPUT, TurnState.BLOCKED}:
+            raise ValueError("turn_state must be a supported final outcome")
+        if work_item_state not in {
+            WorkItemState.REVIEW,
+            WorkItemState.WAITING_INPUT,
+            WorkItemState.BLOCKED,
+        }:
+            raise ValueError("work_item_state must be a supported final outcome")
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            turn_row = connection.execute(
+                "SELECT * FROM turns WHERE turn_id = ?", (turn_id,)
+            ).fetchone()
+            if turn_row is None:
+                raise KeyError(f"turn not found: {turn_id}")
+            turn = self._row_to_turn(turn_row)
+            work_item_row = connection.execute(
+                "SELECT * FROM work_items WHERE work_item_id = ?", (turn.work_item_id,)
+            ).fetchone()
+            assert work_item_row is not None
+            work_item = self._row_to_work_item(work_item_row)
+            if turn.state is turn_state and work_item.state is work_item_state:
+                return work_item, turn
+            required_result = {
+                TurnState.FINISHED: "completed",
+                TurnState.NEEDS_INPUT: "needs_input",
+            }.get(turn_state)
+            if required_result is not None and turn.result_status != required_result:
+                raise ValueError("Turn result does not match the requested final state")
+            updated_turn = turn.transition_to(turn_state, at=now)
+            updated_work_item = work_item.transition_to(work_item_state, at=now)
+            turn_cursor = connection.execute(
+                "UPDATE turns SET state = ?, started_at = ?, finished_at = ?, updated_at = ? "
+                "WHERE turn_id = ? AND state = ?",
+                (
+                    turn_state.value,
+                    updated_turn.started_at,
+                    updated_turn.finished_at,
+                    now,
+                    turn_id,
+                    turn.state.value,
+                ),
+            )
+            work_item_cursor = connection.execute(
+                "UPDATE work_items SET state = ?, updated_at = ? "
+                "WHERE work_item_id = ? AND state = ?",
+                (
+                    work_item_state.value,
+                    now,
+                    work_item.work_item_id,
+                    work_item.state.value,
+                ),
+            )
+            if turn_cursor.rowcount != 1 or work_item_cursor.rowcount != 1:
+                raise RuntimeError(f"concurrent Turn finalization detected: {turn_id}")
+            self._insert_work_item_event(
+                connection,
+                work_item.work_item_id,
+                turn_id,
+                "turn_finalized",
+                {
+                    "turn_state": turn_state.value,
+                    "work_item_state": work_item_state.value,
+                },
+                now,
+            )
+        return updated_work_item, updated_turn
+
     def append_event(
         self,
         run_id: str,
@@ -334,6 +909,55 @@ class StateStore:
             )
         assert cursor.lastrowid is not None
         return cursor.lastrowid
+
+    @staticmethod
+    def _insert_turn(connection: sqlite3.Connection, turn: Turn) -> None:
+        fields = (
+            "turn_id",
+            "work_item_id",
+            "turn_number",
+            "state",
+            "issue_revision",
+            "prompt_sha256",
+            "input_head_sha",
+            "output_sha256",
+            "output_head_sha",
+            "result_status",
+            "result_summary",
+            "error_code",
+            "started_at",
+            "finished_at",
+            "created_at",
+            "updated_at",
+        )
+        values = tuple(
+            getattr(turn, field).value if field == "state" else getattr(turn, field)
+            for field in fields
+        )
+        connection.execute(
+            f"INSERT INTO turns ({', '.join(fields)}) "
+            f"VALUES ({', '.join('?' for _ in fields)})",
+            values,
+        )
+
+    @staticmethod
+    def _insert_work_item_event(
+        connection: sqlite3.Connection,
+        work_item_id: str,
+        turn_id: str | None,
+        event_type: str,
+        payload: Mapping[str, Any],
+        event_time: str,
+    ) -> None:
+        payload_json = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        connection.execute(
+            "INSERT INTO work_item_events"
+            "(work_item_id, turn_id, event_type, event_time, payload_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (work_item_id, turn_id, event_type, event_time, payload_json),
+        )
 
     @staticmethod
     def _insert_event(
@@ -380,3 +1004,15 @@ class StateStore:
         values = dict(row)
         values["state"] = RunState(values["state"])
         return Run(**values)
+
+    @staticmethod
+    def _row_to_work_item(row: sqlite3.Row) -> WorkItem:
+        values = dict(row)
+        values["state"] = WorkItemState(values["state"])
+        return WorkItem(**values)
+
+    @staticmethod
+    def _row_to_turn(row: sqlite3.Row) -> Turn:
+        values = dict(row)
+        values["state"] = TurnState(values["state"])
+        return Turn(**values)

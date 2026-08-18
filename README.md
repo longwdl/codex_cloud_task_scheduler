@@ -12,26 +12,28 @@ reconciliation through restricted SSH.
 ## Current status
 
 The repository is migrating from an abandoned Codex Cloud design to a remote Linux Codex CLI
-executor. Existing environment-independent foundations include:
+executor. The environment-independent implementation now includes:
 
 - strict configuration parsing;
 - the legacy run state machine and additive SQLite persistence;
 - hardened local Git mirror and task-worktree preparation;
 - issue task-spec parsing and immutable prompt snapshots;
 - redaction and safe subprocess execution;
-- tracker/executor ports, offline fakes, and read-only candidate planning;
-
-The next offline increment adds:
-
 - stable WorkItem/Turn identity and persistence;
 - strict Runner and Publisher request contracts;
 - Codex JSONL session binding and resume planning;
 - deterministic task-directory and branch identity;
-- offline unit and integration tests.
+- bounded source/result Git bundle transfer and quarantine verification;
+- fixed-lease task-branch publication with exact-SHA read-back recovery;
+- fixed OpenSSH framing and a `codex-runner-v1` forced-command service;
+- persistent Runner workspaces and idempotent first/resume Turn execution;
+- outbound-only Slack projection models and offline integration tests.
 
-There is no enabled SSH Runner execution, Publisher push, Slack delivery, automatic PR creation,
-merge, or deployment in this revision. Existing Codex Cloud adapter code is retained only during
-migration; Cloud writes remain disabled and are not part of the target architecture.
+The Runner path has been exercised only with local repositories, mocked SSH, and a fake Codex
+executable. There is still no networked SSH fixture, real Codex invocation, Publisher push, Slack
+delivery, automatic PR creation, merge, or deployment. Existing Codex Cloud adapter code is
+retained only during migration; Cloud writes remain disabled and are not part of the target
+architecture.
 
 Candidate planning is exposed through a dependency-injected Python entry point and a read-only
 GitHub CLI dry-run command. The command performs tracker reads but does not claim issues, mutate

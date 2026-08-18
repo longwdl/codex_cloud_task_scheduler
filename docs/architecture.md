@@ -22,7 +22,8 @@ Linux control host (high trust)
                     ▼
 Dedicated Linux runner (low trust and rebuildable)
 ├── Codex CLI, with no GitHub write credential
-└── one persistent directory and CODEX_HOME per work item
+├── one persistent repository/state directory per work item
+└── one protected, runner-wide CODEX_HOME for ChatGPT auth and Codex session state
 ```
 
 The Dispatcher and Publisher run on the same control host. They remain separate responsibilities:
@@ -44,7 +45,6 @@ One executable GitHub issue has exactly one active development identity until co
 = 1 WorkItem row
 = 1 stable task branch
 = 1 runner task directory
-= 1 task-specific CODEX_HOME
 = 1 Codex CLI session ID
 = 1 Slack thread
 = 0 or 1 Draft PR
@@ -78,11 +78,13 @@ Turn
   work_item_id, turn_number
   issue_revision, prompt_sha256, input_head_sha
   started_at, finished_at, status
-  output_sha256, result_summary, error_code
+  output_sha256, output_head_sha, result_status, result_summary, error_code
 ```
 
 Only one turn may be active globally. A single dispatcher process and an operating-system startup
-lock enforce this; SQLite leases are not used to enable concurrent submitters.
+lock enforce this; SQLite leases are not used to enable concurrent submitters. `reconciling` is an
+active state: an ambiguous SSH interruption retains the global slot until a read-only `status`
+request proves the remote outcome. The original Prompt is never replayed during reconciliation.
 
 ## Input and output channels
 
@@ -106,7 +108,8 @@ on standard input. The dedicated, disposable Runner host is the external boundar
 first-phase risk acceptance. The Dispatcher captures
 the `thread.started.thread_id` event and binds it exactly once to the work item. Later turns run
 `codex exec resume <session-id> --json --dangerously-bypass-approvals-and-sandbox -` from the same
-repository directory with the same task-specific `CODEX_HOME`. After Docker is introduced, the
+repository directory with the same runner-wide `CODEX_HOME`. The session ID, not a task-specific
+authentication directory, selects the exact Codex context. After Docker is introduced, the
 container becomes the external boundary and the Codex invocation remains unrestricted inside it.
 
 `--ephemeral` and `resume --last` are forbidden. Missing, conflicting, or ambiguous session state
@@ -116,18 +119,42 @@ JSONL events are untrusted structured input. Output is bounded, parsed strictly,
 reduced to a schema-controlled result. Reasoning events and raw command output are not copied to
 Slack or GitHub.
 
+The SSH adapter ignores user SSH configuration, pins a protected `known_hosts` file and identity,
+uses public-key batch authentication, disables agent/X11/all forwarding, proxy jumps, local
+commands, and TTY allocation, and sends only the fixed `codex-runner-v1` command. Production uses
+`ProxyCommand=none`. The current Mac-to-`s3` fixture may explicitly select one protected `assh`
+executable and its owned home directory; the adapter then constructs only
+`assh connect --port=%p %h` and supplies only that explicit `HOME` to let `assh` find its config.
+It does not inherit the remaining Dispatcher environment, accept an arbitrary proxy command, or
+accept any Issue-derived proxy value. JSON,
+Prompt, source bundle, response, and result bundle bytes use versioned length-prefixed frames; none
+enter SSH argv. `prepare` is the only operation allowed to carry a source bundle; `start/resume` are
+the only operations allowed to carry a Prompt; `export` is the only response allowed to carry a
+result bundle. Every artifact is bound to its request or manifest by exact size and SHA-256.
+
+`codex-runner-v1` accepts no arguments. It loads only a protected, exact-field JSON configuration,
+derives the task directory from validated repository and Issue identities, and holds a global
+non-blocking `flock` for the whole Codex invocation. A Turn request is persisted before Codex starts;
+the canonical final reply is atomically persisted before the SSH response is written. Repeating the
+same `turn_id` reads the stored reply and never runs Codex again. An incomplete durable record is
+reported as `unknown`, never replayed.
+
 ## Source and publication flow
 
 The runner has no GitHub write credential. The intended transfer is:
 
-1. The control host records a base commit and prepares source input for the runner.
-2. Codex modifies and tests the independent repository in the work-item directory.
-3. Codex creates coherent local checkpoint commits.
-4. The control host retrieves a Git bundle and a bounded result manifest over SSH.
-5. The Publisher verifies bundle integrity, ancestry, exact head SHA, task branch, path policy,
+1. The control host copies the exact recorded base commit from its trusted local mirror into an
+   isolated, self-contained source bundle; it does not mutate the mirror.
+2. `prepare` transfers that bundle in the framed request. The Runner verifies its only advertised
+   commit, rejects submodules and executable Git attribute drivers, creates the stable task branch,
+   and configures no remote.
+3. Codex modifies and tests the independent repository in the work-item directory.
+4. Codex creates coherent local checkpoint commits and leaves the worktree clean.
+5. The control host retrieves a self-contained Git bundle and a bounded result manifest over SSH.
+6. The Publisher verifies bundle integrity, ancestry, exact head SHA, task branch, path policy,
    secret policy, size limits, and fast-forward behavior.
-6. The Publisher pushes that exact SHA to the already-bound task branch.
-7. The Dispatcher creates or updates the one Draft PR and Issue metadata.
+7. The Publisher pushes that exact SHA to the already-bound task branch.
+8. The Dispatcher creates or updates the one Draft PR and Issue metadata.
 
 The Publisher does not review semantics, edit files, stage changes, create commits, run repository
 code, merge, or deploy. It never accepts a remote URL, arbitrary refspec, local path, Git option, or
@@ -153,7 +180,7 @@ The initial Linux SSH Runner runs directly on a dedicated host without Docker re
 an explicit fixture-stage risk acceptance:
 
 - a malicious or defective task may corrupt the runner, fill its disk, or delete any task data the
-  runner account can access;
+  runner account can access, including the shared Codex auth/session directory;
 - the runner must contain no production secrets, personal data, deployment credentials, inbound
   SSH key to the control host, or mounted control-host filesystem;
 - loss of uncheckpointed code or local Codex session context is accepted;

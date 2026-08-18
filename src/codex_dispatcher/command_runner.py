@@ -25,30 +25,67 @@ class CommandResult:
     error: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class BinaryCommandResult:
+    returncode: int | None
+    stdout: bytes
+    stderr: bytes
+    timed_out: bool = False
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    error: str | None = None
+
+
 def run_command(
     argv: Sequence[str], *, timeout_seconds: float = 30.0, max_output_bytes: int = 65_536,
     env: Mapping[str, str] | None = None, input_text: str | None = None,
     secrets: Sequence[str] = (), cwd: str | None = None,
 ) -> CommandResult:
     """Run a dispatcher-owned argv without a shell and return redacted bounded output."""
-    normalized_argv = _validate_argv(argv)
-    if timeout_seconds <= 0 or max_output_bytes < 0:
-        raise ValueError("timeout_seconds must be positive and max_output_bytes non-negative")
     if input_text is not None and not isinstance(input_text, str):
         raise TypeError("input_text must be a string or None")
-    command_env = {"PATH": os.defpath, "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
-    if env is not None:
-        if not isinstance(env, Mapping) or any(
-            not isinstance(key, str)
-            or not key
-            or "=" in key
-            or not isinstance(value, str)
-            or "\x00" in key
-            or "\x00" in value
-            for key, value in env.items()
-        ):
-            raise TypeError("env must be a string-to-string mapping without NUL")
-        command_env.update(env)
+    binary = run_binary_command(
+        argv,
+        timeout_seconds=timeout_seconds,
+        max_output_bytes=max_output_bytes,
+        env=env,
+        input_bytes=input_text.encode("utf-8") if input_text is not None else b"",
+        secrets=secrets,
+        cwd=cwd,
+    )
+    stdout = _decode_output(bytearray(binary.stdout), binary.stdout_truncated)
+    stderr = _decode_output(bytearray(binary.stderr), binary.stderr_truncated)
+    return CommandResult(
+        binary.returncode,
+        redact_text(stdout, secrets),
+        redact_text(stderr, secrets),
+        binary.timed_out,
+        binary.stdout_truncated,
+        binary.stderr_truncated,
+        binary.error,
+    )
+
+
+def run_binary_command(
+    argv: Sequence[str],
+    *,
+    timeout_seconds: float = 30.0,
+    max_output_bytes: int = 65_536,
+    max_stderr_bytes: int | None = None,
+    env: Mapping[str, str] | None = None,
+    input_bytes: bytes = b"",
+    secrets: Sequence[str] = (),
+    cwd: str | None = None,
+) -> BinaryCommandResult:
+    """Run fixed argv and return bounded bytes; callers must never log raw output."""
+    normalized_argv = _validate_argv(argv)
+    if max_stderr_bytes is None:
+        max_stderr_bytes = max_output_bytes
+    if timeout_seconds <= 0 or max_output_bytes < 0 or max_stderr_bytes < 0:
+        raise ValueError("timeout and output byte limits must be positive or non-negative")
+    if not isinstance(input_bytes, bytes):
+        raise TypeError("input_bytes must be bytes")
+    command_env = _command_environment(env)
     try:
         process = subprocess.Popen(
             normalized_argv,
@@ -61,7 +98,9 @@ def run_command(
             start_new_session=True,
         )
     except OSError as exc:
-        return CommandResult(None, "", "", error=redact_text(str(exc), secrets))
+        return BinaryCommandResult(
+            None, b"", b"", error=redact_text(str(exc), secrets)
+        )
 
     assert process.stdin is not None
     assert process.stdout is not None
@@ -78,7 +117,7 @@ def run_command(
         ),
         threading.Thread(
             target=_drain_bounded,
-            args=(process.stderr, stderr_buffer, stderr_truncated, max_output_bytes),
+            args=(process.stderr, stderr_buffer, stderr_truncated, max_stderr_bytes),
             daemon=True,
         ),
     ]
@@ -86,7 +125,7 @@ def run_command(
         reader.start()
     writer = threading.Thread(
         target=_write_input,
-        args=(process.stdin, input_text.encode("utf-8") if input_text is not None else b""),
+        args=(process.stdin, input_bytes),
         daemon=True,
     )
     writer.start()
@@ -108,17 +147,32 @@ def run_command(
         for thread in (*readers, writer):
             thread.join()
 
-    stdout = _decode_output(stdout_buffer, stdout_truncated[0])
-    stderr = _decode_output(stderr_buffer, stderr_truncated[0])
-    return CommandResult(
+    return BinaryCommandResult(
         None if timed_out else process.returncode,
-        redact_text(stdout, secrets),
-        redact_text(stderr, secrets),
+        bytes(stdout_buffer),
+        bytes(stderr_buffer),
         timed_out,
         stdout_truncated[0],
         stderr_truncated[0],
         "command timed out" if timed_out else None,
     )
+
+
+def _command_environment(env: Mapping[str, str] | None) -> dict[str, str]:
+    command_env = {"PATH": os.defpath, "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
+    if env is not None:
+        if not isinstance(env, Mapping) or any(
+            not isinstance(key, str)
+            or not key
+            or "=" in key
+            or not isinstance(value, str)
+            or "\x00" in key
+            or "\x00" in value
+            for key, value in env.items()
+        ):
+            raise TypeError("env must be a string-to-string mapping without NUL")
+        command_env.update(env)
+    return command_env
 
 
 def _validate_argv(argv: Sequence[str]) -> list[str]:

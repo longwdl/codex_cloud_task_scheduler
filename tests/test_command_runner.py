@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_dispatcher.command_runner import run_command
+from codex_dispatcher.command_runner import run_binary_command, run_command
 
 
 class CommandRunnerTests(unittest.TestCase):
@@ -64,6 +64,27 @@ class CommandRunnerTests(unittest.TestCase):
             )
             self.assertEqual(f";touch {marker}\n", result.stdout)
             self.assertFalse(marker.exists())
+
+    def test_binary_runner_preserves_bytes_and_bounds_output(self) -> None:
+        result = run_binary_command(
+            [
+                sys.executable,
+                "-c",
+                "import sys; data=sys.stdin.buffer.read(); "
+                "sys.stdout.buffer.write(data + b'\\x00\\xff')",
+            ],
+            input_bytes=b"frame\x00bytes",
+            max_output_bytes=100,
+        )
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(b"frame\x00bytes\x00\xff", result.stdout)
+
+        truncated = run_binary_command(
+            [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x' * 100)"],
+            max_output_bytes=10,
+        )
+        self.assertEqual(b"x" * 10, truncated.stdout)
+        self.assertTrue(truncated.stdout_truncated)
 
 
 if __name__ == "__main__":

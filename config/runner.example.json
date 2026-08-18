@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "git_path": "/usr/bin/git",
+  "codex_path": "/usr/local/bin/codex",
+  "codex_home": "/srv/codex-runner",
+  "output_schema": "/srv/codex-runner/etc/agent-result.schema.json",
+  "work_items_root": "/srv/codex-runner/work-items",
+  "active_lock_path": "/srv/codex-runner/run/active.lock",
+  "git_timeout_seconds": 120,
+  "codex_timeout_seconds": 3600
+}

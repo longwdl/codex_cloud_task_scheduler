@@ -15,7 +15,7 @@ The existing repository already contains:
 - safe local Git mirror/worktree preparation and applied-change validation;
 - a disabled Codex Cloud adapter retained for migration compatibility.
 
-The next offline increment adds:
+The environment-independent core now additionally contains:
 
 - stable WorkItem and Turn domain objects;
 - deterministic branch and runner-directory identity per Issue;
@@ -24,13 +24,32 @@ The next offline increment adds:
 - strict Codex JSONL event parsing;
 - Publisher request and pure publication-plan validation;
 - additive SQLite persistence for WorkItems and Turns;
-- outbound-only Slack message models and idempotency keys.
+- outbound-only Slack message models and idempotency keys;
+- a strict Runner response and artifact-manifest contract;
+- length-prefixed request/Prompt and response/artifact wire framing;
+- a stateful fake SSH Runner that records only Prompt hashes and sizes;
+- atomic WorkItem/Turn start and finalization boundaries;
+- an active `reconciling` state that forbids blind Prompt replay;
+- offline first-turn, same-session resume, export, verification, and publication orchestration;
+- a self-contained Git bundle quarantine verifier using fixed, non-executing Git inspections;
+- an exact-base source bundle builder that never mutates the trusted mirror;
+- persistent Runner task directories with no Git remote and strict source import/export;
+- an idempotent Codex Turn executor tested with a local fake executable;
+- a no-argument, protected-config `codex-runner-v1` forced-command service and global Turn lock;
+- a fixed-parameter Git Publisher tested against a local bare remote, including lost-receipt recovery
+  and remote-race rejection.
+
+The offline core also includes the fixed OpenSSH argv/byte-stream adapter. Its tests mock the
+subprocess boundary and never connect to a host. The next phase is installing these components on a
+disposable Linux Runner, preparing task-specific Codex authentication, and performing the first
+networked SSH/real-Codex fixture. The Runner must not receive GitHub write or production
+credentials.
 
 Explicitly deferred:
 
 - networked SSH execution;
-- real `codex exec` invocation;
-- GitHub Publisher writes and Draft PR creation;
+- live real-account `codex exec` invocation and authentication bootstrap;
+- live GitHub Publisher writes and Draft PR creation;
 - Slack API calls;
 - systemd deployment;
 - Docker isolation on the Runner;

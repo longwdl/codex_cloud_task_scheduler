@@ -50,11 +50,34 @@ Return later, without secrets:
 - installed Git and Codex CLI versions;
 - absolute work-item root, normally `/srv/codex-runner/work-items`.
 
+The current `s3` fixture is already reachable as `ecs-user`, has Python 3.12, Git 2.43, Codex CLI
+0.147.0, 4 vCPU, 15 GiB RAM, and about 75 GiB free disk. The disk is below the long-term
+recommendation but sufficient for the bounded fixture. The implementation fixes these Runner paths:
+
+- protected `/srv/codex-runner/etc/config.json`, based on `config/runner.example.json`;
+- protected `/srv/codex-runner/etc/agent-result.schema.json`;
+- `/srv/codex-runner/run/active.lock` writable by `ecs-user`;
+- `/srv/codex-runner/work-items` for per-Issue repositories and Runner state;
+- absolute resolved Git and Codex executable paths;
+- Codex Turn timeout; the Control Host SSH operation timeout must be longer than it;
+- an SSH `authorized_keys` forced command that invokes only `codex-runner-v1`, with forwarding and
+  PTY disabled.
+
 ### 3. Codex authentication on Runner
 
-Use a dedicated, low-blast-radius Codex/OpenAI credential suitable for unattended `codex exec`.
-Keep it outside task repositories, prompts, logs, GitHub, and Slack. The first fixture must prove
-that generated child commands do not receive unrelated Control Host or GitHub credentials.
+`CODEX_HOME=/srv/codex-runner` is already logged in using ChatGPT. It is one shared Runner-level
+home, not one copy per task. Keep the directory owned by `ecs-user` with mode `0700`, keep
+`auth.json` at `0600`, and initialize or refresh login only in place. Dispatcher and fixture scripts
+must never read, print, copy, or log the credential file. Before each live fixture, verify only the
+non-secret result of `CODEX_HOME=/srv/codex-runner codex login status`. Generated Codex child
+commands must not receive GitHub or Control Host credentials.
+
+For the current Mac fixture only, Dispatcher may use the existing SSH identity and the protected
+`/opt/homebrew/bin/assh` helper with the fixed proxy shape `assh connect --port=%p %h`. A dedicated
+Runner private key is deferred for this environment. Configure the owned `/Users/wdl` home
+explicitly so `assh` can find `~/.ssh/assh.yml`; do not inherit the rest of the local environment.
+Production defaults to direct SSH with no ProxyCommand and must reassess key separation before
+deployment.
 
 ### 4. GitHub execution label
 
