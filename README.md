@@ -62,6 +62,12 @@ deduplication behavior is proven in a live fixture. Merge and production deploym
 Existing Codex Cloud adapter code is retained only during migration; Cloud writes remain disabled
 and are not part of the target architecture.
 
+A separate two-Turn Fixture has also proven the reviewed `needs_input → /codex-context → ready`
+lifecycle through the real GitHub adapter and SSH Runner. The follow-up reused the original WorkItem,
+branch, Runner directory, and Codex session, created only one Draft PR, and passed Fixture CI. This
+run also corrected the Fixture's legacy hyphenated needs-input label; canonical state labels use
+`agent:needs_input`.
+
 Current SSH candidate and recovery planning is exposed through `ssh-preflight`. It checks Git, gh,
 and OpenSSH versions, reads GitHub, and migrates only a temporary copy of SQLite. It does not alter
 the configured database, claim Issues, mutate labels, fetch or push Git, invoke a Runner, or create a

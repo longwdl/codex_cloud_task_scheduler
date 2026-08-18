@@ -122,6 +122,24 @@ exec:ssh-cli
 Keep `exec:cloud` only for historical evidence. Adding or changing labels is a GitHub remote-state
 operation and should occur when the new Tracker contract is ready for a live fixture.
 
+The complete canonical agent-state label set uses underscores exactly as the runtime enum does:
+
+```text
+agent:ready
+agent:dispatching
+agent:running
+agent:review
+agent:needs_input
+agent:blocked
+agent:paused
+agent:completed
+agent:discard
+```
+
+Do not create or use `agent:needs-input`. A human transition back to ready must remove the current
+agent-state label and leave exactly one `agent:ready`; the adapter rejects or ignores ambiguous
+multi-state Issues rather than choosing one.
+
 ### 5. Publisher authentication
 
 Preferred long-term option: a GitHub App installed only on explicitly selected repositories.

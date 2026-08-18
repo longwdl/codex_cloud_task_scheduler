@@ -603,6 +603,15 @@ Draft PR 回执阶段还暴露了 recovery planner 的顺序缺陷：本地 Work
 后，live preflight 才继续并得到 `sync_tracker_state`。因此 AC-019、AC-048、AC-049 已有受控 live
 证据；AC-047 所描述的“本地已记账但 Turn 尚未终态化”窄窗口仍只有离线故障测试证据。真实 SSH
 断连、Dispatcher 进程终止和 Slack provider 回执丢失也尚未 live 注入。
+
+同日 Fixture Issue `#6` 完成了真实 GitHub 生命周期的两次 Turn：首次因故意缺少精确值进入
+`agent:needs_input`，没有 commit、task ref 或 PR；维护者添加唯一 `/codex-context` 并重新批准
+`agent:ready` 后，第二次 sweep 使用原 WorkItem、branch、Runner directory 和 Codex session
+resume，创建唯一 Draft PR `#7`。SQLite 最终只有一个 WorkItem、两个有序 Turn，Turn 2 只包含
+该维护者 comment ID；Actions run `32162425453` 在精确 checkpoint 上成功，`main` 未移动。
+期间发现 Fixture 初始化遗留的 `agent:needs-input` 与 canonical `agent:needs_input` 不一致；多状态
+Issue 未被执行，错误 label 已删除并补建 `agent:completed`。这为 AC-002、AC-004 及步骤 5-6 的
+非 Slack 身份部分提供了受控 live 证据。
 当前另有只读 `ssh-preflight`：先校验固定 Git/gh/OpenSSH 版本，在原 SQLite 的临时迁移快照上
 执行 recovery-first 规划，再通过 GitHub 只读接口选择至多一个 `exec:ssh-cli` Issue。它不创建
 或迁移原数据库、不连接 Runner、不 fetch/push、不 claim、不写评论/label，也不创建 PR。输出
@@ -756,11 +765,11 @@ git diff --check
 
 ### 12.3 Live Fixture 顺序
 
-截至 2026-08-19，步骤 1-4、7-9 已通过。步骤 6 的 WorkItem/branch/directory/session 复用先由
-直连协议验收；随后 Fixture Issue `#2` 又验证了 SSH 调度标签接线和一个完整 happy-path，但
-Slack 仍禁用，因此尚未证明同一 Slack thread。步骤 9 已通过第二次 write-enabled sweep 和独立
-读回验证。步骤 10 已完成 Publisher、Draft PR 和 Issue comment 的受控回执丢失部分，但真实 SSH
-断连和 Dispatcher 进程终止仍待执行；步骤 5、11 也仍待执行。完整非敏感证据见
+截至 2026-08-19，步骤 1-5、7-9 已通过。Fixture Issue `#6` 已证明步骤 6 的
+WorkItem/branch/directory/session 复用和维护者 context 过滤；Slack 仍禁用，因此尚未证明同一
+Slack thread。步骤 9 已通过第二次 write-enabled sweep 和独立读回验证。步骤 10 已完成
+Publisher、Draft PR 和 Issue comment 的受控回执丢失部分，但真实 SSH 断连和 Dispatcher 进程
+终止仍待执行；步骤 11 也仍待执行。完整非敏感证据见
 `docs/live-test-evidence.md`。
 
 1. SSH 只读连接与 host key 固定。

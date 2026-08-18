@@ -3,6 +3,60 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## SSH CLI same-Issue needs-input resume fixture — 2026-08-19
+
+This section records the first end-to-end Issue lifecycle with two Turns in one persistent Codex
+session. It proves the GitHub `needs_input → ready` path in addition to the earlier direct Runner
+resume fixture. Slack remained disabled, and no merge or completion transition was performed.
+
+### Turn 1: deliberate missing input
+
+- Private Fixture Issue: [`longwdl/codex-dispatcher-fixture#6`](https://github.com/longwdl/codex-dispatcher-fixture/issues/6).
+- WorkItem: `wi_e5c93ce564fa68c4be09cc5c`.
+- Task branch identity: `codex/issue-6-e5c93ce564fa`.
+- Runner directory:
+  `/srv/codex-runner/work-items/longwdl__codex-dispatcher-fixture/issue-6`.
+- Codex session: `01a015c4-4053-7812-bed0-d0b39db406be`.
+
+The reviewed Issue intentionally omitted the exact README marker value and required the first Turn
+to ask rather than guess. Read-only preflight selected exactly Issue `#6`; the write-enabled sweep
+returned `needs_input` for Turn `turn_d550ef3560864379981d58304582f975`. SQLite recorded Turn number
+`1`, `result_status=needs_input`, and identical input/output HEAD
+`b992e1e52c8f11ed2e6776f78ec20bb1667a8fb5`. The WorkItem entered `waiting_input`, and the Issue
+entered `agent:needs_input`. Independent read-back found no task ref, checkpoint, or PR; `main` did
+not move.
+
+### Maintainer context and Turn 2
+
+The maintainer added one reviewed comment:
+
+```text
+/codex-context
+Use the exact fixture marker value: p1-needs-input-resume-v1
+```
+
+Its immutable comment ID was `IC_kwDOT3NfX88AAAABPcWHXQ`. The Issue was then explicitly returned to
+`agent:ready`. During this manual transition, the repository's old setup label
+`agent:needs-input` was found to conflict with the canonical runtime label `agent:needs_input`, and
+the Issue briefly had both `ready` and `needs_input`. Preflight returned idle and no Runner call was
+made. The stale hyphenated repository label was unused and removed, the canonical underscore label
+was retained, and the missing canonical `agent:completed` label was created. Only after the Issue
+had exactly one state label did preflight select it again.
+
+The second write-enabled sweep returned `review` for Turn
+`turn_d3879f60603945f8bb1cd605541a3be4`. SQLite recorded Turn number `2`, included only the reviewed
+context comment ID, and preserved the original WorkItem, branch, Runner directory, and session. The
+checkpoint was `d25edd9d2b3287a596e773c28210f1d9cefa1f05`; Draft PR
+[`#7`](https://github.com/longwdl/codex-dispatcher-fixture/pull/7) was the only PR for the task branch
+and changed exactly `README.md` by one insertion and one deletion. The resulting marker was exactly
+`p1-needs-input-resume-v1`.
+
+GitHub Actions run [`32162425453`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32162425453)
+completed successfully for the exact checkpoint and task branch. Final preflight returned idle;
+SQLite contained exactly one WorkItem and two ordered Turns for Issue `#6`; `main` remained at its
+original SHA. Both pre-Turn SQLite Online Backup API snapshots were mode `0600` and passed
+`integrity_check`.
+
 ## SSH CLI lost-receipt fixture — 2026-08-19
 
 This section records the bounded, three-stage live fault sequence for Publisher, Draft PR, and
