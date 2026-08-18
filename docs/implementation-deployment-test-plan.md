@@ -551,7 +551,8 @@ repository，使用固定 Git 配置执行 `bundle verify`、`fsck`、anchor anc
 
 状态：source/result bundle、Runner workspace 和 Control Host quarantine 的本地 Git fixture 已
 完成；固定 GitHub URL/base ref 的可信 mirror refresher 已通过 mocked command boundary 验证，
-但尚未执行 live GitHub fetch。
+并已在 Fixture Issue `#2` 和 `#4` 的受控 sweep 中执行 live GitHub fetch。Issue `#4` 首次 fetch
+遇到一次写入前的暂时性失败；状态未变化，随后同一受限只读 ref 查询和安全重试成功。
 
 ### Phase C：Linux SSH Runner Fixture
 
@@ -586,14 +587,22 @@ Issue `#2` 绑定到一个 WorkItem、确定性分支和 Runner 目录；一个 
 `071ec769c63b8ab594865611cdc8af46ddd07b7f`，Publisher 只更新该任务分支，创建唯一 Draft PR
 `#3`，固定评论和 `agent:review` 状态完成，Fixture Actions run `32155421239` 成功，`main` 仍为
 原 SHA。随后第二次 write-enabled sweep 返回 idle；SQLite 的 WorkItem/Turn 行、Issue、唯一 PR、
-任务分支、`main` 及 Actions run 均保持不变，之后只读 preflight 仍返回 idle。尚未 live 注入
-push/PR/comment 回执丢失；这些恢复性质继续由离线故障测试覆盖，不能从本次正常路径和空闲重扫
-外推。
-截至 2026-08-19，另有一个不接入正式 CLI 的 source-tree Fixture 故障入口完成离线实现。它硬编码
+任务分支、`main` 及 Actions run 均保持不变，之后只读 preflight 仍返回 idle。该正常路径本身未
+注入 push/PR/comment 回执丢失；这些恢复性质不能从正常路径和空闲重扫外推。
+截至 2026-08-19，另有一个不接入正式 CLI 的 source-tree Fixture 故障入口。它硬编码
 上述私有 Fixture 及 README-only 合同，要求第三个仓库名级开关、精确 Issue/恢复阶段和自动
 SQLite 在线备份，只能在真实远端操作成功后丢弃一次 Publisher、Draft PR 或固定 Issue comment
-回执。正式 `ssh-run-once` 的组装和参数未改变。该入口已通过 fake/组装/安全开关测试，但尚未对
-新的 live Issue 执行，不能作为 AC-047 至 AC-049 的 live 证据。
+回执。正式 `ssh-run-once` 的组装和参数未改变。Fixture Issue `#4` 已按顺序完成三次真实写入后
+丢弃回执：Publisher 重试读回并复用唯一任务分支，Draft PR `#5` 按分支找回且没有创建第二个
+PR，固定评论重试后才将 Issue 从 `agent:running` 更新为 `agent:review`。SQLite 最终只有一个
+WorkItem、一个 Turn 和同一个 Codex session；`main` 未移动，Actions run `32160041932` 在精确
+checkpoint SHA 上成功。
+
+Draft PR 回执阶段还暴露了 recovery planner 的顺序缺陷：本地 WorkItem 已为终态而远端 Issue
+仍为 running 时，旧逻辑会先误判 orphan。测试在第三次写入前停止；修复和 255 项回归测试通过
+后，live preflight 才继续并得到 `sync_tracker_state`。因此 AC-019、AC-048、AC-049 已有受控 live
+证据；AC-047 所描述的“本地已记账但 Turn 尚未终态化”窄窗口仍只有离线故障测试证据。真实 SSH
+断连、Dispatcher 进程终止和 Slack provider 回执丢失也尚未 live 注入。
 当前另有只读 `ssh-preflight`：先校验固定 Git/gh/OpenSSH 版本，在原 SQLite 的临时迁移快照上
 执行 recovery-first 规划，再通过 GitHub 只读接口选择至多一个 `exec:ssh-cli` Issue。它不创建
 或迁移原数据库、不连接 Runner、不 fetch/push、不 claim、不写评论/label，也不创建 PR。输出
@@ -747,10 +756,12 @@ git diff --check
 
 ### 12.3 Live Fixture 顺序
 
-截至 2026-08-18，步骤 1-4、7-8 已通过。步骤 6 的 WorkItem/branch/directory/session 复用先由
+截至 2026-08-19，步骤 1-4、7-9 已通过。步骤 6 的 WorkItem/branch/directory/session 复用先由
 直连协议验收；随后 Fixture Issue `#2` 又验证了 SSH 调度标签接线和一个完整 happy-path，但
 Slack 仍禁用，因此尚未证明同一 Slack thread。步骤 9 已通过第二次 write-enabled sweep 和独立
-读回验证；步骤 5、10-11 仍待执行。完整非敏感证据见 `docs/live-test-evidence.md`。
+读回验证。步骤 10 已完成 Publisher、Draft PR 和 Issue comment 的受控回执丢失部分，但真实 SSH
+断连和 Dispatcher 进程终止仍待执行；步骤 5、11 也仍待执行。完整非敏感证据见
+`docs/live-test-evidence.md`。
 
 1. SSH 只读连接与 host key 固定。
 2. 创建 Fixture WorkItem 目录和独立 repo。

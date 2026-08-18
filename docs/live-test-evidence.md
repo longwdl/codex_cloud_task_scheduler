@@ -3,6 +3,82 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## SSH CLI lost-receipt fixture — 2026-08-19
+
+This section records the bounded, three-stage live fault sequence for Publisher, Draft PR, and
+Issue-comment receipts. It used the source-tree-only triple-opt-in fault entry and the normal
+Dispatcher recovery path. It does not prove recovery from an actual SSH disconnect or process kill,
+and it does not exercise Slack.
+
+### Admission and initial state
+
+- Private Fixture Issue: [`longwdl/codex-dispatcher-fixture#4`](https://github.com/longwdl/codex-dispatcher-fixture/issues/4).
+- The strict task spec allowed only `README.md`, changing the marker to
+  `ssh-lost-receipt-phase-d-v1`.
+- GitHub Issue node ID: `I_kwDOT3NfX88AAAABNPw7tg`.
+- WorkItem: `wi_80df527531e34d4f039aa16f`.
+- Task branch: `codex/issue-4-80df527531e3`.
+- Runner directory:
+  `/srv/codex-runner/work-items/longwdl__codex-dispatcher-fixture/issue-4`.
+- Fixture `main` was `b992e1e52c8f11ed2e6776f78ec20bb1667a8fb5`; neither the task branch nor
+  a matching PR existed.
+
+The first `publisher-receipt` attempt created and verified a private SQLite backup, then stopped at
+the trusted-mirror `base_fetch` stage before claim, Runner invocation, or external write. A
+restricted read-only retry of the same Git ref succeeded, confirming a transient transport failure
+rather than an authentication or repository-state conflict. The exact fault stage was then retried.
+
+### Three discarded receipts
+
+1. `publisher-receipt` started exactly one Codex Turn and discarded the successful new-branch push
+   receipt. The command returned `awaiting_publication`; Issue `#4` remained `agent:running`, and
+   read-back found the task branch at checkpoint
+   `00199ebe3d565048eb6118827aaef9e54ab450cf` with no PR. Preflight then required
+   `resume_publication`.
+2. `draft-pr-receipt` recovered the same checkpoint, reused the existing remote branch, created
+   Draft PR [`#5`](https://github.com/longwdl/codex-dispatcher-fixture/pull/5), and discarded its
+   receipt. SQLite had reached `review` with the exact published SHA but had no PR binding; Issue
+   `#4` remained `agent:running` and still had no status comment.
+3. The following read-only preflight exposed a recovery-order defect: a remote `running` Issue was
+   classified as orphaned before its existing terminal WorkItem was considered. No third-stage
+   write was attempted while that result was ambiguous. Commit `f42974b` moved the orphan check
+   after the persisted binding and terminal-state checks and added a combined Publisher/PR receipt
+   regression. All 255 tests passed; live preflight then returned
+   `ready_recovery/sync_tracker_state` for the same WorkItem.
+4. `issue-comment-receipt` found and bound the existing PR, created the one fixed status comment,
+   and discarded that receipt. Preflight again required `sync_tracker_state`. One normal
+   double-opt-in `ssh-run-once` returned `state_synchronized`, projected the Issue to
+   `agent:review`, and left the subsequent preflight `idle`.
+
+Each accepted stage made an Online Backup API snapshot before entering the sweep. The failed
+pre-write Publisher attempt plus the three accepted fault stages left four retained backups; every
+file was mode `0600` and passed `PRAGMA integrity_check`. The failed first attempt's backup was
+retained rather than silently deleted.
+
+### Independent final read-back
+
+- SQLite passed `integrity_check` and contained exactly one WorkItem and one finished Turn for Issue
+  `#4`. WorkItem state was `review`, PR binding was `5`, and both the stored publication SHA and Turn
+  output SHA were the exact checkpoint.
+- The only Codex session remained `01a015ae-1b9d-7ee3-957a-0a90b21629cd`; no second Turn or session
+  was created. Recovery repeated only the exact checkpoint export needed after the ambiguous
+  Publisher receipt; it did not PREPARE or START Codex again.
+- GitHub contained exactly one open Draft PR for the deterministic branch and exactly one fixed
+  Issue status comment. The Issue had `agent:review`, `priority:p1`, and `exec:ssh-cli`.
+- The PR changed exactly `README.md`, with one insertion and one deletion; the fixed dispatcher
+  marker was present in the only Issue comment.
+- The task branch and PR head both resolved to the checkpoint SHA. `main` remained at its original
+  SHA; no merge, deployment, release, tag, force-push, or ref deletion occurred.
+- GitHub Actions run [`32160041932`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32160041932)
+  was `completed/success` for workflow `fixture`, event `pull_request`, run attempt `1`, the exact
+  task branch, and the exact checkpoint SHA.
+
+The fine-grained PAT again denied the REST Checks endpoint with HTTP `403`; the permitted Actions
+runs endpoint supplied the CI evidence. This run proves the live Publisher lost-receipt read-back
+path and the Draft PR and Issue-comment recovery contracts. The narrower post-publication-record
+crash window, actual SSH interruption, actual Dispatcher termination, and Slack provider receipt
+loss remain separate acceptance work.
+
 ## SSH CLI Dispatcher and Publisher fixture — 2026-08-18
 
 This section records the first bounded write-enabled happy-path sweep. It is evidence for the
@@ -74,13 +150,13 @@ Independent before/after reads proved:
 - the Actions query still returned exactly the original successful workflow run;
 - a final read-only `ssh-preflight` again returned `idle`.
 
-This proves the completed happy-path is idle on an immediate repeated sweep. It does not prove the
-separate crash/lost-receipt recovery paths.
+This proves the completed happy-path is idle on an immediate repeated sweep. It does not by itself
+prove the separate crash/lost-receipt recovery paths.
 
 The fine-grained PAT could list Actions runs but could not read check runs through either the
 GraphQL `statusCheckRollup` field or the REST Checks endpoint. CI success is therefore evidenced by
-the accessible Actions workflow run, not inferred from those denied check APIs. Live
-push/PR/comment lost-receipt injection remains outstanding.
+the accessible Actions workflow run, not inferred from those denied check APIs. The separate
+controlled Publisher/PR/comment lost-receipt evidence is recorded above.
 
 ## SSH CLI Runner fixture — 2026-08-18
 

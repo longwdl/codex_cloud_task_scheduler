@@ -77,16 +77,19 @@ injected fakes, including Publisher and Draft PR lost-receipt, Issue projection 
 post-record crash recovery. A bounded live happy-path run has now exercised the real GitHub claim,
 trusted-mirror fetch, SSH Runner, Publisher push, unique Draft PR, Issue projection, and Fixture CI.
 An immediate second write-enabled sweep returned idle, with unchanged SQLite rows and GitHub state;
-it did not create a second Turn, session, push, PR, comment, or workflow run. Live
-crash/lost-receipt recovery remains unexercised. Slack root/result receipt loss and outbox recovery
-remain covered only through an idempotent fake publisher; proof of the real Slack publisher contract
-is the next external integration phase.
+it did not create a second Turn, session, push, PR, comment, or workflow run. A second controlled live
+Fixture Issue has now exercised Publisher, Draft PR, and Issue-comment receipt loss.
+The recovery retained one WorkItem/session/Turn/branch/PR/comment and returned preflight to idle; it
+also exposed and fixed the ordering of terminal WorkItem recovery from a still-running Issue. Actual
+SSH disconnects and process termination remain unexercised. Slack root/result receipt loss and outbox
+recovery remain covered only through an idempotent fake publisher; proof of the real Slack publisher
+contract is the next external integration phase.
 The Runner must not receive GitHub write or production credentials.
 
 Explicitly deferred:
 
 - systemd/timer activation of the one-sweep entry point;
-- live failure injection for GitHub/Publisher lost-receipt reconciliation;
+- live SSH-disconnect and process-termination recovery injection;
 - a live Slack HTTP publisher or Slack API calls;
 - systemd deployment;
 - Docker isolation on the Runner;

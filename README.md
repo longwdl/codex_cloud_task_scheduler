@@ -52,11 +52,15 @@ exact checkpoint SHA to the deterministic task branch, opened one Draft PR, proj
 `agent:review`, and passed the Fixture GitHub Actions workflow. Read-back confirmed that `main` did
 not move. A second write-enabled sweep returned `idle`; SQLite, Issue, PR, refs, and the single CI run
 remained unchanged, so it did not create another Turn, session, push, comment, PR, or workflow run.
-Live crash/lost-receipt injection remains intentionally outstanding. The Slack coordination core is
-wired only through injected ports; a real Slack HTTP publisher remains disabled until its
-provider-side deduplication behavior is proven in a live fixture. Merge and production deployment
-remain absent. Existing Codex Cloud adapter code is retained only during migration; Cloud writes
-remain disabled and are not part of the target architecture.
+A second Fixture Issue has now completed controlled live Publisher, Draft PR, and Issue-comment
+receipt loss. Recovery retained one WorkItem, session, Turn, branch, Draft PR, and status comment,
+left `main` unchanged, and passed the exact-SHA Fixture workflow. That run exposed and fixed a
+recovery-order defect for a terminal local WorkItem whose Issue was still `agent:running`. Actual SSH
+disconnects and process termination remain live-test gaps. The Slack coordination core is wired only
+through injected ports; a real Slack HTTP publisher remains disabled until its provider-side
+deduplication behavior is proven in a live fixture. Merge and production deployment remain absent.
+Existing Codex Cloud adapter code is retained only during migration; Cloud writes remain disabled
+and are not part of the target architecture.
 
 Current SSH candidate and recovery planning is exposed through `ssh-preflight`. It checks Git, gh,
 and OpenSSH versions, reads GitHub, and migrates only a temporary copy of SQLite. It does not alter
