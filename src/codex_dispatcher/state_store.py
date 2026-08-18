@@ -7,6 +7,7 @@ import re
 import sqlite3
 from collections.abc import Iterator, Mapping
 from contextlib import closing, contextmanager
+from dataclasses import replace
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -814,6 +815,46 @@ class StateStore:
                     "output_sha256": output_sha256,
                     "result_status": result_status,
                 },
+                now,
+            )
+        return candidate
+
+    def record_turn_error(
+        self,
+        turn_id: str,
+        *,
+        error_code: str,
+        updated_at: str | None = None,
+    ) -> Turn:
+        """Persist one bounded machine error before terminalizing a failed Turn."""
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM turns WHERE turn_id = ?", (turn_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"turn not found: {turn_id}")
+            turn = self._row_to_turn(row)
+            if turn.state is TurnState.PLANNED:
+                raise ValueError("a planned Turn cannot record an execution error")
+            candidate = replace(turn, error_code=error_code, updated_at=now)
+            if turn.error_code is not None:
+                if turn.error_code != candidate.error_code:
+                    raise ValueError("Turn already has a different recorded error")
+                return turn
+            cursor = connection.execute(
+                "UPDATE turns SET error_code = ?, updated_at = ? "
+                "WHERE turn_id = ? AND error_code IS NULL",
+                (candidate.error_code, now, turn_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"concurrent Turn error update detected: {turn_id}")
+            self._insert_work_item_event(
+                connection,
+                turn.work_item_id,
+                turn_id,
+                "turn_error_recorded",
+                {"error_code": candidate.error_code},
                 now,
             )
         return candidate

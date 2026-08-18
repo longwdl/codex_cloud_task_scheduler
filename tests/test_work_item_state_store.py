@@ -224,6 +224,32 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     [1, 2], [item.turn_number for item in store.list_turns(first.work_item_id)]
                 )
 
+    def test_records_bounded_turn_error_idempotently_before_terminal_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                item = make_ready(store, make_item(8))
+                _, turn = store.begin_turn(
+                    item.work_item_id,
+                    turn_id="turn_" + "8" * 32,
+                    issue_revision="revision-error",
+                    prompt_sha256="b" * 64,
+                    input_head_sha="a" * 40,
+                )
+                store.update_turn_state(turn.turn_id, TurnState.STARTING)
+                recorded = store.record_turn_error(
+                    turn.turn_id, error_code="agent_result_invalid"
+                )
+                self.assertEqual("agent_result_invalid", recorded.error_code)
+                self.assertEqual(
+                    recorded,
+                    store.record_turn_error(
+                        turn.turn_id, error_code="agent_result_invalid"
+                    ),
+                )
+                with self.assertRaisesRegex(ValueError, "different recorded error"):
+                    store.record_turn_error(turn.turn_id, error_code="different_error")
+
     def test_completed_or_nonready_work_item_cannot_plan_a_turn(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             with StateStore(Path(temp_dir) / "state.db") as store:

@@ -6,10 +6,16 @@ import tempfile
 import unittest
 from hashlib import sha256
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_dispatcher.prompt_builder import PromptSnapshot
 from codex_dispatcher.publisher import VerifiedBundle
 from codex_dispatcher.runner_protocol import RunnerOperation, parse_agent_result
+from codex_dispatcher.runner_transport import (
+    RunnerTurnRemoteState,
+    RunnerTurnReply,
+    RunnerWireOutput,
+)
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.testing.fake_runner import (
     FakeBundleVerifier,
@@ -227,6 +233,43 @@ class TurnOrchestrationTests(unittest.TestCase):
         self.assertEqual(1, operations.count(RunnerOperation.START))
         self.assertEqual(0, operations.count(RunnerOperation.RESUME))
         self.assertEqual(1, operations.count(RunnerOperation.STATUS))
+
+    def test_remote_failure_binds_session_and_persists_machine_error(self) -> None:
+        item = work_item(45)
+        self.store.create_work_item(item)
+        self.service.prepare_work_item(
+            item.work_item_id, source_bundle=b"fixture-base-bundle"
+        )
+        original_invoke = self.transport.invoke
+
+        def invoke(request, *, stdin=b"", source_artifact=None):
+            if request.operation is RunnerOperation.START:
+                assert request.turn_id is not None
+                reply = RunnerTurnReply(
+                    RunnerOperation.START,
+                    request.work_item_id,
+                    request.turn_id,
+                    RunnerTurnRemoteState.FAILED,
+                    session_id=SESSION,
+                    error_code="agent_result_invalid",
+                )
+                return RunnerWireOutput(reply.to_json().encode("utf-8"))
+            return original_invoke(
+                request, stdin=stdin, source_artifact=source_artifact
+            )
+
+        with patch.object(self.transport, "invoke", side_effect=invoke):
+            progress = self.service.run_turn(
+                item.work_item_id,
+                issue_revision="revision-invalid-result",
+                prompt=prompt("return a structured result\n"),
+                turn_id="turn_" + "5" * 32,
+            )
+
+        self.assertEqual(WorkItemState.BLOCKED, progress.work_item.state)
+        self.assertEqual(TurnState.BLOCKED, progress.turn.state)
+        self.assertEqual(SESSION, progress.work_item.codex_session_id)
+        self.assertEqual("agent_result_invalid", progress.turn.error_code)
 
 
 if __name__ == "__main__":

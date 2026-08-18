@@ -6,7 +6,8 @@
   "properties": {
     "status": {
       "type": "string",
-      "enum": ["completed", "needs_input", "blocked"]
+      "enum": ["completed", "needs_input", "blocked"],
+      "description": "Use needs_input exactly when a human answer is required. Use blocked only for a safety or environment blocker that has no question for a human."
     },
     "summary": {
       "type": "string",
@@ -16,6 +17,7 @@
     "needs_input": {
       "type": "array",
       "maxItems": 20,
+      "description": "Must contain at least one question exactly when status is needs_input; must be empty for completed or blocked.",
       "items": {"type": "string", "minLength": 1, "maxLength": 1000}
     },
     "tests": {
@@ -34,6 +36,7 @@
     "changed_paths": {
       "type": "array",
       "maxItems": 1000,
+      "description": "Actual normalized repository-relative paths changed by this turn, with no duplicates. Use an empty array when no files changed.",
       "items": {"type": "string", "minLength": 1, "maxLength": 1024}
     },
     "next_step": {

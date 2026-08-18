@@ -59,6 +59,9 @@ class PromptBuilderTests(unittest.TestCase):
         self.assertIn("Work Item ID: wi_", first.content)
         self.assertIn("Turn: 2", first.content)
         self.assertIn("Do not push, merge, deploy", first.content)
+        self.assertIn("status=needs_input exactly when", first.content)
+        self.assertIn("status=completed or status=blocked", first.content)
+        self.assertIn("use an empty array when no files changed", first.content)
         self.assertNotIn("Cloud", first.content)
 
 

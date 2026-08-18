@@ -150,9 +150,13 @@ class OfflineTurnOrchestrator:
         except RunnerTransportInterrupted:
             return self._mark_reconciling(turn.turn_id)
         except RunnerTransportRejected:
-            return self._finalize_blocked(turn.turn_id)
+            return self._finalize_blocked(
+                turn.turn_id, error_code="runner_request_rejected"
+            )
         if output.artifact is not None:
-            return self._finalize_blocked(turn.turn_id)
+            return self._finalize_blocked(
+                turn.turn_id, error_code="runner_unexpected_artifact"
+            )
         try:
             reply = parse_runner_turn_reply(output.payload)
         except RunnerProtocolError:
@@ -294,7 +298,9 @@ class OfflineTurnOrchestrator:
             or reply.work_item_id != work_item.work_item_id
             or reply.turn_id != turn.turn_id
         ):
-            return self._finalize_blocked(turn_id)
+            return self._finalize_blocked(
+                turn_id, error_code="runner_reply_identity_invalid"
+            )
         if reply.state is RunnerTurnRemoteState.UNKNOWN:
             return self._mark_reconciling(turn_id)
         if reply.session_id is not None:
@@ -303,9 +309,12 @@ class OfflineTurnOrchestrator:
                     work_item.work_item_id, reply.session_id
                 )
             except ValueError:
-                return self._finalize_blocked(turn_id)
+                return self._finalize_blocked(
+                    turn_id, error_code="session_binding_conflict"
+                )
         if reply.state is RunnerTurnRemoteState.FAILED:
-            return self._finalize_blocked(turn_id)
+            assert reply.error_code is not None
+            return self._finalize_blocked(turn_id, error_code=reply.error_code)
         if reply.state is RunnerTurnRemoteState.RUNNING:
             turn = self._store.update_turn_state(turn_id, TurnState.RUNNING)
             return TurnProgress(work_item, turn)
@@ -358,7 +367,11 @@ class OfflineTurnOrchestrator:
             turn = self._store.update_turn_state(turn_id, TurnState.RECONCILING)
         return TurnProgress(self._require_work_item(turn.work_item_id), turn)
 
-    def _finalize_blocked(self, turn_id: str) -> TurnProgress:
+    def _finalize_blocked(
+        self, turn_id: str, *, error_code: str | None = None
+    ) -> TurnProgress:
+        if error_code is not None:
+            self._store.record_turn_error(turn_id, error_code=error_code)
         work_item, turn = self._store.finalize_turn(
             turn_id,
             turn_state=TurnState.BLOCKED,
