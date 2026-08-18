@@ -6,6 +6,7 @@ import unittest
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 
 from codex_dispatcher.control_sweep import (
     ControlSweepStatus,
@@ -16,6 +17,8 @@ from codex_dispatcher.dispatcher_lock import (
     DispatcherLockUnavailable,
     DispatcherProcessLock,
 )
+from codex_dispatcher.git_publisher import GitPublicationInterrupted
+from codex_dispatcher.publisher import VerifiedBundle
 from codex_dispatcher.runner_protocol import RunnerOperation, parse_agent_result
 from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_dispatch_service import OfflineSshDispatchService
@@ -57,6 +60,21 @@ def _blocked_result():
                 "tests": [{"name": "fixture", "status": "passed"}],
                 "changed_paths": [],
                 "next_step": "Record the bounded result",
+            }
+        )
+    )
+
+
+def _completed_result():
+    return parse_agent_result(
+        json.dumps(
+            {
+                "status": "completed",
+                "summary": "Fixture checkpoint completed",
+                "needs_input": [],
+                "tests": [{"name": "fixture", "status": "passed"}],
+                "changed_paths": ["src/codex_dispatcher/main.py"],
+                "next_step": "Review the published branch",
             }
         )
     )
@@ -129,6 +147,19 @@ class _ChangingSnapshotTracker(FakeTracker):
             return super().get_task(repository, task_id)
 
 
+class _RecordingPublisher:
+    def __init__(self, *, interrupt_once: bool = False) -> None:
+        self.calls: list[tuple[bytes, object, object]] = []
+        self.interrupt_once = interrupt_once
+
+    def publish(self, artifact: bytes, *, plan, work_item):
+        self.calls.append((artifact, plan, work_item))
+        if self.interrupt_once:
+            self.interrupt_once = False
+            raise GitPublicationInterrupted("fixture lost receipt")
+        return SimpleNamespace(observed_remote_sha=plan.source_sha)
+
+
 class SshControlSweepTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -136,13 +167,14 @@ class SshControlSweepTests(unittest.TestCase):
         self.store = StateStore(root / "state.db")
         self.store.migrate()
         self.transport = FakeSshRunnerTransport()
+        self.verifier = FakeBundleVerifier()
         self.dispatch = OfflineSshDispatchService(
             config=make_config(global_max_active=4),
             store=self.store,
             orchestrator=OfflineTurnOrchestrator(
                 store=self.store,
                 transport=self.transport,
-                bundle_verifier=FakeBundleVerifier(),
+                bundle_verifier=self.verifier,
             ),
         )
         self.lock_path = root / "dispatcher.lock"
@@ -155,6 +187,7 @@ class SshControlSweepTests(unittest.TestCase):
         self,
         tracker: FakeTracker,
         source: _RecordingSource,
+        publisher: _RecordingPublisher | None = None,
     ) -> SshControlSweep:
         return SshControlSweep(
             config=make_config(global_max_active=4),
@@ -163,6 +196,25 @@ class SshControlSweepTests(unittest.TestCase):
             dispatch=self.dispatch,
             source=source,
             process_lock=DispatcherProcessLock(self.lock_path),
+            publisher=publisher,
+        )
+
+    def _register_checkpoint(
+        self,
+        artifact: bytes,
+        head_sha: str,
+        *,
+        changed_paths: tuple[str, ...] = ("src/codex_dispatcher/main.py",),
+    ) -> None:
+        self.verifier.register(
+            VerifiedBundle(
+                bundle_sha256=sha256(artifact).hexdigest(),
+                head_sha=head_sha,
+                parent_anchor_sha=BASE_SHA,
+                changed_paths=changed_paths,
+                commit_count=1,
+                size_bytes=len(artifact),
+            )
         )
 
     def test_new_issue_bundles_before_claim_and_runs_one_turn(self) -> None:
@@ -373,6 +425,146 @@ class SshControlSweepTests(unittest.TestCase):
             [RunnerOperation.PREPARE, RunnerOperation.START],
             [call.operation for call in self.transport.calls],
         )
+
+    def test_checkpoint_is_published_and_finalized_in_the_same_sweep(self) -> None:
+        tracker = FakeTracker()
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        artifact = b"fixture-result-bundle"
+        head_sha = "b" * 40
+        self._register_checkpoint(artifact, head_sha)
+        work_item_id = self._expected_work_item_id(task)
+        self.transport.queue_turn(
+            work_item_id,
+            FakeTurnFixture(
+                SESSION,
+                head_sha,
+                _completed_result(),
+                artifact,
+            ),
+        )
+        publisher = _RecordingPublisher()
+
+        result = self._sweep(
+            tracker, _RecordingSource(), publisher=publisher
+        ).run_once(turn_id=TURN_ID)
+
+        self.assertEqual(ControlSweepStatus.REVIEW, result.status)
+        self.assertEqual(TaskState.REVIEW, tracker.tasks[task.task_id].state)
+        self.assertIsNone(self.store.get_active_turn())
+        self.assertEqual(1, len(publisher.calls))
+        self.assertEqual(artifact, publisher.calls[0][0])
+        self.assertEqual(
+            [RunnerOperation.PREPARE, RunnerOperation.START, RunnerOperation.EXPORT],
+            [call.operation for call in self.transport.calls],
+        )
+        item = self.store.get_work_item(work_item_id)
+        assert item is not None
+        self.assertEqual(head_sha, item.last_published_sha)
+
+    def test_ambiguous_publish_retries_without_restarting_codex(self) -> None:
+        tracker = FakeTracker()
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        artifact = b"fixture-ambiguous-bundle"
+        head_sha = "b" * 40
+        self._register_checkpoint(artifact, head_sha)
+        work_item_id = self._expected_work_item_id(task)
+        self.transport.queue_turn(
+            work_item_id,
+            FakeTurnFixture(SESSION, head_sha, _completed_result(), artifact),
+        )
+        publisher = _RecordingPublisher(interrupt_once=True)
+        sweep = self._sweep(tracker, _RecordingSource(), publisher=publisher)
+
+        first = sweep.run_once(turn_id=TURN_ID)
+        second = sweep.run_once()
+
+        self.assertEqual(ControlSweepStatus.AWAITING_PUBLICATION, first.status)
+        self.assertEqual("publication_outcome_ambiguous", first.reason)
+        self.assertEqual(ControlSweepStatus.REVIEW, second.status)
+        self.assertEqual(2, len(publisher.calls))
+        self.assertEqual(
+            [
+                RunnerOperation.PREPARE,
+                RunnerOperation.START,
+                RunnerOperation.EXPORT,
+                RunnerOperation.EXPORT,
+            ],
+            [call.operation for call in self.transport.calls],
+        )
+
+    def test_recorded_publish_recovers_without_export_or_repush(self) -> None:
+        tracker = FakeTracker()
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        artifact = b"fixture-recorded-bundle"
+        head_sha = "b" * 40
+        self._register_checkpoint(artifact, head_sha)
+        work_item_id = self._expected_work_item_id(task)
+        self.transport.queue_turn(
+            work_item_id,
+            FakeTurnFixture(SESSION, head_sha, _completed_result(), artifact),
+        )
+
+        first = self._sweep(tracker, _RecordingSource()).run_once(turn_id=TURN_ID)
+        self.assertEqual(ControlSweepStatus.AWAITING_PUBLICATION, first.status)
+        self.store.record_published_sha(
+            work_item_id,
+            previous_sha=BASE_SHA,
+            head_sha=head_sha,
+        )
+        calls_before = tuple(self.transport.calls)
+        publisher = _RecordingPublisher()
+
+        recovered = self._sweep(
+            tracker, _RecordingSource(), publisher=publisher
+        ).run_once()
+
+        self.assertEqual(ControlSweepStatus.REVIEW, recovered.status)
+        self.assertEqual((), tuple(publisher.calls))
+        self.assertEqual(calls_before, tuple(self.transport.calls))
+
+    def test_issue_policy_change_after_turn_cannot_widen_publication(self) -> None:
+        tracker = FakeTracker()
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        artifact = b"fixture-policy-bundle"
+        head_sha = "b" * 40
+        self._register_checkpoint(
+            artifact,
+            head_sha,
+            changed_paths=("src/other.py",),
+        )
+        work_item_id = self._expected_work_item_id(task)
+        self.transport.queue_turn(
+            work_item_id,
+            FakeTurnFixture(SESSION, head_sha, _completed_result(), artifact),
+        )
+
+        first = self._sweep(tracker, _RecordingSource()).run_once(turn_id=TURN_ID)
+        self.assertEqual(ControlSweepStatus.AWAITING_PUBLICATION, first.status)
+        running = tracker.tasks[task.task_id]
+        tracker.tasks[task.task_id] = replace(
+            running,
+            body=running.body.replace("- src/codex_dispatcher", "- src"),
+            updated_at="2026-08-13T02:00:00Z",
+        )
+        publisher = _RecordingPublisher()
+
+        rejected = self._sweep(
+            tracker, _RecordingSource(), publisher=publisher
+        ).run_once()
+
+        self.assertEqual(ControlSweepStatus.BLOCKED, rejected.status)
+        self.assertEqual([], publisher.calls)
+        turn = self.store.get_turn(TURN_ID)
+        assert turn is not None
+        self.assertEqual("publication_rejected", turn.error_code)
 
     def test_lost_terminal_tracker_write_is_repaired_before_new_claim(self) -> None:
         tracker = FakeTracker()

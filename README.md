@@ -28,7 +28,8 @@ executor. The environment-independent implementation now includes:
 - fixed-lease task-branch publication with exact-SHA read-back recovery;
 - fixed OpenSSH framing and an absolute-path `codex-runner-v1` forced-command service;
 - persistent Runner workspaces and idempotent first/resume Turn execution;
-- a recovery-first, process-locked offline Control Host sweep with stable Issue/comment snapshots;
+- a recovery-first, process-locked Control Host sweep with stable Issue/comment snapshots and
+  idempotent Publisher checkpoint completion;
 - a double-opt-in `ssh-run-once` entry point that assembles only fixed GitHub, mirror, and SSH ports;
 - outbound-only Slack projection models and offline integration tests.
 
@@ -38,12 +39,11 @@ created one persistent session, and resumed that exact session on the same branc
 the read-only task produced no diff or publication checkpoint. The first-phase Runner release is
 installed on `s3`, but remains user-owned because the Fixture account has no passwordless sudo.
 
-The sweep currently stops at a verified local state or Publisher checkpoint. Its live dependency
-assembly is implemented, but the write-enabled entry point has not yet been exercised against the
-Fixture. The trusted-mirror fetch is also not live-tested. Publisher push, Slack delivery, automatic
-draft PR creation, merge, and production deployment are still absent. Existing Codex Cloud adapter
-code is retained only during migration; Cloud writes remain disabled and are not part of the target
-architecture.
+The live dependency assembly now includes exact-SHA task-branch publication, but the write-enabled
+entry point has not yet been exercised against the Fixture. The trusted-mirror fetch and Publisher
+push are therefore still offline-tested only. Slack delivery, automatic Draft PR creation, merge,
+and production deployment remain absent. Existing Codex Cloud adapter code is retained only during
+migration; Cloud writes remain disabled and are not part of the target architecture.
 
 Candidate planning is exposed through a dependency-injected Python entry point and a read-only
 GitHub CLI dry-run command. The command performs tracker reads but does not claim issues, mutate
@@ -92,5 +92,6 @@ approved; they are not needed for the offline core.
 
 The dispatcher processes untrusted issue text, Runner output, Git bundles, and agent-generated code.
 It must never execute issue-provided commands on its control host, expose GitHub write credentials
-to Codex, accept Slack as input, or interpret unknown external state as success. Any ambiguous
-execution or publication state is blocked for human reconciliation.
+to Codex, accept Slack as input, or interpret unknown external state as success. Ambiguous execution
+or publication remains active for bounded status/read-back reconciliation and is never treated as
+success by inference.

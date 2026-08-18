@@ -81,7 +81,7 @@ WorkItem
 
 Turn
   work_item_id, turn_number
-  issue_revision, included_comment_ids, prompt_sha256, input_head_sha
+  issue_revision, included_comment_ids, issue_allowed_paths, prompt_sha256, input_head_sha
   started_at, finished_at, status
   output_sha256, output_head_sha, result_status, result_summary, error_code
 ```
@@ -97,8 +97,8 @@ adapters are not loaded. Runtime TOML contains only fixed paths, host identity, 
 locations. GitHub credentials remain environment-only and are never passed to SSH.
 The live command accepts only an absolute config path whose parent and file are owned by root or the
 Dispatcher user, non-symlink, and non-group/world-writable.
-The SQLite parent, database, WAL, and SHM files are checked against the same ownership/write boundary
-before SQLite opens them.
+The SQLite parent, database, WAL, and SHM files must be owned by the Dispatcher user and are checked
+against the non-symlink/non-group-or-world-writable boundary before SQLite opens them.
 
 ## Input and output channels
 
@@ -179,6 +179,14 @@ an Issue claimed without a recoverable base. The intended transfer is:
    secret policy, size limits, and fast-forward behavior.
 7. The Publisher pushes that exact SHA to the already-bound task branch.
 8. The Dispatcher creates or updates the one Draft PR and Issue metadata.
+
+The Issue allowlist used in step 6 is stored with the Turn before Codex starts. Publication recovery
+never reparses a later Issue body to widen that frozen policy. An ambiguous push remains
+`checkpointing` and retries by remote read-back without restarting Codex. If the verified remote SHA
+was already stored but the process stopped before the Turn became `published`, the durable SHA is
+sufficient to finish the recorded result without exporting or pushing again.
+Migration gives historical Turns an empty frozen policy. A pre-migration Turn that is still waiting
+at a checkpoint is therefore rejected rather than inferring permissions from the current Issue.
 
 For a new WorkItem, the mirror updater fetches only
 `refs/heads/<configured-base>:refs/codex-dispatcher/base` from the GitHub URL derived from the

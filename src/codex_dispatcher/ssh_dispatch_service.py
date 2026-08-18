@@ -5,6 +5,17 @@ from __future__ import annotations
 from typing import Iterable
 
 from codex_dispatcher.config import Config, RepositoryConfig
+from codex_dispatcher.git_bundle_verifier import GitBundleVerificationError
+from codex_dispatcher.git_publisher import (
+    GitPublicationInterrupted,
+    GitPublicationRejected,
+)
+from codex_dispatcher.publisher import PublicationError
+from codex_dispatcher.runner_protocol import RunnerProtocolError
+from codex_dispatcher.runner_transport import (
+    RunnerTransportInterrupted,
+    RunnerTransportRejected,
+)
 from codex_dispatcher.scheduler import DryRunPlan, build_ssh_dry_run_plan
 from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_dispatch_planning import (
@@ -15,15 +26,21 @@ from codex_dispatcher.ssh_dispatch_planning import (
 )
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.trackers.base import Tracker, TrackerTask
-from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator, TurnProgress
+from codex_dispatcher.turn_orchestration import (
+    OfflineTurnOrchestrator,
+    TaskBranchPublisher,
+    TurnOrchestrationError,
+    TurnProgress,
+)
 from codex_dispatcher.work_items import WorkItem, WorkItemState
 
 
 class OfflineSshDispatchService:
     """Join selection, WorkItem recovery, Prompt planning, and the fixed Runner port.
 
-    GitHub claim/state writes and Publisher/Slack delivery remain outside this
-    service. Callers must pass the verified post-claim Issue snapshot.
+    GitHub claim/state writes and Slack delivery remain outside this service.
+    Callers pass the verified post-claim Issue snapshot and an explicit fixed
+    Publisher port for checkpoint completion.
     """
 
     def __init__(
@@ -121,9 +138,45 @@ class OfflineSshDispatchService:
             work_item.work_item_id,
             issue_revision=plan.issue_revision,
             prompt=plan.prompt,
+            issue_allowed_paths=plan.task_spec.allowed_paths,
             expected_turn_number=plan.turn_number,
             turn_id=turn_id,
         )
+
+    def publish_checkpoint(
+        self,
+        turn_id: str,
+        *,
+        publisher: TaskBranchPublisher,
+    ) -> TurnProgress:
+        """Recover or publish a checkpoint; mechanically unsafe evidence blocks it."""
+        turn = self._store.get_turn(turn_id)
+        if turn is None:
+            raise KeyError(f"turn not found: {turn_id}")
+        work_item = self._store.get_work_item(turn.work_item_id)
+        if work_item is None:
+            raise KeyError(f"work item not found: {turn.work_item_id}")
+        repository = self._repository(work_item.repository)
+        try:
+            return self._orchestrator.publish_checkpoint(
+                turn_id,
+                publisher=publisher,
+                repository_allowed_paths=repository.allowed_paths,
+                repository_denied_paths=repository.denied_paths,
+            )
+        except (RunnerTransportInterrupted, GitPublicationInterrupted) as exc:
+            raise CheckpointPublicationInterrupted(
+                "checkpoint publication outcome is ambiguous"
+            ) from exc
+        except (
+            RunnerTransportRejected,
+            RunnerProtocolError,
+            GitBundleVerificationError,
+            GitPublicationRejected,
+            PublicationError,
+            TurnOrchestrationError,
+        ):
+            return self._orchestrator.reject_publication(turn_id)
 
     def reconcile_turn(self, turn_id: str) -> TurnProgress:
         """Reconcile one ambiguous active Turn without replaying its Prompt."""
@@ -134,3 +187,7 @@ class OfflineSshDispatchService:
             return self._repositories[slug]
         except KeyError as exc:
             raise SshDispatchPlanningError("Issue repository is not configured") from exc
+
+
+class CheckpointPublicationInterrupted(RuntimeError):
+    """Raised when retry must reconcile a possibly successful publication."""

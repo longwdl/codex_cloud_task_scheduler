@@ -94,6 +94,23 @@ def plan(item: WorkItem, artifact: bytes, head_sha: str) -> PublicationPlan:
 
 
 class GitTaskBranchPublisherTests(unittest.TestCase):
+    def test_missing_persistent_origin_uses_only_the_derived_github_url(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            mirror = root / "mirrors" / "owner" / "repo.git"
+            mirror.parent.mkdir(parents=True)
+            git(root, "init", "--bare", str(mirror))
+            publisher = GitTaskBranchPublisher(
+                git_path=GIT,
+                mirror_root=root / "mirrors",
+                temporary_root=root / "temporary",
+            )
+
+            self.assertEqual(
+                "https://github.com/owner/repo.git",
+                publisher._origin(mirror, "owner/repo"),
+            )
+
     def test_pushes_exact_sha_and_recovers_idempotently_after_lost_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -158,6 +175,32 @@ class GitTaskBranchPublisherTests(unittest.TestCase):
                 competing_sha,
                 git(remote, "rev-parse", f"refs/heads/{item.task_branch}"),
             )
+
+    def test_rejects_group_writable_publisher_staging_before_push(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            item, artifact, head_sha, _remote = fixture(root)
+            temporary = root / "temporary"
+            temporary.mkdir()
+            temporary.chmod(0o777)
+            publisher = GitTaskBranchPublisher(
+                git_path=GIT,
+                mirror_root=root / "mirrors",
+                temporary_root=temporary,
+            )
+
+            with (
+                patch(
+                    "codex_dispatcher.git_publisher._validate_github_origin",
+                    side_effect=lambda origin, _repository: origin,
+                ),
+                self.assertRaisesRegex(GitPublicationRejected, "temporary_root"),
+            ):
+                publisher.publish(
+                    artifact,
+                    plan=plan(item, artifact, head_sha),
+                    work_item=item,
+                )
 
 
 if __name__ == "__main__":

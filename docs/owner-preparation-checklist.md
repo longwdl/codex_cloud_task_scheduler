@@ -38,6 +38,9 @@ The `[tools]` table must pin the Control Host Git, gh, and OpenSSH versions; Ope
 Pass the live config by absolute path. Its parent and file may be owned by root or the Dispatcher
 user. The SQLite directory and any existing DB/WAL/SHM files must be owned by the Dispatcher user.
 All of them must be non-symlink and not group/world writable.
+Provide a dedicated `publisher_temporary_root`; it holds only short-lived verified bundle staging
+and must be Dispatcher-owned and non-group/world-writable. Do not share it with the Runner or expose
+it as an Issue-controlled path.
 
 ### 2. Dedicated Linux Runner
 

@@ -23,6 +23,7 @@ lock_path = "/run/codex-dispatcher/dispatcher.lock"
 mirror_root = "/var/lib/codex-dispatcher/mirrors"
 source_temporary_root = "/var/lib/codex-dispatcher/source-temporary"
 quarantine_root = "/var/lib/codex-dispatcher/quarantine"
+publisher_temporary_root = "/var/lib/codex-dispatcher/publisher-temporary"
 runner_root = "/srv/codex-runner/work-items"
 connect_timeout_seconds = 10
 operation_timeout_seconds = 3900

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import os
 import re
+import stat
 import tempfile
 from dataclasses import dataclass
 from hashlib import sha256
@@ -193,8 +195,17 @@ class GitTaskBranchPublisher:
             resolved_mirror.relative_to(resolved_root)
         except (OSError, ValueError) as exc:
             raise GitPublicationRejected("trusted Publisher mirror is unavailable") from exc
-        if mirror.is_symlink() or not mirror.is_dir():
-            raise GitPublicationRejected("trusted Publisher mirror must be a directory")
+        try:
+            metadata = mirror.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise GitPublicationRejected("trusted Publisher mirror must be protected") from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or mirror.is_symlink()
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_mode & 0o022
+        ):
+            raise GitPublicationRejected("trusted Publisher mirror must be protected")
         bare = self._require_local(
             mirror,
             "rev-parse",
@@ -206,26 +217,49 @@ class GitTaskBranchPublisher:
         return mirror
 
     def _origin(self, mirror: Path, repository: str) -> str:
-        fetch_url = self._require_local(
-            mirror,
-            "remote",
-            "get-url",
-            "origin",
-            stage="origin_fetch_url",
-        ).stdout.strip()
-        push_url = self._require_local(
-            mirror,
-            "remote",
-            "get-url",
-            "--push",
-            "origin",
-            stage="origin_push_url",
-        ).stdout.strip()
+        fetch_url = self._optional_local_config_value(mirror, "remote.origin.url")
+        if fetch_url is None:
+            # Trusted mirrors created by GitHubMirrorRefresher intentionally have no
+            # persistent remote. The only live fallback is derived from validated state.
+            return _validate_github_origin(
+                f"https://github.com/{repository}.git",
+                repository,
+            )
+        push_url = (
+            self._optional_local_config_value(mirror, "remote.origin.pushurl")
+            or fetch_url
+        )
         fetch_url = _validate_github_origin(fetch_url, repository)
         push_url = _validate_github_origin(push_url, repository)
         if fetch_url != push_url:
             raise GitPublicationRejected("origin fetch and push URLs differ")
         return push_url
+
+    def _optional_local_config_value(self, mirror: Path, key: str) -> str | None:
+        result = self._execute(
+            mirror,
+            "config",
+            "--local",
+            "--get-all",
+            key,
+            max_output_bytes=4096,
+        )
+        if (
+            result.returncode == 1
+            and not result.stdout
+            and not result.stderr
+            and not result.timed_out
+            and result.error is None
+            and not result.stdout_truncated
+            and not result.stderr_truncated
+        ):
+            return None
+        if not self._successful(result):
+            raise GitPublicationRejected("Publisher origin config lookup failed")
+        values = tuple(line for line in result.stdout.splitlines() if line)
+        if len(values) != 1:
+            raise GitPublicationRejected("Publisher origin config is ambiguous")
+        return values[0]
 
     def _read_remote_head(self, mirror: Path, origin: str, target_ref: str) -> str | None:
         result = self._execute(
@@ -254,8 +288,17 @@ class GitTaskBranchPublisher:
 
     def _prepare_temporary_root(self) -> None:
         self._temporary_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if self._temporary_root.is_symlink() or not self._temporary_root.is_dir():
-            raise GitPublicationRejected("Publisher temporary_root must be a directory")
+        try:
+            metadata = self._temporary_root.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise GitPublicationRejected("Publisher temporary_root must be protected") from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or self._temporary_root.is_symlink()
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_mode & 0o022
+        ):
+            raise GitPublicationRejected("Publisher temporary_root must be protected")
 
     def _require_local(
         self,

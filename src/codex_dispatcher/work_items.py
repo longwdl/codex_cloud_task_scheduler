@@ -11,6 +11,7 @@ from typing import Final
 from uuid import UUID, uuid4
 
 from codex_dispatcher.domain import InvalidStateTransition, utc_now_iso
+from codex_dispatcher.task_spec import TaskSpecError, normalize_repo_path
 
 
 _REPOSITORY_COMPONENT_RE = re.compile(r"[A-Za-z0-9_.-]{1,100}")
@@ -367,6 +368,7 @@ class Turn:
     started_at: str | None = None
     finished_at: str | None = None
     included_comment_ids: tuple[str, ...] = ()
+    issue_allowed_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.state, TurnState):
@@ -416,6 +418,20 @@ class Turn:
             raise ValueError("included_comment_ids must be a bounded unique tuple")
         for comment_id in self.included_comment_ids:
             _bounded_text(comment_id, "included_comment_id", maximum=256)
+        if (
+            not isinstance(self.issue_allowed_paths, tuple)
+            or len(self.issue_allowed_paths) > 1_000
+            or len(set(self.issue_allowed_paths)) != len(self.issue_allowed_paths)
+        ):
+            raise ValueError("issue_allowed_paths must be a bounded unique tuple")
+        try:
+            normalized_paths = tuple(
+                normalize_repo_path(path) for path in self.issue_allowed_paths
+            )
+        except (TypeError, TaskSpecError) as exc:
+            raise ValueError("issue_allowed_paths contains an unsafe path") from exc
+        if normalized_paths != self.issue_allowed_paths:
+            raise ValueError("issue_allowed_paths must contain normalized paths")
 
     @classmethod
     def new(
@@ -427,6 +443,7 @@ class Turn:
         prompt_sha256: str,
         input_head_sha: str,
         included_comment_ids: tuple[str, ...] = (),
+        issue_allowed_paths: tuple[str, ...] = (),
         turn_id: str | None = None,
         at: str | None = None,
     ) -> "Turn":
@@ -440,6 +457,7 @@ class Turn:
             prompt_sha256=prompt_sha256,
             input_head_sha=input_head_sha,
             included_comment_ids=included_comment_ids,
+            issue_allowed_paths=issue_allowed_paths,
             created_at=now,
             updated_at=now,
         )

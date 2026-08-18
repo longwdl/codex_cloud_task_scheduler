@@ -9,7 +9,10 @@ from typing import Protocol
 from codex_dispatcher.config import Config, RepositoryConfig
 from codex_dispatcher.dispatcher_lock import DispatcherProcessLock
 from codex_dispatcher.source_bundle import SourceBundle
-from codex_dispatcher.ssh_dispatch_service import OfflineSshDispatchService
+from codex_dispatcher.ssh_dispatch_service import (
+    CheckpointPublicationInterrupted,
+    OfflineSshDispatchService,
+)
 from codex_dispatcher.ssh_recovery import (
     SshRecoveryAction,
     SshRecoveryPlan,
@@ -17,7 +20,7 @@ from codex_dispatcher.ssh_recovery import (
 )
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.trackers.base import TaskState, Tracker, TrackerComment, TrackerTask
-from codex_dispatcher.turn_orchestration import TurnProgress
+from codex_dispatcher.turn_orchestration import TaskBranchPublisher, TurnProgress
 from codex_dispatcher.work_items import TurnState, WorkItem, WorkItemState
 
 
@@ -63,6 +66,7 @@ class SshControlSweep:
         dispatch: OfflineSshDispatchService,
         source: SourceSnapshotProvider,
         process_lock: DispatcherProcessLock,
+        publisher: TaskBranchPublisher | None = None,
         claimant: str = "codex-dispatcher",
         runner_root: str = "/srv/codex-runner/work-items",
     ) -> None:
@@ -81,6 +85,7 @@ class SshControlSweep:
         self._dispatch = dispatch
         self._source = source
         self._lock = process_lock
+        self._publisher = publisher
         self._claimant = claimant
         self._runner_root = runner_root
         self._repositories = {item.slug: item for item in config.repositories}
@@ -165,8 +170,11 @@ class SshControlSweep:
             )
         if recovery.action is SshRecoveryAction.RESUME_PUBLICATION:
             assert recovery.task is not None
-            self._set_task_state(recovery.task, TaskState.RUNNING)
-            return _plan_result(ControlSweepStatus.AWAITING_PUBLICATION, recovery)
+            running = self._set_task_state(recovery.task, TaskState.RUNNING)
+            if self._publisher is None:
+                return _plan_result(ControlSweepStatus.AWAITING_PUBLICATION, recovery)
+            assert recovery.turn is not None
+            return self._publish_checkpoint(running, recovery.turn.turn_id)
         if recovery.action is SshRecoveryAction.RECONCILE_ACTIVE_TURN:
             assert recovery.task is not None and recovery.turn is not None
             progress = self._dispatch.reconcile_turn(recovery.turn.turn_id)
@@ -283,6 +291,11 @@ class SshControlSweep:
         task: TrackerTask,
         progress: TurnProgress,
     ) -> ControlSweepResult:
+        if (
+            progress.turn.state in {TurnState.CHECKPOINTING, TurnState.PUBLISHED}
+            and self._publisher is not None
+        ):
+            return self._publish_checkpoint(task, progress.turn.turn_id)
         mapping = {
             TurnState.STARTING: (ControlSweepStatus.RUNNER_ACTIVE, TaskState.RUNNING),
             TurnState.RUNNING: (ControlSweepStatus.RUNNER_ACTIVE, TaskState.RUNNING),
@@ -319,6 +332,31 @@ class SshControlSweep:
             work_item=progress.work_item,
             turn_id=progress.turn.turn_id,
         )
+
+    def _publish_checkpoint(
+        self,
+        task: TrackerTask,
+        turn_id: str,
+    ) -> ControlSweepResult:
+        assert self._publisher is not None
+        try:
+            progress = self._dispatch.publish_checkpoint(
+                turn_id,
+                publisher=self._publisher,
+            )
+        except CheckpointPublicationInterrupted:
+            running = self._set_task_state(task, TaskState.RUNNING)
+            work_item = self._store.get_work_item_by_issue(
+                task.repository, task.issue_number
+            )
+            return _task_result(
+                ControlSweepStatus.AWAITING_PUBLICATION,
+                running,
+                work_item=work_item,
+                turn_id=turn_id,
+                reason="publication_outcome_ambiguous",
+            )
+        return self._after_turn(task, progress)
 
     def _set_task_state(self, task: TrackerTask, state: TaskState) -> TrackerTask:
         if task.state is state:

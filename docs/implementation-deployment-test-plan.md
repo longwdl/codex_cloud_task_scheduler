@@ -289,6 +289,7 @@ CREATE TABLE turns (
   prompt_sha256 TEXT NOT NULL,
   input_head_sha TEXT NOT NULL,
   included_comment_ids_json TEXT NOT NULL DEFAULT '[]',
+  issue_allowed_paths_json TEXT NOT NULL DEFAULT '[]',
   output_sha256 TEXT,
   output_head_sha TEXT,
   result_status TEXT,
@@ -547,8 +548,9 @@ Fixture 通过。该结果尚不代表 GitHub 调度、Publisher 或 Slack 端�
 - 故障注入：push 成功但 SQLite 未更新、PR 成功但评论未更新。
 
 状态：Publisher 的 bundle import、精确 SHA、精确 `--force-with-lease`、远端 read-back、push
-回执丢失恢复和竞态拒绝已在本地 bare remote 完成；真实 GitHub 凭据合同、Draft PR 与 Issue
-写入仍待 live fixture。
+回执丢失恢复和竞态拒绝已在本地 bare remote 完成，并已接入 recovery-first sweep。Turn 会在
+启动前持久化 Issue 路径策略；push 已记账但 Turn 未终态化的崩溃窗口也可在不重新 export/push
+的情况下恢复。真实 GitHub 凭据合同、Draft PR 与 Issue 写入仍待 live fixture。
 
 ### Phase E：Slack 只读投影
 
@@ -682,6 +684,8 @@ git diff --check
 | AC-043 | SSH runtime 配置含 secret | 严格字段解析直接拒绝 token/key 内容字段；凭据只能来自显式环境注入 |
 | AC-044 | Control Host 工具版本漂移 | Git/gh/OpenSSH 精确版本检查失败时不进入 sweep，不 claim Issue |
 | AC-045 | runtime TOML/SQLite 路径替换 | 配置父目录及单链接普通文件、DB 目录及已有 DB/WAL/SHM 必须同用户拥有、非 symlink 且不可被 group/world 写 |
+| AC-046 | Issue 在 checkpoint 后扩大允许路径 | Publisher 只使用 Turn 启动前持久化的路径策略，拒绝调用方覆盖或重新解析新正文 |
+| AC-047 | push 记账后、Turn 终态前崩溃 | 依据已落库的 exact SHA 完成 Turn，不重新 EXPORT、不重复 push、不重启 Codex |
 
 ### 12.3 Live Fixture 顺序
 

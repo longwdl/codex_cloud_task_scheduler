@@ -52,6 +52,7 @@ class SshRuntimeConfig:
     mirror_root: Path
     source_temporary_root: Path
     quarantine_root: Path
+    publisher_temporary_root: Path
     runner_root: str
     connect_timeout_seconds: int
     operation_timeout_seconds: int
@@ -265,6 +266,7 @@ def _parse_ssh_runtime(value: Any) -> SshRuntimeConfig:
             "mirror_root",
             "source_temporary_root",
             "quarantine_root",
+            "publisher_temporary_root",
             "runner_root",
             "connect_timeout_seconds",
             "operation_timeout_seconds",
@@ -317,6 +319,10 @@ def _parse_ssh_runtime(value: Any) -> SshRuntimeConfig:
         ),
         quarantine_root=_absolute_path(
             table["quarantine_root"], "ssh_runtime.quarantine_root"
+        ),
+        publisher_temporary_root=_absolute_path(
+            table["publisher_temporary_root"],
+            "ssh_runtime.publisher_temporary_root",
         ),
         runner_root=runner_root,
         connect_timeout_seconds=_positive_int(

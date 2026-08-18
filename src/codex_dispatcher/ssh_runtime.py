@@ -11,6 +11,7 @@ from codex_dispatcher.contract import run_control_host_contract_checks
 from codex_dispatcher.control_sweep import ControlSweepResult, SshControlSweep
 from codex_dispatcher.dispatcher_lock import DispatcherProcessLock
 from codex_dispatcher.git_bundle_verifier import GitBundleQuarantineVerifier
+from codex_dispatcher.git_publisher import GitTaskBranchPublisher
 from codex_dispatcher.source_bundle import GitSourceBundleBuilder
 from codex_dispatcher.ssh_dispatch_service import OfflineSshDispatchService
 from codex_dispatcher.ssh_runner_transport import SshRunnerTransport
@@ -141,6 +142,12 @@ def _assemble_ssh_control_sweep(
         dispatch=dispatch,
         source=source,
         process_lock=DispatcherProcessLock(runtime.lock_path),
+        publisher=GitTaskBranchPublisher(
+            git_path=git_path,
+            mirror_root=runtime.mirror_root,
+            temporary_root=runtime.publisher_temporary_root,
+            github_token=github_token,
+        ),
         runner_root=runtime.runner_root,
     )
 

@@ -624,6 +624,7 @@ class StateStore:
         prompt_sha256: str,
         input_head_sha: str,
         included_comment_ids: tuple[str, ...] = (),
+        issue_allowed_paths: tuple[str, ...] = (),
         turn_id: str | None = None,
         created_at: str | None = None,
     ) -> Turn:
@@ -652,6 +653,7 @@ class StateStore:
                 prompt_sha256=prompt_sha256,
                 input_head_sha=input_head_sha,
                 included_comment_ids=included_comment_ids,
+                issue_allowed_paths=issue_allowed_paths,
                 at=now,
             )
             self._insert_turn(connection, turn)
@@ -678,6 +680,7 @@ class StateStore:
         prompt_sha256: str,
         input_head_sha: str,
         included_comment_ids: tuple[str, ...] = (),
+        issue_allowed_paths: tuple[str, ...] = (),
         expected_turn_number: int | None = None,
         turn_id: str | None = None,
         created_at: str | None = None,
@@ -713,6 +716,7 @@ class StateStore:
                 prompt_sha256=prompt_sha256,
                 input_head_sha=input_head_sha,
                 included_comment_ids=included_comment_ids,
+                issue_allowed_paths=issue_allowed_paths,
                 at=now,
             )
             self._insert_turn(connection, turn)
@@ -830,6 +834,7 @@ class StateStore:
                 started_at=turn.started_at,
                 finished_at=turn.finished_at,
                 included_comment_ids=turn.included_comment_ids,
+                issue_allowed_paths=turn.issue_allowed_paths,
                 created_at=turn.created_at,
                 updated_at=now,
             )
@@ -1022,6 +1027,7 @@ class StateStore:
             "prompt_sha256",
             "input_head_sha",
             "included_comment_ids_json",
+            "issue_allowed_paths_json",
             "output_sha256",
             "output_head_sha",
             "result_status",
@@ -1037,6 +1043,8 @@ class StateStore:
             if field == "state"
             else json.dumps(turn.included_comment_ids, separators=(",", ":"))
             if field == "included_comment_ids_json"
+            else json.dumps(turn.issue_allowed_paths, separators=(",", ":"))
+            if field == "issue_allowed_paths_json"
             else getattr(turn, field)
             for field in fields
         )
@@ -1123,13 +1131,21 @@ class StateStore:
         values = dict(row)
         values["state"] = TurnState(values["state"])
         raw_comment_ids = values.pop("included_comment_ids_json", "[]")
-        try:
-            parsed_comment_ids = json.loads(raw_comment_ids)
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise ValueError("persisted Turn comment IDs are malformed") from exc
-        if not isinstance(parsed_comment_ids, list) or any(
-            not isinstance(item, str) for item in parsed_comment_ids
-        ):
-            raise ValueError("persisted Turn comment IDs are malformed")
-        values["included_comment_ids"] = tuple(parsed_comment_ids)
+        raw_allowed_paths = values.pop("issue_allowed_paths_json", "[]")
+        values["included_comment_ids"] = StateStore._parse_string_tuple(
+            raw_comment_ids, "persisted Turn comment IDs"
+        )
+        values["issue_allowed_paths"] = StateStore._parse_string_tuple(
+            raw_allowed_paths, "persisted Turn allowed paths"
+        )
         return Turn(**values)
+
+    @staticmethod
+    def _parse_string_tuple(value: object, field: str) -> tuple[str, ...]:
+        try:
+            parsed = json.loads(value)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"{field} are malformed") from exc
+        if not isinstance(parsed, list) or any(not isinstance(item, str) for item in parsed):
+            raise ValueError(f"{field} are malformed")
+        return tuple(parsed)

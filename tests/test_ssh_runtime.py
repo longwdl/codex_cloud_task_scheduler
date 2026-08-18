@@ -61,6 +61,7 @@ class SshRuntimeTests(unittest.TestCase):
             mirror_root=self.root / "mirrors",
             source_temporary_root=self.root / "source-temporary",
             quarantine_root=self.root / "quarantine",
+            publisher_temporary_root=self.root / "publisher-temporary",
             runner_root="/srv/codex-runner/work-items",
             connect_timeout_seconds=10,
             operation_timeout_seconds=3900,
@@ -93,6 +94,7 @@ class SshRuntimeTests(unittest.TestCase):
         self.assertIsInstance(sweep, SshControlSweep)
         self.assertFalse((self.root / "mirrors").exists())
         self.assertFalse((self.root / "quarantine").exists())
+        self.assertFalse((self.root / "publisher-temporary").exists())
         self.assertFalse((self.lock_dir / "dispatcher.lock").exists())
 
     def test_live_config_and_sqlite_paths_must_be_owned_and_protected(self) -> None:

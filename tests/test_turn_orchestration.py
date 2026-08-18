@@ -23,6 +23,7 @@ from codex_dispatcher.testing.fake_runner import (
     FakeTurnFixture,
 )
 from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator
+from codex_dispatcher.turn_orchestration import TurnOrchestrationError
 from codex_dispatcher.work_items import TurnState, WorkItem, WorkItemState
 
 
@@ -108,6 +109,7 @@ class TurnOrchestrationTests(unittest.TestCase):
             item.work_item_id,
             issue_revision="revision-1",
             prompt=prompt("implement first checkpoint\n"),
+            issue_allowed_paths=("src",),
             turn_id="turn_" + "1" * 32,
         )
         self.assertTrue(first.checkpoint_ready)
@@ -118,6 +120,12 @@ class TurnOrchestrationTests(unittest.TestCase):
             repository_allowed_paths=("src", "tests"),
         )
         self.assertIsNone(first_plan.expected_remote_sha)
+        with self.assertRaisesRegex(TurnOrchestrationError, "frozen Turn policy"):
+            self.service.prepare_publication(
+                first.turn.turn_id,
+                issue_allowed_paths=("docs",),
+                repository_allowed_paths=("src", "docs"),
+            )
         first = self.service.complete_publication(
             first.turn.turn_id,
             plan=first_plan,
@@ -161,6 +169,7 @@ class TurnOrchestrationTests(unittest.TestCase):
             item.work_item_id,
             issue_revision="revision-2",
             prompt=prompt("continue after clarification\n"),
+            issue_allowed_paths=("src",),
             turn_id="turn_" + "2" * 32,
         )
         second_plan = self.service.prepare_publication(
@@ -207,6 +216,7 @@ class TurnOrchestrationTests(unittest.TestCase):
             item.work_item_id,
             issue_revision="revision-1",
             prompt=prompt("ask for a decision\n"),
+            issue_allowed_paths=("src",),
             turn_id="turn_" + "3" * 32,
         )
         self.assertEqual(TurnState.RECONCILING, progress.turn.state)
@@ -222,6 +232,7 @@ class TurnOrchestrationTests(unittest.TestCase):
                 second.work_item_id,
                 issue_revision="revision-1",
                 prompt=prompt("must not run concurrently\n"),
+                issue_allowed_paths=("src",),
                 turn_id="turn_" + "4" * 32,
             )
 
@@ -263,6 +274,7 @@ class TurnOrchestrationTests(unittest.TestCase):
                 item.work_item_id,
                 issue_revision="revision-invalid-result",
                 prompt=prompt("return a structured result\n"),
+                issue_allowed_paths=("src",),
                 turn_id="turn_" + "5" * 32,
             )
 
@@ -283,6 +295,7 @@ class TurnOrchestrationTests(unittest.TestCase):
                 item.work_item_id,
                 issue_revision="revision-1",
                 prompt=prompt("stale turn number\n"),
+                issue_allowed_paths=("src",),
                 expected_turn_number=2,
             )
 
@@ -312,6 +325,7 @@ class TurnOrchestrationTests(unittest.TestCase):
             item.work_item_id,
             issue_revision="revision-context",
             prompt=snapshot,
+            issue_allowed_paths=("src",),
             turn_id="turn_" + "7" * 32,
         )
 

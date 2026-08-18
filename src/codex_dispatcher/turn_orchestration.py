@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
+from typing import Protocol
 
 from codex_dispatcher.bundle_verification import BundleVerifier
 from codex_dispatcher.prompt_builder import PromptSnapshot
@@ -53,6 +54,26 @@ class TurnProgress:
     @property
     def checkpoint_ready(self) -> bool:
         return self.turn.state is TurnState.CHECKPOINTING
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedPublication:
+    artifact: bytes
+    plan: PublicationPlan
+
+
+class PublicationReceiptLike(Protocol):
+    observed_remote_sha: str
+
+
+class TaskBranchPublisher(Protocol):
+    def publish(
+        self,
+        artifact: bytes,
+        *,
+        plan: PublicationPlan,
+        work_item: WorkItem,
+    ) -> PublicationReceiptLike: ...
 
 
 class OfflineTurnOrchestrator:
@@ -113,10 +134,13 @@ class OfflineTurnOrchestrator:
         *,
         issue_revision: str,
         prompt: PromptSnapshot,
+        issue_allowed_paths: tuple[str, ...],
         expected_turn_number: int | None = None,
         turn_id: str | None = None,
     ) -> TurnProgress:
         prompt_bytes = self._validate_prompt(prompt)
+        if not issue_allowed_paths:
+            raise ValueError("issue_allowed_paths must be frozen before starting a Turn")
         work_item = self._require_work_item(work_item_id)
         input_head_sha = work_item.last_published_sha or work_item.base_sha
         work_item, turn = self._store.begin_turn(
@@ -125,6 +149,7 @@ class OfflineTurnOrchestrator:
             prompt_sha256=prompt.sha256,
             input_head_sha=input_head_sha,
             included_comment_ids=prompt.included_comment_ids,
+            issue_allowed_paths=issue_allowed_paths,
             expected_turn_number=expected_turn_number,
             turn_id=turn_id,
         )
@@ -195,13 +220,40 @@ class OfflineTurnOrchestrator:
         self,
         turn_id: str,
         *,
-        issue_allowed_paths: tuple[str, ...],
+        issue_allowed_paths: tuple[str, ...] | None = None,
         repository_allowed_paths: tuple[str, ...],
         repository_denied_paths: tuple[str, ...] = (),
     ) -> PublicationPlan:
+        """Build a plan from the path policy frozen with the Turn."""
+        turn = self._require_turn(turn_id)
+        if (
+            issue_allowed_paths is not None
+            and issue_allowed_paths != turn.issue_allowed_paths
+        ):
+            raise TurnOrchestrationError(
+                "publication path policy differs from the frozen Turn policy"
+            )
+        prepared = self.prepare_publication_checkpoint(
+            turn_id,
+            repository_allowed_paths=repository_allowed_paths,
+            repository_denied_paths=repository_denied_paths,
+        )
+        return prepared.plan
+
+    def prepare_publication_checkpoint(
+        self,
+        turn_id: str,
+        *,
+        repository_allowed_paths: tuple[str, ...],
+        repository_denied_paths: tuple[str, ...] = (),
+    ) -> PreparedPublication:
         turn = self._require_turn(turn_id)
         if turn.state is not TurnState.CHECKPOINTING or turn.output_head_sha is None:
             raise TurnOrchestrationError("Turn does not have a checkpoint ready for publication")
+        if not turn.issue_allowed_paths:
+            raise TurnOrchestrationError(
+                "Turn does not contain a frozen Issue path policy"
+            )
         work_item = self._require_work_item(turn.work_item_id)
         request = RunnerRequest(
             RunnerOperation.EXPORT,
@@ -227,13 +279,71 @@ class OfflineTurnOrchestrator:
             or bundle.size_bytes != manifest.size_bytes
         ):
             raise RunnerProtocolError("verified bundle conflicts with the Runner export manifest")
-        return plan_publication(
+        plan = plan_publication(
             request=PublishRequest(work_item.work_item_id, turn.output_head_sha),
             work_item=work_item,
             bundle=bundle,
-            issue_allowed_paths=issue_allowed_paths,
+            issue_allowed_paths=turn.issue_allowed_paths,
             repository_allowed_paths=repository_allowed_paths,
             repository_denied_paths=repository_denied_paths,
+        )
+        return PreparedPublication(artifact, plan)
+
+    def publish_checkpoint(
+        self,
+        turn_id: str,
+        *,
+        publisher: TaskBranchPublisher,
+        repository_allowed_paths: tuple[str, ...],
+        repository_denied_paths: tuple[str, ...] = (),
+    ) -> TurnProgress:
+        """Recover or publish exactly one checkpoint using only its frozen policy."""
+        recovered = self.recover_recorded_publication(turn_id)
+        if recovered is not None:
+            return recovered
+        prepared = self.prepare_publication_checkpoint(
+            turn_id,
+            repository_allowed_paths=repository_allowed_paths,
+            repository_denied_paths=repository_denied_paths,
+        )
+        work_item = self._require_work_item(prepared.plan.work_item_id)
+        receipt = publisher.publish(
+            prepared.artifact,
+            plan=prepared.plan,
+            work_item=work_item,
+        )
+        return self.complete_publication(
+            turn_id,
+            plan=prepared.plan,
+            observed_remote_sha=receipt.observed_remote_sha,
+        )
+
+    def recover_recorded_publication(self, turn_id: str) -> TurnProgress | None:
+        """Finish a publication whose verified remote SHA was already committed locally."""
+        turn = self._require_turn(turn_id)
+        if turn.state not in {TurnState.CHECKPOINTING, TurnState.PUBLISHED}:
+            raise TurnOrchestrationError("Turn is not awaiting publication recovery")
+        if turn.output_head_sha is None:
+            raise TurnOrchestrationError("Turn publication checkpoint has no output HEAD")
+        work_item = self._require_work_item(turn.work_item_id)
+        if work_item.last_published_sha != turn.output_head_sha:
+            if turn.state is TurnState.PUBLISHED:
+                raise TurnOrchestrationError(
+                    "published Turn conflicts with the recorded WorkItem anchor"
+                )
+            return None
+        if turn.state is TurnState.CHECKPOINTING:
+            turn = self._store.update_turn_state(turn.turn_id, TurnState.PUBLISHED)
+        return self._finalize_recorded_result(turn.turn_id)
+
+    def reject_publication(self, turn_id: str) -> TurnProgress:
+        """Terminalize one mechanically rejected checkpoint with a bounded error code."""
+        turn = self._require_turn(turn_id)
+        if turn.state not in {TurnState.CHECKPOINTING, TurnState.PUBLISHED}:
+            raise TurnOrchestrationError("Turn is not awaiting publication rejection")
+        return self._finalize_blocked(
+            turn_id,
+            error_code="publication_rejected",
         )
 
     def complete_publication(

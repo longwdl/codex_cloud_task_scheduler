@@ -66,7 +66,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
                 legacy_runs = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
-            self.assertEqual([(1,), (2,), (3,), (4,)], versions)
+                self.assertEqual([(1,), (2,), (3,), (4,), (5,)], versions)
             self.assertEqual(0, legacy_runs)
 
     def test_additive_migration_persists_one_issue_identity_and_bindings(self) -> None:
@@ -132,7 +132,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 versions = connection.execute(
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
-            self.assertEqual([(1,), (2,), (3,), (4,)], versions)
+                self.assertEqual([(1,), (2,), (3,), (4,), (5,)], versions)
 
     def test_persists_a_verified_migrated_task_branch_binding(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -261,10 +261,15 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     prompt_sha256="b" * 64,
                     input_head_sha="a" * 40,
                     included_comment_ids=("IC_fixture_1", "IC_fixture_2"),
+                    issue_allowed_paths=("src", "tests"),
                 )
                 self.assertEqual(
                     ("IC_fixture_1", "IC_fixture_2"),
                     store.get_turn(turn.turn_id).included_comment_ids,
+                )
+                self.assertEqual(
+                    ("src", "tests"),
+                    store.get_turn(turn.turn_id).issue_allowed_paths,
                 )
                 store.update_turn_state(turn.turn_id, TurnState.STARTING)
                 recorded = store.record_turn_error(
