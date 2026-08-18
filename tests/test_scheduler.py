@@ -6,7 +6,7 @@ from pathlib import Path
 
 from codex_dispatcher.config import Config, RepositoryConfig, SchedulerConfig, ToolPins
 from codex_dispatcher.domain import Run
-from codex_dispatcher.scheduler import build_dry_run_plan
+from codex_dispatcher.scheduler import build_dry_run_plan, build_ssh_dry_run_plan
 from codex_dispatcher.testing.fakes import Call, FakeTracker
 from codex_dispatcher.trackers.base import TaskState, TrackerTask
 from tests.test_task_spec import BODY
@@ -31,8 +31,13 @@ def make_config(*, global_max_active: int = 2, repository_max_active: int = 1) -
     )
 
 
-def make_task(issue_number: int, *, priority: int | None = None) -> TrackerTask:
-    labels = ["agent:ready", "exec:cloud"]
+def make_task(
+    issue_number: int,
+    *,
+    priority: int | None = None,
+    executor_label: str = "exec:cloud",
+) -> TrackerTask:
+    labels = ["agent:ready", executor_label]
     if priority is not None:
         labels.append(f"priority:p{priority}")
     return TrackerTask(
@@ -104,6 +109,39 @@ class SchedulerTests(unittest.TestCase):
         )
         self.assertEqual([2], [task.issue_number for task in plan.selected])
         self.assertEqual("issue_already_active", plan.rejected[0].code)
+
+    def test_ssh_plan_accepts_only_ssh_label_and_forces_one_global_candidate(self) -> None:
+        tracker = FakeTracker()
+        tracker.ready_tasks = (
+            make_task(1, priority=0, executor_label="exec:cloud"),
+            make_task(2, priority=1, executor_label="exec:ssh-cli"),
+            make_task(3, priority=2, executor_label="exec:ssh-cli"),
+        )
+
+        plan = build_ssh_dry_run_plan(make_config(global_max_active=3), tracker)
+
+        self.assertEqual([2], [task.issue_number for task in plan.selected])
+        self.assertEqual(
+            {1: "invalid_executor_labels", 3: "global_capacity"},
+            {item.issue_number: item.code for item in plan.rejected},
+        )
+
+    def test_ssh_plan_selects_nothing_while_any_turn_is_active(self) -> None:
+        tracker = FakeTracker()
+        tracker.ready_tasks = (
+            make_task(1, executor_label="exec:ssh-cli"),
+            make_task(2, executor_label="exec:ssh-cli"),
+        )
+
+        plan = build_ssh_dry_run_plan(
+            make_config(global_max_active=3), tracker, active_turn_exists=True
+        )
+
+        self.assertEqual((), plan.selected)
+        self.assertEqual(
+            ["global_capacity", "global_capacity"],
+            [item.code for item in plan.rejected],
+        )
 
 
 if __name__ == "__main__":

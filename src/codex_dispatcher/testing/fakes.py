@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -92,20 +92,7 @@ class FakeTracker(_ConfigurableFake):
         task = self.tasks.get(task_id)
         if task is None or task.repository != repository:
             raise KeyError(task_id)
-        default = TrackerTask(
-            task.repository,
-            task.task_id,
-            task.issue_number,
-            task.title,
-            task.body,
-            state,
-            task.labels,
-            task.created_at,
-            task.ready_approved_by,
-            task.is_open,
-            task.has_unresolved_dependencies,
-            task.branch_name,
-        )
+        default = replace(task, state=state)
         return self._outcome("set_state", default)  # type: ignore[return-value]
 
     def upsert_run_comment(self, repository: str, task_id: str, marker: str, body: str) -> None:

@@ -40,6 +40,8 @@ class TrackerTask:
     is_open: bool = True
     has_unresolved_dependencies: bool = False
     branch_name: str | None = None
+    issue_node_id: str | None = None
+    updated_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

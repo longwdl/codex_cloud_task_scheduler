@@ -13,6 +13,10 @@ from codex_dispatcher.task_spec import TaskSpecError, is_path_allowed, parse_tas
 from codex_dispatcher.trackers.base import TaskState, Tracker, TrackerTask
 
 
+CLOUD_EXECUTOR_LABEL = "exec:cloud"
+SSH_CLI_EXECUTOR_LABEL = "exec:ssh-cli"
+
+
 @dataclass(frozen=True, slots=True)
 class Rejection:
     repository: str
@@ -37,6 +41,41 @@ def build_dry_run_plan(
     config: Config, tracker: Tracker, active_runs: Iterable[Run] = ()
 ) -> DryRunPlan:
     """Select candidates using read methods only; never claim or mutate external state."""
+    return _build_dry_run_plan(
+        config,
+        tracker,
+        active_runs=active_runs,
+        executor_label=CLOUD_EXECUTOR_LABEL,
+        global_max_active=config.scheduler.global_max_active,
+    )
+
+
+def build_ssh_dry_run_plan(
+    config: Config,
+    tracker: Tracker,
+    *,
+    active_turn_exists: bool = False,
+) -> DryRunPlan:
+    """Plan at most one SSH CLI candidate without mutating tracker or local state."""
+    if type(active_turn_exists) is not bool:
+        raise TypeError("active_turn_exists must be a bool")
+    return _build_dry_run_plan(
+        config,
+        tracker,
+        active_runs=(),
+        executor_label=SSH_CLI_EXECUTOR_LABEL,
+        global_max_active=0 if active_turn_exists else 1,
+    )
+
+
+def _build_dry_run_plan(
+    config: Config,
+    tracker: Tracker,
+    *,
+    active_runs: Iterable[Run],
+    executor_label: str,
+    global_max_active: int,
+) -> DryRunPlan:
     active = tuple(run for run in active_runs if run.is_active)
     active_by_repository = Counter(run.repository for run in active)
     active_issues = {(run.repository, run.issue_number) for run in active}
@@ -46,7 +85,9 @@ def build_dry_run_plan(
 
     for repository in config.repositories:
         for task in tracker.list_ready_tasks(repository.slug):
-            candidate, error = _validate_candidate(task, repository)
+            candidate, error = _validate_candidate(
+                task, repository, executor_label=executor_label
+            )
             if error is not None:
                 rejected.append(Rejection(task.repository, task.issue_number, error))
             elif candidate is not None:
@@ -60,7 +101,7 @@ def build_dry_run_plan(
             candidate.task.repository,
         )
     )
-    remaining_global = max(config.scheduler.global_max_active - len(active), 0)
+    remaining_global = max(global_max_active - len(active), 0)
     selected: list[TrackerTask] = []
     selected_repositories: set[str] = set()
     for candidate in candidates:
@@ -85,7 +126,10 @@ def build_dry_run_plan(
 
 
 def _validate_candidate(
-    task: TrackerTask, repository: RepositoryConfig
+    task: TrackerTask,
+    repository: RepositoryConfig,
+    *,
+    executor_label: str,
 ) -> tuple[_Candidate | None, str | None]:
     if task.repository != repository.slug:
         return None, "repository_mismatch"
@@ -95,7 +139,7 @@ def _validate_candidate(
     if status_labels != ["agent:ready"]:
         return None, "invalid_status_labels"
     executor_labels = [label for label in task.labels if label.startswith("exec:")]
-    if executor_labels != ["exec:cloud"]:
+    if executor_labels != [executor_label]:
         return None, "invalid_executor_labels"
     if task.ready_approved_by not in repository.maintainers:
         return None, "untrusted_ready_approval"

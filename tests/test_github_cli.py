@@ -25,11 +25,13 @@ def result(payload: object) -> CommandResult:
 
 def issue(*, number: int = 12, labels: object | None = None) -> dict[str, object]:
     return {
+        "id": f"I_kwDOFixture{number}",
         "number": number,
         "title": "Safe task",
         "body": "Task body",
         "labels": labels if labels is not None else [label("agent:ready"), label("exec:cloud")],
         "createdAt": "2026-08-13T00:00:00Z",
+        "updatedAt": "2026-08-13T00:05:00Z",
         "state": "OPEN",
     }
 
@@ -71,6 +73,8 @@ class GitHubCliTrackerTests(unittest.TestCase):
         self.assertEqual(1, len(tasks))
         self.assertEqual(TaskState.READY, tasks[0].state)
         self.assertEqual("bob", tasks[0].ready_approved_by)
+        self.assertEqual("I_kwDOFixture12", tasks[0].issue_node_id)
+        self.assertEqual("2026-08-13T00:05:00Z", tasks[0].updated_at)
         self.assertEqual((GH, "issue", "list"), calls[0][:3])
         self.assertIn("--repo", calls[0])
         self.assertIn(REPOSITORY, calls[0])

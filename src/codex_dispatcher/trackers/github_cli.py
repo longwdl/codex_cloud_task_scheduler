@@ -39,7 +39,7 @@ _RUN_COMMENT_PREFIX = "<!-- codex-dispatcher:"
 
 
 _STATUS_LABELS = {f"agent:{state.value}": state for state in TaskState}
-_ISSUE_FIELDS = "number,title,body,labels,createdAt,state"
+_ISSUE_FIELDS = "id,number,title,body,labels,createdAt,updatedAt,state"
 _REPOSITORY_RE = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,99})"
 )
@@ -100,11 +100,9 @@ class GitHubCliTracker:
             task = _parse_issue(issue, repository, f"issues[{index}]")
             if task.is_open and task.state is TaskState.READY:
                 tasks.append(
-                    TrackerTask(
-                        task.repository, task.task_id, task.issue_number, task.title, task.body,
-                        task.state, task.labels, task.created_at,
-                        self._last_ready_label_actor(repository, task.issue_number), task.is_open,
-                        task.has_unresolved_dependencies, task.branch_name,
+                    _with_ready_approver(
+                        task,
+                        self._last_ready_label_actor(repository, task.issue_number),
                     )
                 )
         return tuple(tasks)
@@ -120,11 +118,9 @@ class GitHubCliTracker:
             )
         )
         task = _parse_issue(issue, repository, "issue")
-        return TrackerTask(
-            task.repository, task.task_id, task.issue_number, task.title, task.body, task.state,
-            task.labels, task.created_at,
-            self._last_ready_label_actor(repository, task.issue_number), task.is_open,
-            task.has_unresolved_dependencies, task.branch_name,
+        return _with_ready_approver(
+            task,
+            self._last_ready_label_actor(repository, task.issue_number),
         )
 
     def find_pr_by_branch(self, repository: str, branch_name: str) -> PullRequest | None:
@@ -389,19 +385,32 @@ def _matching_comment_ids(value: Any, signature: str) -> tuple[int, ...]:
 def _parse_issue(value: Any, repository: str, path: str) -> TrackerTask:
     if not isinstance(value, dict):
         raise GitHubCliTrackerError(f"{path} must be an object")
-    expected = {"number", "title", "body", "labels", "createdAt", "state"}
+    expected = {
+        "id", "number", "title", "body", "labels", "createdAt", "updatedAt", "state"
+    }
     if set(value) != expected:
         raise GitHubCliTrackerError(f"{path} has unexpected JSON fields")
     number = value["number"]
+    issue_node_id = value["id"]
     title = value["title"]
     body = value["body"]
     created_at = value["createdAt"]
+    updated_at = value["updatedAt"]
     state = value["state"]
     if type(number) is not int or number <= 0:
         raise GitHubCliTrackerError(f"{path}.number must be a positive integer")
-    if not all(isinstance(item, str) for item in (title, body, created_at)):
+    if not all(
+        isinstance(item, str)
+        for item in (issue_node_id, title, body, created_at, updated_at)
+    ):
         raise GitHubCliTrackerError(f"{path} has invalid string field")
-    if not title or not created_at or state not in {"OPEN", "CLOSED"}:
+    if (
+        not issue_node_id
+        or not title
+        or not created_at
+        or not updated_at
+        or state not in {"OPEN", "CLOSED"}
+    ):
         raise GitHubCliTrackerError(f"{path} has invalid issue state")
     labels = _parse_labels(value["labels"], f"{path}.labels")
     status_labels = [label for label in labels if label.startswith("agent:")]
@@ -418,6 +427,27 @@ def _parse_issue(value: Any, repository: str, path: str) -> TrackerTask:
         created_at=created_at,
         ready_approved_by=None,
         is_open=state == "OPEN",
+        issue_node_id=issue_node_id,
+        updated_at=updated_at,
+    )
+
+
+def _with_ready_approver(task: TrackerTask, approver: str | None) -> TrackerTask:
+    return TrackerTask(
+        repository=task.repository,
+        task_id=task.task_id,
+        issue_number=task.issue_number,
+        title=task.title,
+        body=task.body,
+        state=task.state,
+        labels=task.labels,
+        created_at=task.created_at,
+        ready_approved_by=approver,
+        is_open=task.is_open,
+        has_unresolved_dependencies=task.has_unresolved_dependencies,
+        branch_name=task.branch_name,
+        issue_node_id=task.issue_node_id,
+        updated_at=task.updated_at,
     )
 
 
