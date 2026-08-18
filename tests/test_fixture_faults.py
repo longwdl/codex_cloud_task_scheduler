@@ -22,6 +22,13 @@ from codex_dispatcher.git_publisher import (
     PublicationReceipt,
 )
 from codex_dispatcher.publisher import PublicationPlan
+from codex_dispatcher.runner_protocol import RunnerOperation, RunnerRequest
+from codex_dispatcher.runner_transport import (
+    RunnerTransportInterrupted,
+    RunnerTurnRemoteState,
+    RunnerTurnReply,
+    RunnerWireOutput,
+)
 from codex_dispatcher.control_sweep import ControlSweepResult, ControlSweepStatus
 from codex_dispatcher.ssh_runtime import SshPreflightInspection
 from codex_dispatcher.ssh_preflight import SshPreflightPlan, SshPreflightStatus
@@ -106,6 +113,25 @@ def _checkpoint_turn(item: WorkItem) -> Turn:
         output_head_sha=HEAD_SHA,
         result_status="completed",
         result_summary="Fixture checkpoint",
+        started_at="2026-08-19T00:00:01Z",
+        updated_at="2026-08-19T00:00:02Z",
+    )
+
+
+def _reconciling_turn(item: WorkItem) -> Turn:
+    turn = Turn.new(
+        work_item_id=item.work_item_id,
+        turn_number=1,
+        issue_revision="revision-1",
+        prompt_sha256="d" * 64,
+        input_head_sha=BASE_SHA,
+        issue_allowed_paths=("README.md",),
+        turn_id="turn_" + "2" * 32,
+        at="2026-08-19T00:00:00Z",
+    )
+    return replace(
+        turn,
+        state=TurnState.RECONCILING,
         started_at="2026-08-19T00:00:01Z",
         updated_at="2026-08-19T00:00:02Z",
     )
@@ -321,6 +347,66 @@ class FixtureFaultTests(unittest.TestCase):
                 ISSUE,
             ).wrap_source(delegate)
 
+    def test_start_receipt_loss_and_status_recovery_never_replay_execution(self) -> None:
+        item = _running_item()
+        turn = _reconciling_turn(item)
+        start = RunnerRequest(
+            RunnerOperation.START,
+            item.work_item_id,
+            turn_id=turn.turn_id,
+            prompt_sha256=turn.prompt_sha256,
+            input_head_sha=turn.input_head_sha,
+        )
+        start_reply = RunnerTurnReply(
+            RunnerOperation.START,
+            item.work_item_id,
+            turn.turn_id,
+            RunnerTurnRemoteState.RUNNING,
+            session_id="123e4567-e89b-12d3-a456-426614174000",
+        )
+        injection = FixtureFaultInjection(FixtureFaultPoint.START_RECEIPT, ISSUE)
+        transport = injection.wrap_transport(
+            SimpleNamespace(
+                invoke=lambda *args, **kwargs: RunnerWireOutput(
+                    start_reply.to_json().encode("utf-8")
+                )
+            )
+        )
+
+        with self.assertRaisesRegex(RunnerTransportInterrupted, "START response"):
+            transport.invoke(start, stdin=b"fixture prompt")
+
+        self.assertTrue(injection.triggered)
+        recovery = FixtureFaultInjection(
+            FixtureFaultPoint.START_STATUS_RECOVERY,
+            ISSUE,
+        )
+        guarded = recovery.wrap_transport(
+            SimpleNamespace(
+                invoke=lambda *args, **kwargs: RunnerWireOutput(b"{}")
+            )
+        )
+        with self.assertRaisesRegex(FixtureFaultRejected, "replay"):
+            guarded.invoke(start, stdin=b"must not replay")
+        guarded.invoke(
+            RunnerRequest(
+                RunnerOperation.STATUS,
+                item.work_item_id,
+                turn_id=turn.turn_id,
+            )
+        )
+        guarded.invoke(
+            RunnerRequest(
+                RunnerOperation.EXPORT,
+                item.work_item_id,
+                expected_head_sha=HEAD_SHA,
+            )
+        )
+        self.assertEqual(
+            [RunnerOperation.STATUS, RunnerOperation.EXPORT],
+            recovery.recovery_operations,
+        )
+
     def test_preflight_requires_the_exact_fault_sequences(self) -> None:
         ready = SshPreflightPlan(
             SshPreflightStatus.READY_CANDIDATE,
@@ -342,6 +428,31 @@ class FixtureFaultTests(unittest.TestCase):
             fault=FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL,
             issue_number=ISSUE,
         )
+        validate_fixture_preflight(
+            ready,
+            fault=FixtureFaultPoint.START_RECEIPT,
+            issue_number=ISSUE,
+        )
+
+        ambiguous_item = _running_item()
+        ambiguous = SshPreflightPlan(
+            SshPreflightStatus.READY_RECOVERY,
+            SshRecoveryAction.RECONCILE_ACTIVE_TURN,
+            task=_task(TaskState.RUNNING),
+            work_item=ambiguous_item,
+            turn=_reconciling_turn(ambiguous_item),
+        )
+        validate_fixture_preflight(
+            ambiguous,
+            fault=FixtureFaultPoint.START_STATUS_RECOVERY,
+            issue_number=ISSUE,
+        )
+        with self.assertRaisesRegex(FixtureFaultRejected, "ambiguous active Turn"):
+            validate_fixture_preflight(
+                replace(ambiguous, turn=None),
+                fault=FixtureFaultPoint.START_STATUS_RECOVERY,
+                issue_number=ISSUE,
+            )
 
         running = _running_item()
         publication = SshPreflightPlan(
@@ -588,6 +699,165 @@ class FixtureFaultTests(unittest.TestCase):
         self.assertTrue(payload["recovery_guarded"])
         self.assertFalse(payload["recovery_required"])
         self.assertEqual("review", payload["status"])
+
+    def test_cli_reports_start_receipt_loss_then_status_only_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            database = Path(root) / "state.db"
+            with StateStore(database) as store:
+                store.migrate()
+            config = make_config(global_max_active=1, repository_max_active=1)
+            config = replace(
+                config,
+                scheduler=replace(config.scheduler, database_path=database),
+                repositories=(
+                    replace(
+                        config.repositories[0],
+                        slug=FIXTURE_REPOSITORY,
+                        allowed_paths=("README.md",),
+                        denied_paths=(),
+                        maintainers=("longwdl",),
+                        required_checks=("fixture",),
+                    ),
+                ),
+            )
+            ready_plan = SshPreflightPlan(
+                SshPreflightStatus.READY_CANDIDATE,
+                SshRecoveryAction.IDLE,
+                task=_task(TaskState.READY),
+            )
+
+            def build_start_sweep(**kwargs):
+                injection = kwargs["injection"]
+                store = kwargs["store"]
+
+                def run_once():
+                    ready = WorkItem.new(
+                        repository=FIXTURE_REPOSITORY,
+                        issue_number=ISSUE,
+                        issue_node_id="I_fixture_fault_7",
+                        base_branch="main",
+                        base_sha=BASE_SHA,
+                        at="2026-08-19T00:00:00Z",
+                    )
+                    ready = ready.transition_to(
+                        WorkItemState.PREPARING,
+                        at="2026-08-19T00:00:00Z",
+                    ).transition_to(
+                        WorkItemState.READY,
+                        at="2026-08-19T00:00:00Z",
+                    )
+                    store.create_work_item(ready)
+                    running, turn = store.begin_turn(
+                        ready.work_item_id,
+                        issue_revision="revision-1",
+                        prompt_sha256="d" * 64,
+                        input_head_sha=BASE_SHA,
+                        issue_allowed_paths=("README.md",),
+                        turn_id="turn_" + "3" * 32,
+                    )
+                    turn = store.update_turn_state(turn.turn_id, TurnState.STARTING)
+                    turn = store.update_turn_state(turn.turn_id, TurnState.RECONCILING)
+                    injection.triggered = True
+                    return ControlSweepResult(
+                        ControlSweepStatus.RUNNER_ACTIVE,
+                        FIXTURE_REPOSITORY,
+                        ISSUE,
+                        running.work_item_id,
+                        turn.turn_id,
+                    )
+
+                return SimpleNamespace(run_once=run_once)
+
+            common_environment = {
+                "CODEX_DISPATCHER_ENABLE_SSH_WRITES": "1",
+                "CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS": FIXTURE_REPOSITORY,
+                "GITHUB_TOKEN": "github_pat_fixture_test",
+            }
+            with (
+                patch.dict("os.environ", common_environment, clear=True),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.load_protected_ssh_config",
+                    return_value=config,
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.validate_runtime_state_path"
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.run_ssh_preflight",
+                    return_value=SshPreflightInspection(ready_plan, (), True),
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.build_ssh_fixture_fault_sweep",
+                    side_effect=build_start_sweep,
+                ),
+            ):
+                code, first = _run(
+                    Path(root) / "config.toml",
+                    issue_number=ISSUE,
+                    fault=FixtureFaultPoint.START_RECEIPT,
+                )
+
+            self.assertEqual(0, code)
+            self.assertTrue(first["fault_triggered"])
+            self.assertEqual("runner_active", first["status"])
+            with StateStore(database, read_only=True) as store:
+                running = store.get_work_item_by_issue(FIXTURE_REPOSITORY, ISSUE)
+                active_turn = store.get_active_turn()
+            assert running is not None and active_turn is not None
+            recovery_plan = SshPreflightPlan(
+                SshPreflightStatus.READY_RECOVERY,
+                SshRecoveryAction.RECONCILE_ACTIVE_TURN,
+                task=_task(TaskState.RUNNING),
+                work_item=running,
+                turn=active_turn,
+            )
+
+            def build_recovery_sweep(**kwargs):
+                injection = kwargs["injection"]
+
+                def run_once():
+                    injection.recovery_operations.extend(
+                        [RunnerOperation.STATUS, RunnerOperation.EXPORT]
+                    )
+                    return ControlSweepResult(
+                        ControlSweepStatus.REVIEW,
+                        FIXTURE_REPOSITORY,
+                        ISSUE,
+                        running.work_item_id,
+                        active_turn.turn_id,
+                    )
+
+                return SimpleNamespace(run_once=run_once)
+
+            with (
+                patch.dict("os.environ", common_environment, clear=True),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.load_protected_ssh_config",
+                    return_value=config,
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.validate_runtime_state_path"
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.run_ssh_preflight",
+                    return_value=SshPreflightInspection(recovery_plan, (), True),
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.build_ssh_fixture_fault_sweep",
+                    side_effect=build_recovery_sweep,
+                ),
+            ):
+                code, recovered = _run(
+                    Path(root) / "config.toml",
+                    issue_number=ISSUE,
+                    fault=FixtureFaultPoint.START_STATUS_RECOVERY,
+                )
+
+        self.assertEqual(0, code)
+        self.assertFalse(recovered["fault_triggered"])
+        self.assertTrue(recovered["recovery_guarded"])
+        self.assertEqual(["status", "export"], recovered["runner_operations"])
+        self.assertEqual("review", recovered["status"])
 
     def test_backup_is_private_complete_and_readable(self) -> None:
         with tempfile.TemporaryDirectory() as root:

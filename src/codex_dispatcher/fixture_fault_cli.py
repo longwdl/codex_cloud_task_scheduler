@@ -160,14 +160,25 @@ def _run(
             )
             observed_turn = store.get_active_turn()
 
-        if fault is FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY:
+        if fault in {
+            FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY,
+            FixtureFaultPoint.START_STATUS_RECOVERY,
+        }:
             if injection.triggered or interruption is not None:
                 raise FixtureFaultRejected(
-                    "recorded publication recovery unexpectedly triggered a fault"
+                    "guarded Fixture recovery unexpectedly triggered a fault"
                 )
             if result is None or result.status.value != "review":
                 raise FixtureFaultRejected(
-                    "recorded publication recovery did not finish in review"
+                    "guarded Fixture recovery did not finish in review"
+                )
+            if (
+                fault is FixtureFaultPoint.START_STATUS_RECOVERY
+                and tuple(operation.value for operation in injection.recovery_operations)
+                != ("status", "export")
+            ):
+                raise FixtureFaultRejected(
+                    "START recovery did not use exact STATUS then EXPORT operations"
                 )
             return 0, {
                 "ok": True,
@@ -181,6 +192,9 @@ def _run(
                 "work_item_id": result.work_item_id,
                 "turn_id": result.turn_id,
                 "status": result.status.value,
+                "runner_operations": [
+                    operation.value for operation in injection.recovery_operations
+                ],
                 "backup_path": str(backup_path),
             }
 
@@ -212,6 +226,24 @@ def _run(
             status = result.status.value
             work_item_id = result.work_item_id
             turn_id = result.turn_id
+        elif fault is FixtureFaultPoint.START_RECEIPT:
+            if (
+                result is None
+                or result.status.value != "runner_active"
+                or observed_work_item is None
+                or observed_work_item.state.value != "running"
+                or observed_work_item.codex_session_id is not None
+                or observed_turn is None
+                or observed_turn.work_item_id != observed_work_item.work_item_id
+                or observed_turn.state.value != "reconciling"
+                or observed_turn.output_head_sha is not None
+            ):
+                raise FixtureFaultRejected(
+                    "START receipt fault did not preserve one ambiguous active Turn"
+                )
+            status = result.status.value
+            work_item_id = observed_work_item.work_item_id
+            turn_id = observed_turn.turn_id
         else:
             if result is not None or interruption != "receipt_lost":
                 raise FixtureFaultRejected("Fixture receipt loss unexpectedly returned a sweep result")

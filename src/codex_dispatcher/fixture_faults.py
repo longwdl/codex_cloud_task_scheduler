@@ -8,7 +8,7 @@ discarded once, allowing the following normal sweep to prove reconciliation.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
@@ -18,7 +18,13 @@ from codex_dispatcher.git_publisher import (
     PublicationReceipt,
 )
 from codex_dispatcher.publisher import PublicationPlan
-from codex_dispatcher.runner_transport import RunnerTransport
+from codex_dispatcher.runner_protocol import RunnerOperation
+from codex_dispatcher.runner_transport import (
+    RunnerTransport,
+    RunnerTransportInterrupted,
+    RunnerTurnRemoteState,
+    parse_runner_turn_reply,
+)
 from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_preflight import SshPreflightPlan, SshPreflightStatus
 from codex_dispatcher.ssh_recovery import SshRecoveryAction
@@ -35,8 +41,13 @@ from codex_dispatcher.turn_orchestration import (
     PublicationRecordedHook,
     TaskBranchPublisher,
 )
-from codex_dispatcher.work_items import Turn, TurnState, WorkItem, WorkItemState
-from codex_dispatcher.work_items import validate_git_sha
+from codex_dispatcher.work_items import (
+    Turn,
+    TurnState,
+    WorkItem,
+    WorkItemState,
+    validate_git_sha,
+)
 
 
 FIXTURE_REPOSITORY = "longwdl/codex-dispatcher-fixture"
@@ -55,6 +66,8 @@ class FixtureFaultPoint(StrEnum):
     PUBLICATION_RECORDED = "publication-recorded"
     RECORDED_PUBLICATION_RECOVERY = "recorded-publication-recovery"
     CLAIM_ACQUIRED_PROCESS_KILL = "claim-acquired-process-kill"
+    START_RECEIPT = "start-receipt"
+    START_STATUS_RECOVERY = "start-status-recovery"
 
 
 class FixtureFaultRejected(RuntimeError):
@@ -101,6 +114,7 @@ class FixtureFaultInjection:
     triggered: bool = False
     claim_acquired_callback: Callable[[TrackerTask], None] | None = None
     pinned_base_sha: str | None = None
+    recovery_operations: list[RunnerOperation] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not isinstance(self.fault, FixtureFaultPoint):
@@ -233,7 +247,51 @@ class _FixtureFaultTransport:
             raise FixtureFaultRejected(
                 "recorded publication recovery attempted to invoke the Runner"
             )
-        return self._delegate.invoke(request, **kwargs)
+        if self._injection.fault is FixtureFaultPoint.START_STATUS_RECOVERY:
+            if request.operation in {
+                RunnerOperation.PREPARE,
+                RunnerOperation.START,
+                RunnerOperation.RESUME,
+            }:
+                raise FixtureFaultRejected(
+                    "START recovery attempted to replay Runner execution"
+                )
+            expected = (
+                RunnerOperation.STATUS
+                if not self._injection.recovery_operations
+                else RunnerOperation.EXPORT
+            )
+            if request.operation is not expected:
+                raise FixtureFaultRejected(
+                    "START recovery Runner operation order is invalid"
+                )
+            output = self._delegate.invoke(request, **kwargs)
+            self._injection.recovery_operations.append(request.operation)
+            return output
+        output = self._delegate.invoke(request, **kwargs)
+        if (
+            self._injection.fault is FixtureFaultPoint.START_RECEIPT
+            and request.operation is RunnerOperation.START
+        ):
+            reply = parse_runner_turn_reply(output.payload)
+            if (
+                output.artifact is not None
+                or reply.operation is not RunnerOperation.START
+                or reply.work_item_id != request.work_item_id
+                or reply.turn_id != request.turn_id
+                or reply.state
+                not in {RunnerTurnRemoteState.RUNNING, RunnerTurnRemoteState.FINISHED}
+            ):
+                raise FixtureFaultRejected(
+                    "START receipt fault did not receive one exact Runner reply"
+                )
+            if self._injection.triggered:
+                raise FixtureFaultRejected("live Fixture fault was triggered more than once")
+            self._injection.triggered = True
+            raise RunnerTransportInterrupted(
+                "Fixture intentionally discarded the successful START response"
+            )
+        return output
 
 
 class _FixturePinnedSource:
@@ -297,6 +355,17 @@ class _FixtureFaultPublisher:
             raise FixtureFaultRejected(
                 "claim-acquired process kill unexpectedly invoked the Publisher"
             )
+        if self._injection.fault is FixtureFaultPoint.START_RECEIPT:
+            raise FixtureFaultRejected(
+                "START receipt fault unexpectedly invoked the Publisher"
+            )
+        if self._injection.fault is FixtureFaultPoint.START_STATUS_RECOVERY and (
+            self._injection.recovery_operations
+            != [RunnerOperation.STATUS, RunnerOperation.EXPORT]
+        ):
+            raise FixtureFaultRejected(
+                "START recovery attempted publication before STATUS and EXPORT"
+            )
         receipt = self._delegate.publish(
             artifact,
             plan=plan,
@@ -354,6 +423,7 @@ class _FixtureFaultTracker:
             FixtureFaultPoint.PUBLISHER_RECEIPT,
             FixtureFaultPoint.PUBLICATION_RECORDED,
             FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL,
+            FixtureFaultPoint.START_RECEIPT,
         }:
             raise FixtureFaultRejected("this Fixture fault stage cannot claim an Issue")
         return self._delegate.claim(
@@ -377,6 +447,11 @@ class _FixtureFaultTracker:
                 TaskState.REVIEW,
             },
             FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL: set(),
+            FixtureFaultPoint.START_RECEIPT: {TaskState.RUNNING},
+            FixtureFaultPoint.START_STATUS_RECOVERY: {
+                TaskState.RUNNING,
+                TaskState.REVIEW,
+            },
         }[self._injection.fault]
         if state not in allowed:
             raise FixtureFaultRejected("Fixture fault stage attempted an unexpected state write")
@@ -396,6 +471,9 @@ class _FixtureFaultTracker:
             self._injection.fault
             is FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY
         ):
+            self._delegate.upsert_run_comment(repository, task_id, marker, body)
+            return
+        if self._injection.fault is FixtureFaultPoint.START_STATUS_RECOVERY:
             self._delegate.upsert_run_comment(repository, task_id, marker, body)
             return
         if self._injection.fault is not FixtureFaultPoint.ISSUE_COMMENT_RECEIPT:
@@ -424,6 +502,8 @@ class _FixtureFaultTracker:
             self._injection.fault
             is FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY
         ):
+            return self._delegate.create_draft_pr(request)
+        if self._injection.fault is FixtureFaultPoint.START_STATUS_RECOVERY:
             return self._delegate.create_draft_pr(request)
         if self._injection.fault is not FixtureFaultPoint.DRAFT_PR_RECEIPT:
             raise FixtureFaultRejected("Fixture reached an unexpected Draft PR write")
@@ -459,6 +539,7 @@ def validate_fixture_preflight(
         FixtureFaultPoint.PUBLISHER_RECEIPT,
         FixtureFaultPoint.PUBLICATION_RECORDED,
         FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL,
+        FixtureFaultPoint.START_RECEIPT,
     }:
         if (
             plan.status is not SshPreflightStatus.READY_CANDIDATE
@@ -467,6 +548,31 @@ def validate_fixture_preflight(
             or task.state is not TaskState.READY
         ):
             raise FixtureFaultRejected("initial fault requires one new ready Fixture candidate")
+        return
+
+    if fault is FixtureFaultPoint.START_STATUS_RECOVERY:
+        turn = plan.turn
+        if (
+            plan.status is not SshPreflightStatus.READY_RECOVERY
+            or plan.recovery_action is not SshRecoveryAction.RECONCILE_ACTIVE_TURN
+            or work_item is None
+            or work_item.repository != FIXTURE_REPOSITORY
+            or work_item.issue_number != issue_number
+            or task.issue_node_id != work_item.issue_node_id
+            or task.state is not TaskState.RUNNING
+            or work_item.state is not WorkItemState.RUNNING
+            or work_item.codex_session_id is not None
+            or work_item.last_published_sha is not None
+            or work_item.pr_number is not None
+            or turn is None
+            or turn.work_item_id != work_item.work_item_id
+            or turn.state is not TurnState.RECONCILING
+            or turn.output_head_sha is not None
+            or turn.result_status is not None
+        ):
+            raise FixtureFaultRejected(
+                "START STATUS recovery requires one exact ambiguous active Turn"
+            )
         return
 
     if fault is FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY:
