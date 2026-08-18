@@ -27,7 +27,7 @@ _USER_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 _HOST_RE = re.compile(
     r"(?=.{1,253}\Z)[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?"
 )
-_REMOTE_COMMAND = "codex-runner-v1"
+_REMOTE_COMMAND = "/srv/codex-runner/bin/codex-runner-v1"
 _MAX_FRAMED_OUTPUT_BYTES = MAX_RESPONSE_BYTES + MAX_ARTIFACT_BYTES + 128
 
 

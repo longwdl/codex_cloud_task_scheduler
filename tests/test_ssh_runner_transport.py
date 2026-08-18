@@ -64,7 +64,13 @@ class SshRunnerTransportTests(unittest.TestCase):
             "IdentityAgent=none",
         ):
             self.assertIn(option, plan.argv)
-        self.assertEqual(("codex_runner@runner.invalid", "codex-runner-v1"), plan.argv[-2:])
+        self.assertEqual(
+            (
+                "codex_runner@runner.invalid",
+                "/srv/codex-runner/bin/codex-runner-v1",
+            ),
+            plan.argv[-2:],
+        )
         self.assertNotIn("SSH_AUTH_SOCK", plan.environment)
         self.assertNotIn("GITHUB_TOKEN", plan.environment)
 

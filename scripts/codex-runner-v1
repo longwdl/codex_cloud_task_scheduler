@@ -1,0 +1,18 @@
+#!/bin/sh
+
+set -eu
+umask 077
+
+if [ "$#" -ne 0 ]; then
+    printf '%s\n' 'codex-runner-v1: arguments are not accepted' >&2
+    exit 2
+fi
+
+exec /usr/bin/env -i \
+    HOME=/srv/codex-runner \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PATH=/usr/bin:/bin \
+    PYTHONNOUSERSITE=1 \
+    PYTHONPATH=/srv/codex-runner/current/src \
+    /usr/bin/python3 -P -s -m codex_dispatcher.runner_main

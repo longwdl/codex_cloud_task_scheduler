@@ -60,7 +60,8 @@ recommendation but sufficient for the bounded fixture. The implementation fixes 
 - `/srv/codex-runner/work-items` for per-Issue repositories and Runner state;
 - absolute resolved Git and Codex executable paths;
 - Codex Turn timeout; the Control Host SSH operation timeout must be longer than it;
-- an SSH `authorized_keys` forced command that invokes only `codex-runner-v1`, with forwarding and
+- an SSH `authorized_keys` forced command that invokes only
+  `/srv/codex-runner/bin/codex-runner-v1`, with forwarding and
   PTY disabled.
 
 ### 3. Codex authentication on Runner

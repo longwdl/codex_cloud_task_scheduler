@@ -25,7 +25,7 @@ executor. The environment-independent implementation now includes:
 - deterministic task-directory and branch identity;
 - bounded source/result Git bundle transfer and quarantine verification;
 - fixed-lease task-branch publication with exact-SHA read-back recovery;
-- fixed OpenSSH framing and a `codex-runner-v1` forced-command service;
+- fixed OpenSSH framing and an absolute-path `codex-runner-v1` forced-command service;
 - persistent Runner workspaces and idempotent first/resume Turn execution;
 - outbound-only Slack projection models and offline integration tests.
 

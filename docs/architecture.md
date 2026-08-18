@@ -121,7 +121,8 @@ Slack or GitHub.
 
 The SSH adapter ignores user SSH configuration, pins a protected `known_hosts` file and identity,
 uses public-key batch authentication, disables agent/X11/all forwarding, proxy jumps, local
-commands, and TTY allocation, and sends only the fixed `codex-runner-v1` command. Production uses
+commands, and TTY allocation, and sends only the fixed
+`/srv/codex-runner/bin/codex-runner-v1` command. Production uses
 `ProxyCommand=none`. The current Mac-to-`s3` fixture may explicitly select one protected `assh`
 executable and its owned home directory; the adapter then constructs only
 `assh connect --port=%p %h` and supplies only that explicit `HOME` to let `assh` find its config.
@@ -132,7 +133,8 @@ enter SSH argv. `prepare` is the only operation allowed to carry a source bundle
 the only operations allowed to carry a Prompt; `export` is the only response allowed to carry a
 result bundle. Every artifact is bound to its request or manifest by exact size and SHA-256.
 
-`codex-runner-v1` accepts no arguments. It loads only a protected, exact-field JSON configuration,
+`codex-runner-v1` accepts no arguments. Its wrapper clears the inherited environment, disables the
+Python user site and unsafe current-directory import path, and loads only a protected, exact-field JSON configuration,
 derives the task directory from validated repository and Issue identities, and holds a global
 non-blocking `flock` for the whole Codex invocation. A Turn request is persisted before Codex starts;
 the canonical final reply is atomically persisted before the SSH response is written. Repeating the

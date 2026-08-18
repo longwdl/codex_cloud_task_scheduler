@@ -326,7 +326,8 @@ archive     仅完成后的显式清理入口，第一阶段默认禁用
 - Runner 主动连接 Control Host。
 
 Control Host 的 OpenSSH 调用固定忽略用户配置，启用 batch/public-key 和严格 host-key 校验，
-固定 `known_hosts`、identity、用户、主机、端口与 `codex-runner-v1`，并关闭 agent/X11/全部
+固定 `known_hosts`、identity、用户、主机、端口与
+`/srv/codex-runner/bin/codex-runner-v1`，并关闭 agent/X11/全部
 forward、ProxyJump、local command 和 TTY。生产默认固定 `ProxyCommand=none`。当前 Mac
 Fixture 因多级跳板加速可显式配置受保护的 `/opt/homebrew/bin/assh`，此时适配器只生成固定
 形状 `assh connect --port=%p %h`，并要求显式、受保护的 `assh_home`，只将该目录作为 `HOME`
@@ -344,7 +345,8 @@ base ref 的 self-contained bundle；不在 mirror 中创建临时 ref。Runner 
 拒绝 submodule 和声明 filter/diff/working-tree-encoding driver 的 `.gitattributes`，创建固定任务
 分支且不配置 remote。因此 Runner 无需任何 GitHub 凭据。
 
-远端 forced command `codex-runner-v1` 不接受参数，只读取权限受保护、字段严格的
+远端 forced command `/srv/codex-runner/bin/codex-runner-v1` 不接受参数；wrapper 清空继承环境、
+禁用 Python user site 和不安全的当前目录导入，只读取权限受保护、字段严格的
 `/srv/codex-runner/etc/config.json`。可执行文件和 output schema 必须解析到不可被 group/world
 写入的普通文件；配置的 runner-wide `CODEX_HOME` 必须是当前用户拥有且权限不超过 `0700`
 的目录。每次 START/RESUME 在运行 Codex 前原子持久化请求，运行期间持有全局非阻塞
@@ -573,7 +575,9 @@ SQLite 使用 Online Backup API；WAL 模式下禁止仅复制主 DB 文件。Gi
 ### 11.3 Runner 目录
 
 ```text
-/opt/codex-runner/runnerctl
+/srv/codex-runner/releases/<commit>/src/
+/srv/codex-runner/current -> releases/<commit>
+/srv/codex-runner/bin/codex-runner-v1
 /srv/codex-runner/etc/config.json
 /srv/codex-runner/etc/agent-result.schema.json
 /srv/codex-runner/work-items/
@@ -582,6 +586,10 @@ SQLite 使用 Online Backup API；WAL 模式下禁止仅复制主 DB 文件。Gi
 
 Runner 的 SSH host key 固定在 Control Host。禁止 `StrictHostKeyChecking=no`、agent forwarding、
 port forwarding 和 X11 forwarding。
+
+当前 `s3` Fixture 因 `ecs-user` 无免密 sudo，上述 release、wrapper 和配置暂由同一用户管理；
+这不是进程隔离，也不能阻止不受限 Codex 进程破坏 Runner 本身。正式部署必须将 release、
+wrapper 和 `etc` 改为 root-owned，Runner 用户只保留 `run`、`work-items` 与必要认证状态的写权限。
 
 ### 11.4 资源和保留
 
