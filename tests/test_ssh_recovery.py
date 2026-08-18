@@ -166,16 +166,22 @@ class SshRecoveryTests(unittest.TestCase):
         self.assertEqual("multiple_remote_claims", plan.reason)
 
     def test_lost_terminal_tracker_write_is_planned_for_idempotent_sync(self) -> None:
-        work_item = item()
-        work_item = work_item.transition_to(WorkItemState.BLOCKED)
-        self.store.create_work_item(work_item)
-        self.tracker.tasks["42"] = task_in(TaskState.DISPATCHING)
+        for remote_state in (TaskState.DISPATCHING, TaskState.RUNNING):
+            with self.subTest(remote_state=remote_state):
+                work_item = item()
+                work_item = work_item.transition_to(WorkItemState.BLOCKED)
+                self.store.create_work_item(work_item)
+                self.tracker.tasks["42"] = task_in(remote_state)
 
-        plan = plan_ssh_recovery(self.config, self.store, self.tracker)
+                plan = plan_ssh_recovery(self.config, self.store, self.tracker)
 
-        self.assertEqual(SshRecoveryAction.SYNC_TRACKER_STATE, plan.action)
-        self.assertEqual(TaskState.BLOCKED, plan.desired_task_state)
-        self.assertEqual(work_item.work_item_id, plan.work_item.work_item_id)
+                self.assertEqual(SshRecoveryAction.SYNC_TRACKER_STATE, plan.action)
+                self.assertEqual(TaskState.BLOCKED, plan.desired_task_state)
+                self.assertEqual(work_item.work_item_id, plan.work_item.work_item_id)
+
+                self.store.close()
+                self.temp_dir.cleanup()
+                self.setUp()
 
 
 if __name__ == "__main__":

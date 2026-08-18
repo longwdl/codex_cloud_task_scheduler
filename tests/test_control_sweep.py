@@ -735,6 +735,68 @@ class SshControlSweepTests(unittest.TestCase):
         assert persisted is not None
         self.assertEqual(1, persisted.pr_number)
 
+    def test_lost_publisher_then_pr_receipts_recover_a_running_issue(self) -> None:
+        tracker = _InterruptingDeliveryTracker(interrupt_create_once=True)
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        artifact = b"fixture-lost-publisher-then-pr"
+        head_sha = "b" * 40
+        self._register_checkpoint(artifact, head_sha)
+        work_item_id = self._expected_work_item_id(task)
+        self.transport.queue_turn(
+            work_item_id,
+            FakeTurnFixture(SESSION, head_sha, _completed_result(), artifact),
+        )
+        publisher = _RecordingPublisher(interrupt_once=True)
+        delivery = GitHubDeliveryCoordinator(store=self.store, tracker=tracker)
+        sweep = self._sweep(
+            tracker,
+            _RecordingSource(),
+            publisher=publisher,
+            delivery=delivery,
+        )
+
+        interrupted_publish = sweep.run_once(turn_id=TURN_ID)
+
+        self.assertEqual(
+            ControlSweepStatus.AWAITING_PUBLICATION,
+            interrupted_publish.status,
+        )
+        self.assertEqual(TaskState.RUNNING, tracker.tasks[task.task_id].state)
+
+        with self.assertRaisesRegex(RuntimeError, "lost Draft PR receipt"):
+            sweep.run_once()
+
+        interrupted_pr = self.store.get_work_item(work_item_id)
+        assert interrupted_pr is not None
+        self.assertEqual(WorkItemState.REVIEW, interrupted_pr.state)
+        self.assertEqual(head_sha, interrupted_pr.last_published_sha)
+        self.assertIsNone(interrupted_pr.pr_number)
+        self.assertEqual(TaskState.RUNNING, tracker.tasks[task.task_id].state)
+
+        recovered = sweep.run_once()
+
+        self.assertEqual(ControlSweepStatus.STATE_SYNCHRONIZED, recovered.status)
+        self.assertEqual(TaskState.REVIEW, tracker.tasks[task.task_id].state)
+        self.assertEqual(
+            [
+                RunnerOperation.PREPARE,
+                RunnerOperation.START,
+                RunnerOperation.EXPORT,
+                RunnerOperation.EXPORT,
+            ],
+            [call.operation for call in self.transport.calls],
+        )
+        self.assertEqual(2, len(publisher.calls))
+        self.assertEqual(
+            1,
+            sum(call.method == "create_draft_pr" for call in tracker.calls),
+        )
+        persisted = self.store.get_work_item(work_item_id)
+        assert persisted is not None
+        self.assertEqual(1, persisted.pr_number)
+
     def test_issue_state_waits_for_recoverable_comment_delivery(self) -> None:
         tracker = _InterruptingDeliveryTracker(interrupt_comment_once=True)
         task = _ready_task()

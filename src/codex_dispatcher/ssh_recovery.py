@@ -117,8 +117,6 @@ def plan_ssh_recovery(
         return _blocked("multiple_remote_claims")
     task = remote_claims[0]
     repository = configured[task.repository]
-    if task.state is TaskState.RUNNING:
-        return _blocked("orphan_running_issue")
     if task.ready_approved_by not in repository.maintainers:
         return _blocked("orphan_claim_approval_untrusted", task=task)
     if _task_identity_error(task) is not None:
@@ -150,6 +148,8 @@ def plan_ssh_recovery(
             work_item=existing,
             desired_task_state=desired,
         )
+    if task.state is TaskState.RUNNING:
+        return _blocked("orphan_running_issue")
     return SshRecoveryPlan(SshRecoveryAction.RECOVER_ORPHAN_CLAIM, task=task)
 
 
