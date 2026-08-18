@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Protocol
 
 from codex_dispatcher.config import Config
 from codex_dispatcher.git_publisher import (
@@ -18,6 +19,7 @@ from codex_dispatcher.git_publisher import (
 )
 from codex_dispatcher.publisher import PublicationPlan
 from codex_dispatcher.runner_transport import RunnerTransport
+from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_preflight import SshPreflightPlan, SshPreflightStatus
 from codex_dispatcher.ssh_recovery import SshRecoveryAction
 from codex_dispatcher.trackers.base import (
@@ -34,9 +36,16 @@ from codex_dispatcher.turn_orchestration import (
     TaskBranchPublisher,
 )
 from codex_dispatcher.work_items import Turn, TurnState, WorkItem, WorkItemState
+from codex_dispatcher.work_items import validate_git_sha
 
 
 FIXTURE_REPOSITORY = "longwdl/codex-dispatcher-fixture"
+
+
+class _FixtureSource(Protocol):
+    def current(self, repository: str, base_branch: str) -> SourceBundle: ...
+
+    def exact(self, repository: str, base_sha: str) -> SourceBundle: ...
 
 
 class FixtureFaultPoint(StrEnum):
@@ -91,6 +100,7 @@ class FixtureFaultInjection:
     repository: str = FIXTURE_REPOSITORY
     triggered: bool = False
     claim_acquired_callback: Callable[[TrackerTask], None] | None = None
+    pinned_base_sha: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.fault, FixtureFaultPoint):
@@ -106,6 +116,15 @@ class FixtureFaultInjection:
             raise FixtureFaultRejected(
                 "claim callback is allowed only for the process-kill Fixture"
             )
+        if self.pinned_base_sha is not None:
+            self.pinned_base_sha = validate_git_sha(
+                self.pinned_base_sha,
+                "pinned_base_sha",
+            )
+            if self.fault is not FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL:
+                raise FixtureFaultRejected(
+                    "pinned base is allowed only for the process-kill Fixture"
+                )
 
     def wrap_tracker(self, tracker: Tracker) -> Tracker:
         return _FixtureFaultTracker(self, tracker)
@@ -115,6 +134,15 @@ class FixtureFaultInjection:
 
     def wrap_transport(self, transport: RunnerTransport) -> RunnerTransport:
         return _FixtureFaultTransport(self, transport)
+
+    def wrap_source(self, source: _FixtureSource) -> _FixtureSource:
+        if self.fault is not FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL:
+            return source
+        if self.pinned_base_sha is None:
+            raise FixtureFaultRejected(
+                "process-kill Fixture requires one independently verified base SHA"
+            )
+        return _FixturePinnedSource(self, source)
 
     @property
     def publication_recorded_hook(self) -> PublicationRecordedHook | None:
@@ -206,6 +234,32 @@ class _FixtureFaultTransport:
                 "recorded publication recovery attempted to invoke the Runner"
             )
         return self._delegate.invoke(request, **kwargs)
+
+
+class _FixturePinnedSource:
+    def __init__(
+        self,
+        injection: FixtureFaultInjection,
+        delegate: _FixtureSource,
+    ) -> None:
+        self._injection = injection
+        self._delegate = delegate
+
+    def current(self, repository: str, base_branch: str) -> SourceBundle:
+        self._injection.require_target(repository)
+        if base_branch != "main" or self._injection.pinned_base_sha is None:
+            raise FixtureFaultRejected(
+                "process-kill source escaped its verified Fixture base"
+            )
+        return self._delegate.exact(repository, self._injection.pinned_base_sha)
+
+    def exact(self, repository: str, base_sha: str) -> SourceBundle:
+        self._injection.require_target(repository)
+        if base_sha != self._injection.pinned_base_sha:
+            raise FixtureFaultRejected(
+                "process-kill source requested a different base SHA"
+            )
+        return self._delegate.exact(repository, base_sha)
 
 
 class _FixtureFaultPublisher:

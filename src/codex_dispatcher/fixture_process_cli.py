@@ -15,6 +15,8 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
+from codex_dispatcher.command_runner import run_command
+from codex_dispatcher.config import Config
 from codex_dispatcher.fixture_fault_cli import _create_backup, _github_token
 from codex_dispatcher.fixture_faults import (
     FIXTURE_REPOSITORY,
@@ -37,6 +39,8 @@ from codex_dispatcher.ssh_runtime import (
 )
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.trackers.base import TrackerTask
+from codex_dispatcher.trusted_mirror import MIRROR_BASE_REF
+from codex_dispatcher.work_items import validate_git_sha
 
 
 _FAULT_ENV = "CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS"
@@ -68,6 +72,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--internal-child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--signal-fd", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--base-sha", help=argparse.SUPPRESS)
     return parser
 
 
@@ -155,7 +160,12 @@ def _child_environment(token: str) -> dict[str, str]:
     }
 
 
-def _child_argv(config_path: Path, issue_number: int, descriptor: int) -> tuple[str, ...]:
+def _child_argv(
+    config_path: Path,
+    issue_number: int,
+    descriptor: int,
+    base_sha: str,
+) -> tuple[str, ...]:
     return (
         sys.executable,
         "-m",
@@ -168,7 +178,67 @@ def _child_argv(config_path: Path, issue_number: int, descriptor: int) -> tuple[
         "--internal-child",
         "--signal-fd",
         str(descriptor),
+        "--base-sha",
+        base_sha,
     )
+
+
+def _verified_cached_fixture_base(config: Config, token: str) -> str:
+    """Bind the protected cached mirror to the current GitHub REST ref."""
+    runtime = config.ssh_runtime
+    if runtime is None:
+        raise SshRuntimeError("ssh_runtime configuration is required")
+    remote = run_command(
+        (
+            str(runtime.gh_path),
+            "api",
+            "--method",
+            "GET",
+            f"repos/{FIXTURE_REPOSITORY}/git/ref/heads/main",
+            "--jq",
+            ".object.sha",
+        ),
+        timeout_seconds=30,
+        max_output_bytes=128,
+        env={"GH_TOKEN": token},
+        secrets=(token,),
+    )
+    if remote.returncode != 0 or remote.timed_out or remote.stdout_truncated:
+        raise FixtureFaultRejected("could not read the exact Fixture main SHA")
+    try:
+        remote_sha = validate_git_sha(remote.stdout.strip(), "remote_base_sha")
+    except ValueError as exc:
+        raise FixtureFaultRejected("GitHub returned an invalid Fixture main SHA") from exc
+
+    owner, name = FIXTURE_REPOSITORY.split("/", 1)
+    mirror = runtime.mirror_root / owner / f"{name}.git"
+    local = run_command(
+        (
+            str(runtime.git_path),
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "credential.helper=",
+            "-C",
+            str(mirror),
+            "rev-parse",
+            "--verify",
+            f"{MIRROR_BASE_REF}^{{commit}}",
+        ),
+        timeout_seconds=10,
+        max_output_bytes=128,
+    )
+    if local.returncode != 0 or local.timed_out or local.stdout_truncated:
+        raise FixtureFaultRejected("protected Fixture mirror base is unavailable")
+    try:
+        local_sha = validate_git_sha(local.stdout.strip(), "cached_base_sha")
+    except ValueError as exc:
+        raise FixtureFaultRejected("protected Fixture mirror returned an invalid SHA") from exc
+    if local_sha != remote_sha:
+        raise FixtureFaultRejected(
+            "protected Fixture mirror is stale; a successful base fetch is required"
+        )
+    return remote_sha
 
 
 def _await_orphan_recovery(
@@ -202,11 +272,17 @@ def _await_orphan_recovery(
     raise AssertionError("post-kill preflight loop exhausted without a result")
 
 
-def _run_child(config_path: Path, *, issue_number: int, signal_fd: int | None) -> int:
+def _run_child(
+    config_path: Path,
+    *,
+    issue_number: int,
+    signal_fd: int | None,
+    base_sha: str | None,
+) -> int:
     token, error = _guard_environment(issue_number)
     if error is not None or token is None:
         return 1
-    if signal_fd is None or signal_fd < 3:
+    if signal_fd is None or signal_fd < 3 or base_sha is None:
         return 1
     try:
         if not stat.S_ISFIFO(os.fstat(signal_fd).st_mode):
@@ -222,6 +298,9 @@ def _run_child(config_path: Path, *, issue_number: int, signal_fd: int | None) -
         )
         expected_task = inspection.plan.task
         assert expected_task is not None
+        verified_base_sha = _verified_cached_fixture_base(config, token)
+        if validate_git_sha(base_sha, "base_sha") != verified_base_sha:
+            raise FixtureFaultRejected("parent and child Fixture base SHA differ")
 
         def signal_and_wait(task: TrackerTask) -> None:
             if task.issue_node_id != expected_task.issue_node_id:
@@ -236,6 +315,7 @@ def _run_child(config_path: Path, *, issue_number: int, signal_fd: int | None) -
             FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL,
             issue_number,
             claim_acquired_callback=signal_and_wait,
+            pinned_base_sha=verified_base_sha,
         )
         with StateStore(config.scheduler.database_path) as store:
             store.migrate()
@@ -281,13 +361,14 @@ def _run_parent(
         )
         task = inspection.plan.task
         assert task is not None
+        base_sha = _verified_cached_fixture_base(config, token)
         backup_path = _create_backup(
             config.scheduler.database_path,
             FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL,
         )
 
         read_fd, write_fd = os.pipe()
-        argv = _child_argv(config_path, issue_number, write_fd)
+        argv = _child_argv(config_path, issue_number, write_fd, base_sha)
         process = subprocess.Popen(
             argv,
             cwd=Path(__file__).resolve().parents[2],
@@ -380,10 +461,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.config,
             issue_number=args.issue,
             signal_fd=args.signal_fd,
+            base_sha=args.base_sha,
         )
-    if args.signal_fd is not None:
+    if args.signal_fd is not None or args.base_sha is not None:
         _emit(
-            {"ok": False, "error": "--signal-fd is internal-only"},
+            {"ok": False, "error": "--signal-fd and --base-sha are internal-only"},
             as_json=args.json,
         )
         return 1

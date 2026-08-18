@@ -7,8 +7,10 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from codex_dispatcher.command_runner import CommandResult
 from codex_dispatcher.fixture_faults import (
     FIXTURE_REPOSITORY,
     FixtureFaultRejected,
@@ -19,6 +21,7 @@ from codex_dispatcher.fixture_process_cli import (
     _child_environment,
     _handshake,
     _run_parent,
+    _verified_cached_fixture_base,
     _wait_for_exact_handshake,
 )
 from codex_dispatcher.ssh_preflight import SshPreflightPlan, SshPreflightStatus
@@ -121,6 +124,41 @@ class FixtureProcessCliTests(unittest.TestCase):
         self.assertNotIn("HOME", environment)
         self.assertEqual(FIXTURE_REPOSITORY, environment["CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS"])
 
+    def test_cached_base_must_match_current_github_rest_ref(self) -> None:
+        base_sha = "a" * 40
+        config = replace(
+            make_config(global_max_active=1, repository_max_active=1),
+            ssh_runtime=SimpleNamespace(
+                gh_path=Path("/protected/gh"),
+                git_path=Path("/protected/git"),
+                mirror_root=Path("/protected/mirrors"),
+            ),
+        )
+        with patch(
+            "codex_dispatcher.fixture_process_cli.run_command",
+            side_effect=(
+                CommandResult(0, base_sha + "\n", ""),
+                CommandResult(0, base_sha + "\n", ""),
+            ),
+        ) as run:
+            observed = _verified_cached_fixture_base(config, TOKEN)
+
+        self.assertEqual(base_sha, observed)
+        self.assertEqual(2, run.call_count)
+        self.assertNotIn(TOKEN, run.call_args_list[0].args[0])
+
+        with (
+            patch(
+                "codex_dispatcher.fixture_process_cli.run_command",
+                side_effect=(
+                    CommandResult(0, base_sha + "\n", ""),
+                    CommandResult(0, "b" * 40 + "\n", ""),
+                ),
+            ),
+            self.assertRaisesRegex(FixtureFaultRejected, "stale"),
+        ):
+            _verified_cached_fixture_base(config, TOKEN)
+
     def test_parent_kills_only_verified_child_and_requires_orphan_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             database = Path(root) / "state.db"
@@ -194,6 +232,10 @@ class FixtureProcessCliTests(unittest.TestCase):
                 patch(
                     "codex_dispatcher.fixture_process_cli._create_backup",
                     return_value=Path(root) / "state.pre-kill.db",
+                ),
+                patch(
+                    "codex_dispatcher.fixture_process_cli._verified_cached_fixture_base",
+                    return_value="a" * 40,
                 ),
                 patch(
                     "codex_dispatcher.fixture_process_cli._wait_for_exact_handshake"

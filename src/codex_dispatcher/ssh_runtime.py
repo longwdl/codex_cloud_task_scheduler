@@ -185,6 +185,8 @@ def _assemble_ssh_control_sweep(
             temporary_root=runtime.source_temporary_root,
         ),
     )
+    if fixture_fault_injection is not None:
+        source = fixture_fault_injection.wrap_source(source)
     transport = SshRunnerTransport(
         ssh_path=ssh_path,
         host=runtime.host,

@@ -293,6 +293,34 @@ class FixtureFaultTests(unittest.TestCase):
                 claim_acquired_callback=lambda task: None,
             )
 
+    def test_process_kill_source_uses_only_independently_pinned_cached_base(self) -> None:
+        observed: list[tuple[str, str]] = []
+        marker = object()
+        delegate = SimpleNamespace(
+            current=lambda *args: self.fail("network refresh must not run"),
+            exact=lambda repository, base_sha: (
+                observed.append((repository, base_sha)),
+                marker,
+            )[1],
+        )
+        injection = FixtureFaultInjection(
+            FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL,
+            ISSUE,
+            pinned_base_sha=BASE_SHA,
+        )
+
+        source = injection.wrap_source(delegate)
+
+        self.assertIs(marker, source.current(FIXTURE_REPOSITORY, "main"))
+        self.assertEqual([(FIXTURE_REPOSITORY, BASE_SHA)], observed)
+        with self.assertRaisesRegex(FixtureFaultRejected, "different base"):
+            source.exact(FIXTURE_REPOSITORY, HEAD_SHA)
+        with self.assertRaisesRegex(FixtureFaultRejected, "requires one"):
+            FixtureFaultInjection(
+                FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL,
+                ISSUE,
+            ).wrap_source(delegate)
+
     def test_preflight_requires_the_exact_fault_sequences(self) -> None:
         ready = SshPreflightPlan(
             SshPreflightStatus.READY_CANDIDATE,
