@@ -601,8 +601,11 @@ checkpoint SHA 上成功。
 Draft PR 回执阶段还暴露了 recovery planner 的顺序缺陷：本地 WorkItem 已为终态而远端 Issue
 仍为 running 时，旧逻辑会先误判 orphan。测试在第三次写入前停止；修复和 255 项回归测试通过
 后，live preflight 才继续并得到 `sync_tracker_state`。因此 AC-019、AC-048、AC-049 已有受控 live
-证据；AC-047 所描述的“本地已记账但 Turn 尚未终态化”窄窗口仍只有离线故障测试证据。真实 SSH
-断连、Dispatcher 进程终止和 Slack provider 回执丢失也尚未 live 注入。
+证据。AC-047 也已由 Fixture Issue `#8` 覆盖：`publication-recorded` 在 exact SHA 落库后、Turn
+仍为 `checkpointing` 时中断；后续 `recorded-publication-recovery` 使用 fail-before-delegate 的
+Runner/Publisher guard，成功完成原 Turn、创建唯一 Draft PR `#9`，Actions run `32163520437`
+成功且 `main` 未移动。这是确定性进程内异常注入，不等同于操作系统 kill。真实 SSH 断连、
+Dispatcher 进程终止和 Slack provider 回执丢失仍尚未 live 注入。
 
 同日 Fixture Issue `#6` 完成了真实 GitHub 生命周期的两次 Turn：首次因故意缺少精确值进入
 `agent:needs_input`，没有 commit、task ref 或 PR；维护者添加唯一 `/codex-context` 并重新批准

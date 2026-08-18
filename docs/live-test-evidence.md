@@ -57,6 +57,42 @@ SQLite contained exactly one WorkItem and two ordered Turns for Issue `#6`; `mai
 original SHA. Both pre-Turn SQLite Online Backup API snapshots were mode `0600` and passed
 `integrity_check`.
 
+## SSH CLI recorded-publication recovery fixture — 2026-08-19
+
+This fixture covers AC-047's narrow durability window: the exact checkpoint SHA was committed to
+SQLite after a successful task-branch publication, but the Turn had not yet advanced from
+`checkpointing` to `published`. The source-tree-only fault hook raises at that exact boundary. This
+is deterministic process-level exception injection; it does not claim to be an operating-system
+process kill or an SSH disconnect.
+
+- Private Fixture Issue: [`longwdl/codex-dispatcher-fixture#8`](https://github.com/longwdl/codex-dispatcher-fixture/issues/8).
+- WorkItem: `wi_9eb14638cf6691e8b2a783bb`.
+- Turn: `turn_54ec2bff87594f53bb668ae8bf950bc1`.
+- Codex session: `01a015d2-3a31-7bd1-b847-b892efdbb795`.
+- Task branch: `codex/issue-8-9eb14638cf66`.
+- Exact checkpoint: `bd7ac54774d9d098c35f9731b18a34d732094736`.
+
+The `publication-recorded` stage returned `process_interrupted` only after
+`record_published_sha()` committed. Independent read-back then found the WorkItem still `running`,
+the Turn `checkpointing/completed`, the Issue `agent:dispatching`, no Issue comment, and no PR. The
+remote task branch and SQLite `last_published_sha` both resolved to the exact checkpoint. Read-only
+preflight selected `resume_publication` for the same WorkItem and Turn.
+
+The `recorded-publication-recovery` stage wrapped both the Runner transport and Publisher in
+fail-before-delegate guards. Recovery completed successfully, which proves that neither port was
+invoked: it used only the durable checkpoint record, then created and bound Draft PR
+[`#9`](https://github.com/longwdl/codex-dispatcher-fixture/pull/9), wrote the fixed Issue status
+comment, and projected `agent:review`. SQLite ended with exactly one WorkItem and one finished Turn;
+the branch, session, output SHA, and PR binding were unchanged. The README marker was exactly
+`p1-recorded-publication-v1`, `main` did not move, and GitHub Actions run
+[`32163520437`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32163520437)
+completed successfully for the exact checkpoint.
+
+Both accepted stages created a mode `0600` SQLite Online Backup API snapshot and passed
+`integrity_check`. A brief GitHub Issue-list visibility delay was observed immediately after the
+initial label write; no write was attempted until direct read-back and a later preflight agreed on
+the exact ready candidate.
+
 ## SSH CLI lost-receipt fixture — 2026-08-19
 
 This section records the bounded, three-stage live fault sequence for Publisher, Draft PR, and

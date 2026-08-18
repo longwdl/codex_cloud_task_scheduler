@@ -191,6 +191,34 @@ between stages and require, respectively, `resume_publication`, then `sync_track
 once to repair the existing comment/PR binding and terminal label. Stop immediately on any different
 status; do not skip a stage, substitute another repository, delete a branch, or edit SQLite.
 
+### 5.2 Recorded-publication recovery fixture
+
+Use a separate new reviewed Fixture Issue. The first stage stops immediately after the exact
+published SHA is durably recorded and before the Turn is terminalized. The second stage installs
+fail-before-delegate Runner and Publisher guards, so a successful recovery proves neither was
+called:
+
+```bash
+CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS=longwdl/codex-dispatcher-fixture \
+PYTHONPATH=src python3 -m codex_dispatcher.fixture_fault_cli \
+  --config /absolute/path/dispatcher.toml --issue ISSUE_NUMBER \
+  --fault publication-recorded --apply --json
+
+CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS=longwdl/codex-dispatcher-fixture \
+PYTHONPATH=src python3 -m codex_dispatcher.fixture_fault_cli \
+  --config /absolute/path/dispatcher.toml --issue ISSUE_NUMBER \
+  --fault recorded-publication-recovery --apply --json
+```
+
+The first command must report `process_interrupted`; preflight must then select
+`resume_publication` for the exact WorkItem and Turn. The second command must report
+`recovery_guarded=true`, `fault_triggered=false`, and `review`. Confirm exactly one Turn, session,
+task branch, Draft PR, and status comment; confirm the task branch and SQLite publication record use
+the same SHA and that the default branch did not move. This fixture does not substitute for the
+separate operating-system process-kill or SSH-disconnect tests.
+
 ### 6. Slack outbound app
 
 The existing official Codex Slack binding is not the Dispatcher integration. A custom outbound-only

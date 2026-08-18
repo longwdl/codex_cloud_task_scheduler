@@ -68,6 +68,12 @@ branch, Runner directory, and Codex session, created only one Draft PR, and pass
 run also corrected the Fixture's legacy hyphenated needs-input label; canonical state labels use
 `agent:needs_input`.
 
+AC-047's recorded-publication recovery has also been exercised against Fixture Issue `#8`. A
+fixture-only hook stopped after the exact published SHA was committed but before Turn
+terminalization; guarded recovery then completed without calling the Runner or Publisher again,
+created one Draft PR, and passed Fixture CI. This deterministic exception injection does not yet
+cover an operating-system process kill or a real SSH disconnect.
+
 Current SSH candidate and recovery planning is exposed through `ssh-preflight`. It checks Git, gh,
 and OpenSSH versions, reads GitHub, and migrates only a temporary copy of SQLite. It does not alter
 the configured database, claim Issues, mutate labels, fetch or push Git, invoke a Runner, or create a
