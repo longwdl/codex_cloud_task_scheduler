@@ -172,8 +172,8 @@ class RunnerTurnExecutor:
                 command.stdout,
                 expected_session_id=request.session_id,
             )
-        except CodexJsonlError:
-            return self._failed_reply(request, "codex_output_invalid")
+        except CodexJsonlError as exc:
+            return self._failed_reply(request, f"codex_output_{exc.code}")
         if command.returncode != 0 or summary.status is not CodexTerminalStatus.COMPLETED:
             return self._failed_reply(
                 request,

@@ -84,8 +84,9 @@ class CodexJsonlTests(unittest.TestCase):
         )
         for output in cases:
             with self.subTest(output=output):
-                with self.assertRaises(CodexJsonlError):
+                with self.assertRaises(CodexJsonlError) as raised:
                     parse_codex_jsonl(output, expected_session_id=SESSION)
+                self.assertNotEqual("invalid", raised.exception.code)
 
 
 if __name__ == "__main__":
