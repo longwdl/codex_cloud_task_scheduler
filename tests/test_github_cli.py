@@ -102,6 +102,54 @@ class GitHubCliTrackerTests(unittest.TestCase):
             tasks = GitHubCliTracker(gh_path=GH).list_ready_tasks(REPOSITORY)
         self.assertIsNone(tasks[0].ready_approved_by)
 
+    def test_list_comments_reads_paginated_bounded_snapshots(self) -> None:
+        payload = [[
+            {
+                "id": 7,
+                "node_id": "IC_kwDOFixture7",
+                "user": {"login": "alice", "id": 1},
+                "body": "/codex-context\nUse the existing parser",
+                "created_at": "2026-08-13T01:00:00Z",
+                "updated_at": "2026-08-13T01:01:00Z",
+                "html_url": "https://example.invalid/comment/7",
+            }
+        ]]
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            return_value=result(payload),
+        ) as runner:
+            comments = GitHubCliTracker(gh_path=GH).list_comments(REPOSITORY, "12")
+
+        self.assertEqual(1, len(comments))
+        self.assertEqual("IC_kwDOFixture7", comments[0].comment_id)
+        self.assertEqual("alice", comments[0].author)
+        argv = runner.call_args.args[0]
+        self.assertIn("--paginate", argv)
+        self.assertIn("/repos/owner/repo/issues/12/comments?per_page=100", argv)
+
+    def test_comment_missing_duplicate_or_unbounded_data_fails_closed(self) -> None:
+        valid = {
+            "node_id": "IC_kwDOFixture7",
+            "user": {"login": "alice"},
+            "body": "/codex-context\nSafe",
+            "created_at": "2026-08-13T01:00:00Z",
+            "updated_at": "2026-08-13T01:01:00Z",
+        }
+        payloads = (
+            [[{key: value for key, value in valid.items() if key != "user"}]],
+            [[valid, dict(valid)]],
+            [[dict(valid, body="x" * 65_537)]],
+            [[dict(valid, created_at="not-a-time")]],
+        )
+        for payload in payloads:
+            with self.subTest(payload_size=len(str(payload))):
+                with patch(
+                    "codex_dispatcher.trackers.github_cli.run_command",
+                    return_value=result(payload),
+                ):
+                    with self.assertRaises(GitHubCliTrackerError):
+                        GitHubCliTracker(gh_path=GH).list_comments(REPOSITORY, "12")
+
     def test_more_than_one_agent_state_fails_closed(self) -> None:
         conflicting = issue(
             labels=[

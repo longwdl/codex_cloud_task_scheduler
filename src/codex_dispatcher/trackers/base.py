@@ -45,6 +45,17 @@ class TrackerTask:
 
 
 @dataclass(frozen=True, slots=True)
+class TrackerComment:
+    """An immutable issue-comment snapshot suitable for maintainer filtering."""
+
+    comment_id: str
+    author: str
+    body: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class ClaimResult:
     claimed: bool
     task: TrackerTask | None
@@ -72,14 +83,18 @@ class DraftPullRequestRequest:
 class Tracker(Protocol):
     """Port for tracker reads and explicitly side-effecting writes.
 
-    ``list_ready_tasks``, ``get_task``, and ``find_pr_by_branch`` are reads.
-    Every other method is a write and must be safe for dispatcher retries where
-    its provider supports idempotency.
+    ``list_ready_tasks``, ``get_task``, ``list_comments``, and
+    ``find_pr_by_branch`` are reads. Every other method is a write and must be
+    safe for dispatcher retries where its provider supports idempotency.
     """
 
     def list_ready_tasks(self, repository: str) -> tuple[TrackerTask, ...]: ...
 
     def get_task(self, repository: str, task_id: str) -> TrackerTask | None: ...
+
+    def list_comments(
+        self, repository: str, task_id: str
+    ) -> tuple[TrackerComment, ...]: ...
 
     def claim(
         self,

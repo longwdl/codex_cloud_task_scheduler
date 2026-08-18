@@ -19,6 +19,7 @@ from codex_dispatcher.trackers.base import (
     DraftPullRequestRequest,
     PullRequest,
     TaskState,
+    TrackerComment,
     TrackerTask,
 )
 
@@ -122,6 +123,27 @@ class GitHubCliTracker:
             task,
             self._last_ready_label_actor(repository, task.issue_number),
         )
+
+    def list_comments(
+        self, repository: str, task_id: str
+    ) -> tuple[TrackerComment, ...]:
+        """Read all Issue comments as bounded immutable snapshots."""
+        repository = _validate_repository(repository)
+        issue_number = _validate_issue_id(task_id)
+        pages = self._json_command(
+            (
+                self._gh_path,
+                "api",
+                "--method",
+                "GET",
+                "--paginate",
+                "--slurp",
+                "-H",
+                "Accept: application/vnd.github+json",
+                f"/repos/{repository}/issues/{issue_number}/comments?per_page=100",
+            )
+        )
+        return _parse_comments(pages)
 
     def find_pr_by_branch(self, repository: str, branch_name: str) -> PullRequest | None:
         raise GitHubCliUnsupportedReadError(
@@ -473,3 +495,64 @@ def _parse_labels(value: Any, path: str) -> tuple[str, ...]:
     if len(set(labels)) != len(labels):
         raise GitHubCliTrackerError(f"{path} must not contain duplicate labels")
     return tuple(labels)
+
+
+def _parse_comments(value: Any) -> tuple[TrackerComment, ...]:
+    if not isinstance(value, list):
+        raise GitHubCliTrackerError("gh issue comments JSON must be an array of pages")
+    comments: list[TrackerComment] = []
+    seen_ids: set[str] = set()
+    for page_index, page in enumerate(value):
+        if not isinstance(page, list):
+            raise GitHubCliTrackerError("gh issue comments page must be an array")
+        for index, raw in enumerate(page):
+            path = f"comments[{page_index}][{index}]"
+            if not isinstance(raw, dict):
+                raise GitHubCliTrackerError(f"{path} must be an object")
+            required = {"node_id", "user", "body", "created_at", "updated_at"}
+            if not required <= set(raw):
+                raise GitHubCliTrackerError(f"{path} is missing required fields")
+            comment_id = raw["node_id"]
+            user = raw["user"]
+            body = raw["body"]
+            created_at = raw["created_at"]
+            updated_at = raw["updated_at"]
+            if (
+                not isinstance(comment_id, str)
+                or not comment_id
+                or len(comment_id) > 256
+                or not isinstance(user, dict)
+                or not isinstance(user.get("login"), str)
+                or not user["login"]
+                or not isinstance(body, str)
+                or len(body) > 65_536
+                or "\x00" in body
+            ):
+                raise GitHubCliTrackerError(f"{path} has invalid values")
+            _parse_timestamp(created_at, f"{path}.created_at")
+            _parse_timestamp(updated_at, f"{path}.updated_at")
+            if comment_id in seen_ids:
+                raise GitHubCliTrackerError("gh issue comments contain duplicate node IDs")
+            seen_ids.add(comment_id)
+            comments.append(
+                TrackerComment(
+                    comment_id,
+                    user["login"],
+                    body,
+                    created_at,
+                    updated_at,
+                )
+            )
+    return tuple(comments)
+
+
+def _parse_timestamp(value: Any, path: str) -> datetime:
+    if not isinstance(value, str) or not value or len(value) > 64:
+        raise GitHubCliTrackerError(f"{path} must be a timezone-aware timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise GitHubCliTrackerError(f"{path} must be a timezone-aware timestamp") from exc
+    if parsed.tzinfo is None:
+        raise GitHubCliTrackerError(f"{path} must be a timezone-aware timestamp")
+    return parsed

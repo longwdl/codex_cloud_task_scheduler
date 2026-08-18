@@ -19,6 +19,7 @@ from codex_dispatcher.trackers.base import (
     DraftPullRequestRequest,
     PullRequest,
     TaskState,
+    TrackerComment,
     TrackerTask,
 )
 
@@ -60,6 +61,7 @@ class FakeTracker(_ConfigurableFake):
         super().__init__()
         self.ready_tasks: tuple[TrackerTask, ...] = ()
         self.tasks: dict[str, TrackerTask] = {}
+        self.comments: dict[str, tuple[TrackerComment, ...]] = {}
         self.pull_requests: dict[tuple[str, str], PullRequest] = {}
 
     def list_ready_tasks(self, repository: str) -> tuple[TrackerTask, ...]:
@@ -72,6 +74,18 @@ class FakeTracker(_ConfigurableFake):
         task = self.tasks.get(task_id)
         default = task if task is not None and task.repository == repository else None
         return self._outcome("get_task", default)  # type: ignore[return-value]
+
+    def list_comments(
+        self, repository: str, task_id: str
+    ) -> tuple[TrackerComment, ...]:
+        self._record("list_comments", repository, task_id)
+        task = self.tasks.get(task_id)
+        default = (
+            self.comments.get(task_id, ())
+            if task is not None and task.repository == repository
+            else ()
+        )
+        return self._outcome("list_comments", default)  # type: ignore[return-value]
 
     def claim(
         self,

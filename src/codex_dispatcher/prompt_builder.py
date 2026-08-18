@@ -144,4 +144,6 @@ def _approved_contexts(
 def _field(value: object, name: str) -> Any:
     if isinstance(value, Mapping):
         return value.get(name, "")
+    if name == "id" and hasattr(value, "comment_id"):
+        return getattr(value, "comment_id")
     return getattr(value, name, "")

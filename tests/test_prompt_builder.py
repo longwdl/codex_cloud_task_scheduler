@@ -4,6 +4,7 @@ import unittest
 
 from codex_dispatcher.prompt_builder import build_prompt_snapshot, build_turn_prompt_snapshot
 from codex_dispatcher.task_spec import parse_task_spec
+from codex_dispatcher.trackers.base import TrackerComment
 from tests.test_task_spec import BODY
 
 
@@ -63,6 +64,26 @@ class PromptBuilderTests(unittest.TestCase):
         self.assertIn("status=completed or status=blocked", first.content)
         self.assertIn("use an empty array when no files changed", first.content)
         self.assertNotIn("Cloud", first.content)
+
+    def test_tracker_comment_dto_is_filtered_by_the_same_maintainer_rule(self) -> None:
+        comment = TrackerComment(
+            "IC_fixture",
+            "alice",
+            "/codex-context\nUse the existing parser",
+            "2026-08-13T01:00:00Z",
+            "2026-08-13T01:01:00Z",
+        )
+        snapshot = build_prompt_snapshot(
+            run_id="run-1",
+            repository="owner/repo",
+            branch="codex/issue-1-fixture",
+            base_sha="a" * 40,
+            issue_title="Fixture",
+            task_spec=parse_task_spec(BODY),
+            comments=(comment,),
+            maintainers=("alice",),
+        )
+        self.assertEqual(("IC_fixture",), snapshot.included_comment_ids)
 
 
 if __name__ == "__main__":
