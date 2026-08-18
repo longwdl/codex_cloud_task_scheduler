@@ -235,6 +235,11 @@ def _assemble_ssh_control_sweep(
         process_lock=DispatcherProcessLock(runtime.lock_path),
         publisher=publisher,
         delivery=GitHubDeliveryCoordinator(store=store, tracker=tracker),
+        claim_acquired_hook=(
+            None
+            if fixture_fault_injection is None
+            else fixture_fault_injection.claim_acquired_hook
+        ),
         runner_root=runtime.runner_root,
     )
 

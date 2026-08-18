@@ -46,7 +46,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fault",
         required=True,
-        choices=tuple(point.value for point in FixtureFaultPoint),
+        choices=tuple(
+            point.value
+            for point in FixtureFaultPoint
+            if point is not FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL
+        ),
     )
     parser.add_argument(
         "--apply",
@@ -95,6 +99,11 @@ def _run(
     issue_number: int,
     fault: FixtureFaultPoint,
 ) -> tuple[int, dict[str, object]]:
+    if fault is FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL:
+        return 1, {
+            "ok": False,
+            "error": "claim-acquired process kill requires fixture_process_cli",
+        }
     if os.environ.get(_WRITE_ENV) != "1":
         return 1, {"ok": False, "error": f"{_WRITE_ENV}=1 is required"}
     if os.environ.get(_FAULT_ENV) != FIXTURE_REPOSITORY:

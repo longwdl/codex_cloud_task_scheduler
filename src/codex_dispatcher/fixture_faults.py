@@ -7,6 +7,7 @@ discarded once, allowing the following normal sweep to prove reconciliation.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -44,6 +45,7 @@ class FixtureFaultPoint(StrEnum):
     ISSUE_COMMENT_RECEIPT = "issue-comment-receipt"
     PUBLICATION_RECORDED = "publication-recorded"
     RECORDED_PUBLICATION_RECOVERY = "recorded-publication-recovery"
+    CLAIM_ACQUIRED_PROCESS_KILL = "claim-acquired-process-kill"
 
 
 class FixtureFaultRejected(RuntimeError):
@@ -88,6 +90,7 @@ class FixtureFaultInjection:
     issue_number: int
     repository: str = FIXTURE_REPOSITORY
     triggered: bool = False
+    claim_acquired_callback: Callable[[TrackerTask], None] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.fault, FixtureFaultPoint):
@@ -96,6 +99,13 @@ class FixtureFaultInjection:
             raise FixtureFaultRejected("fault injection repository is not the fixed Fixture")
         if type(self.issue_number) is not int or self.issue_number <= 0:
             raise ValueError("fixture issue number must be positive")
+        if self.claim_acquired_callback is not None and (
+            self.fault is not FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL
+            or not callable(self.claim_acquired_callback)
+        ):
+            raise FixtureFaultRejected(
+                "claim callback is allowed only for the process-kill Fixture"
+            )
 
     def wrap_tracker(self, tracker: Tracker) -> Tracker:
         return _FixtureFaultTracker(self, tracker)
@@ -110,6 +120,12 @@ class FixtureFaultInjection:
     def publication_recorded_hook(self) -> PublicationRecordedHook | None:
         if self.fault is FixtureFaultPoint.PUBLICATION_RECORDED:
             return self.after_publication_recorded
+        return None
+
+    @property
+    def claim_acquired_hook(self) -> Callable[[TrackerTask], None] | None:
+        if self.fault is FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL:
+            return self.after_claim_acquired
         return None
 
     def require_target(self, repository: str, task_id: str | None = None) -> None:
@@ -147,6 +163,28 @@ class FixtureFaultInjection:
             "Fixture intentionally stopped after recording the publication"
         )
 
+    def after_claim_acquired(self, task: TrackerTask) -> None:
+        """Stop after the exact remote claim and before local WorkItem persistence."""
+        self.require_target(task.repository, task.task_id)
+        if (
+            self.fault is not FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL
+            or task.issue_number != self.issue_number
+            or task.state is not TaskState.DISPATCHING
+            or not task.is_open
+        ):
+            raise FixtureFaultRejected(
+                "claim-acquired hook escaped its exact Fixture claim"
+            )
+        if self.triggered:
+            raise FixtureFaultRejected("live Fixture fault was triggered more than once")
+        self.triggered = True
+        if self.claim_acquired_callback is not None:
+            self.claim_acquired_callback(task)
+            raise FixtureFaultRejected("claim-acquired callback unexpectedly returned")
+        raise FixtureProcessInterrupted(
+            "Fixture intentionally stopped after acquiring the remote claim"
+        )
+
 
 class _FixtureFaultTransport:
     def __init__(
@@ -159,6 +197,10 @@ class _FixtureFaultTransport:
 
     def invoke(self, request, **kwargs):
         self._injection.require_target(self._injection.repository)
+        if self._injection.fault is FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL:
+            raise FixtureFaultRejected(
+                "claim-acquired process kill unexpectedly invoked the Runner"
+            )
         if self._injection.fault is FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY:
             raise FixtureFaultRejected(
                 "recorded publication recovery attempted to invoke the Runner"
@@ -196,6 +238,10 @@ class _FixtureFaultPublisher:
         ):
             raise FixtureFaultRejected(
                 "recorded publication recovery attempted to invoke the Publisher"
+            )
+        if self._injection.fault is FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL:
+            raise FixtureFaultRejected(
+                "claim-acquired process kill unexpectedly invoked the Publisher"
             )
         receipt = self._delegate.publish(
             artifact,
@@ -253,6 +299,7 @@ class _FixtureFaultTracker:
         if self._injection.fault not in {
             FixtureFaultPoint.PUBLISHER_RECEIPT,
             FixtureFaultPoint.PUBLICATION_RECORDED,
+            FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL,
         }:
             raise FixtureFaultRejected("this Fixture fault stage cannot claim an Issue")
         return self._delegate.claim(
@@ -275,6 +322,7 @@ class _FixtureFaultTracker:
                 TaskState.RUNNING,
                 TaskState.REVIEW,
             },
+            FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL: set(),
         }[self._injection.fault]
         if state not in allowed:
             raise FixtureFaultRejected("Fixture fault stage attempted an unexpected state write")
@@ -356,6 +404,7 @@ def validate_fixture_preflight(
     if fault in {
         FixtureFaultPoint.PUBLISHER_RECEIPT,
         FixtureFaultPoint.PUBLICATION_RECORDED,
+        FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL,
     }:
         if (
             plan.status is not SshPreflightStatus.READY_CANDIDATE
@@ -416,3 +465,31 @@ def validate_fixture_preflight(
         or work_item.pr_number is not None
     ):
         raise FixtureFaultRejected("Issue comment fault requires unbound Draft PR recovery")
+
+
+def validate_fixture_orphan_claim_recovery(
+    plan: SshPreflightPlan,
+    *,
+    issue_number: int,
+) -> None:
+    """Require the exact post-kill state for a remotely claimed, unpersisted Issue."""
+    if not isinstance(plan, SshPreflightPlan):
+        raise TypeError("plan must be a SshPreflightPlan")
+    if type(issue_number) is not int or issue_number <= 0:
+        raise ValueError("fixture issue number must be positive")
+    task = plan.task
+    if (
+        plan.status is not SshPreflightStatus.READY_RECOVERY
+        or plan.recovery_action is not SshRecoveryAction.RECOVER_ORPHAN_CLAIM
+        or task is None
+        or task.repository != FIXTURE_REPOSITORY
+        or task.task_id != str(issue_number)
+        or task.issue_number != issue_number
+        or task.state is not TaskState.DISPATCHING
+        or not task.is_open
+        or plan.work_item is not None
+        or plan.turn is not None
+    ):
+        raise FixtureFaultRejected(
+            "process kill did not leave one exact recoverable orphan claim"
+        )

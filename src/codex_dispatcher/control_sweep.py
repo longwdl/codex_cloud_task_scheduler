@@ -34,6 +34,12 @@ class SourceSnapshotProvider(Protocol):
     def exact(self, repository: str, base_sha: str) -> SourceBundle: ...
 
 
+class ClaimAcquiredHook(Protocol):
+    """Observe an exact successful claim before local WorkItem persistence."""
+
+    def __call__(self, task: TrackerTask) -> None: ...
+
+
 class ControlSweepStatus(StrEnum):
     IDLE = "idle"
     CLAIM_NOT_ACQUIRED = "claim_not_acquired"
@@ -71,6 +77,7 @@ class SshControlSweep:
         publisher: TaskBranchPublisher | None = None,
         delivery: GitHubDeliveryCoordinator | None = None,
         slack_delivery: SlackDeliveryCoordinator | None = None,
+        claim_acquired_hook: ClaimAcquiredHook | None = None,
         claimant: str = "codex-dispatcher",
         runner_root: str = "/srv/codex-runner/work-items",
     ) -> None:
@@ -92,6 +99,7 @@ class SshControlSweep:
         self._publisher = publisher
         self._delivery = delivery
         self._slack_delivery = slack_delivery
+        self._claim_acquired_hook = claim_acquired_hook
         self._claimant = claimant
         self._runner_root = runner_root
         self._repositories = {item.slug: item for item in config.repositories}
@@ -141,6 +149,8 @@ class SshControlSweep:
                     task,
                     reason="claim_result_missing_task",
                 )
+            if self._claim_acquired_hook is not None:
+                self._claim_acquired_hook(claimed.task)
             if existing is None:
                 assert source_bundle is not None
                 base_sha = source_bundle.base_sha

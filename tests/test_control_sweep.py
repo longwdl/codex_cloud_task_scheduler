@@ -355,6 +355,42 @@ class SshControlSweepTests(unittest.TestCase):
         turns = self.store.list_turns(persisted.work_item_id)
         self.assertEqual(("IC_fixture",), turns[0].included_comment_ids)
 
+    def test_claim_hook_runs_after_remote_claim_before_work_item_persistence(self) -> None:
+        events: list[str] = []
+        tracker = _RecordingTracker(events)
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        source = _RecordingSource(events)
+
+        class ExpectedStop(RuntimeError):
+            pass
+
+        def stop_after_claim(claimed: TrackerTask) -> None:
+            self.assertEqual(task.issue_node_id, claimed.issue_node_id)
+            self.assertEqual(TaskState.DISPATCHING, claimed.state)
+            events.append("claim_hook")
+            raise ExpectedStop
+
+        sweep = SshControlSweep(
+            config=make_config(global_max_active=4),
+            store=self.store,
+            tracker=tracker,
+            dispatch=self.dispatch,
+            source=source,
+            process_lock=DispatcherProcessLock(self.lock_path),
+            claim_acquired_hook=stop_after_claim,
+        )
+
+        with self.assertRaises(ExpectedStop):
+            sweep.run_once(turn_id=TURN_ID)
+
+        self.assertEqual(["source.current", "tracker.claim", "claim_hook"], events)
+        self.assertIsNone(
+            self.store.get_work_item_by_issue(task.repository, task.issue_number)
+        )
+        self.assertEqual([], self.transport.calls)
+
     def test_needs_input_followup_reuses_issue_session_branch_and_pr(self) -> None:
         tracker = FakeTracker()
         task = _ready_task()

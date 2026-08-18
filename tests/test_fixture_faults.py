@@ -252,6 +252,47 @@ class FixtureFaultTests(unittest.TestCase):
                 work_item=recorded,
             )
 
+    def test_claim_acquired_hook_stops_before_any_later_port(self) -> None:
+        delegate = FakeTracker()
+        delegate.ready_tasks = (_task(TaskState.READY),)
+        delegate.tasks[str(ISSUE)] = _task(TaskState.READY)
+        observed: list[str] = []
+        injection = FixtureFaultInjection(
+            FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL,
+            ISSUE,
+            claim_acquired_callback=lambda task: observed.append(task.issue_node_id),
+        )
+        tracker = injection.wrap_tracker(delegate)
+
+        claimed = tracker.claim(
+            FIXTURE_REPOSITORY,
+            str(ISSUE),
+            "codex-dispatcher",
+            approved_by=("longwdl",),
+        )
+        assert claimed.task is not None
+        with self.assertRaisesRegex(FixtureFaultRejected, "unexpectedly returned"):
+            injection.after_claim_acquired(claimed.task)
+
+        self.assertTrue(injection.triggered)
+        self.assertEqual(["I_fixture_fault_7"], observed)
+        with self.assertRaisesRegex(FixtureFaultRejected, "Runner"):
+            injection.wrap_transport(
+                SimpleNamespace(invoke=lambda *args, **kwargs: None)
+            ).invoke(SimpleNamespace())
+        with self.assertRaisesRegex(FixtureFaultRejected, "state write"):
+            tracker.set_state(
+                FIXTURE_REPOSITORY,
+                str(ISSUE),
+                TaskState.RUNNING,
+            )
+        with self.assertRaisesRegex(FixtureFaultRejected, "claim callback"):
+            FixtureFaultInjection(
+                FixtureFaultPoint.PUBLISHER_RECEIPT,
+                ISSUE,
+                claim_acquired_callback=lambda task: None,
+            )
+
     def test_preflight_requires_the_exact_fault_sequences(self) -> None:
         ready = SshPreflightPlan(
             SshPreflightStatus.READY_CANDIDATE,
@@ -266,6 +307,11 @@ class FixtureFaultTests(unittest.TestCase):
         validate_fixture_preflight(
             ready,
             fault=FixtureFaultPoint.PUBLICATION_RECORDED,
+            issue_number=ISSUE,
+        )
+        validate_fixture_preflight(
+            ready,
+            fault=FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL,
             issue_number=ISSUE,
         )
 
