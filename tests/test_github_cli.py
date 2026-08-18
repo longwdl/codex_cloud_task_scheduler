@@ -87,6 +87,29 @@ class GitHubCliTrackerTests(unittest.TestCase):
         )
         self.assertEqual(("test-token",), keyword_arguments[0]["secrets"])
 
+    def test_list_open_tasks_reads_a_requested_recovery_state(self) -> None:
+        dispatching = issue(
+            labels=[label("agent:dispatching"), label("exec:ssh-cli")]
+        )
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            side_effect=[result([dispatching]), result([])],
+        ) as runner:
+            tasks = GitHubCliTracker(gh_path=GH).list_open_tasks(
+                REPOSITORY, TaskState.DISPATCHING
+            )
+
+        self.assertEqual((12,), tuple(task.issue_number for task in tasks))
+        argv = runner.call_args_list[0].args[0]
+        label_index = argv.index("--label")
+        self.assertEqual("agent:dispatching", argv[label_index + 1])
+        self.assertIn("open", argv)
+
+        with self.assertRaises(TypeError):
+            GitHubCliTracker(gh_path=GH).list_open_tasks(
+                REPOSITORY, "dispatching"  # type: ignore[arg-type]
+            )
+
     def test_missing_or_malformed_audit_data_is_untrusted_not_inferred(self) -> None:
         with patch(
             "codex_dispatcher.trackers.github_cli.run_command",

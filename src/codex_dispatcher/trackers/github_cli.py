@@ -76,7 +76,15 @@ class GitHubCliTracker:
         malformed audit data produces ``ready_approved_by=None`` so the
         scheduler's maintainer allowlist rejects it.
         """
+        return self.list_open_tasks(repository, TaskState.READY)
+
+    def list_open_tasks(
+        self, repository: str, state: TaskState
+    ) -> tuple[TrackerTask, ...]:
+        """Return open Issues having exactly the requested dispatcher state."""
         repository = _validate_repository(repository)
+        if not isinstance(state, TaskState):
+            raise TypeError("state must be a TaskState")
         issues = self._json_command(
             (
                 self._gh_path,
@@ -87,7 +95,7 @@ class GitHubCliTracker:
                 "--state",
                 "open",
                 "--label",
-                "agent:ready",
+                f"agent:{state.value}",
                 "--limit",
                 "1000",
                 "--json",
@@ -99,7 +107,7 @@ class GitHubCliTracker:
         tasks: list[TrackerTask] = []
         for index, issue in enumerate(issues):
             task = _parse_issue(issue, repository, f"issues[{index}]")
-            if task.is_open and task.state is TaskState.READY:
+            if task.is_open and task.state is state:
                 tasks.append(
                     _with_ready_approver(
                         task,

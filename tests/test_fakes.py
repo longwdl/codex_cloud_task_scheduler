@@ -18,6 +18,9 @@ class FakeTrackerTests(unittest.TestCase):
         tracker = FakeTracker()
 
         self.assertEqual(tracker.list_ready_tasks("owner/repo"), ())
+        self.assertEqual(
+            tracker.list_open_tasks("owner/repo", TaskState.DISPATCHING), ()
+        )
         self.assertIsNone(tracker.get_task("owner/repo", "42"))
         self.assertEqual(tracker.list_comments("owner/repo", "42"), ())
         self.assertIsNone(tracker.find_pr_by_branch("owner/repo", "codex/42"))
@@ -25,6 +28,7 @@ class FakeTrackerTests(unittest.TestCase):
             tracker.calls,
             [
                 Call("list_ready_tasks", ("owner/repo",)),
+                Call("list_open_tasks", ("owner/repo", TaskState.DISPATCHING)),
                 Call("get_task", ("owner/repo", "42")),
                 Call("list_comments", ("owner/repo", "42")),
                 Call("find_pr_by_branch", ("owner/repo", "codex/42")),

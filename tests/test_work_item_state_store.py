@@ -163,6 +163,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 store.migrate()
                 first = make_ready(store, make_item(1))
                 second = make_ready(store, make_item(2))
+                self.assertEqual((first, second), store.list_work_items())
                 self.assertIsNone(store.get_active_turn())
                 self.assertEqual(1, store.next_turn_number(first.work_item_id))
                 turn = store.plan_turn(

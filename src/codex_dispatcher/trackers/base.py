@@ -21,6 +21,7 @@ class TaskState(StrEnum):
     NEEDS_INPUT = "needs_input"
     BLOCKED = "blocked"
     PAUSED = "paused"
+    COMPLETED = "completed"
     DISCARD = "discard"
 
 
@@ -83,12 +84,17 @@ class DraftPullRequestRequest:
 class Tracker(Protocol):
     """Port for tracker reads and explicitly side-effecting writes.
 
-    ``list_ready_tasks``, ``get_task``, ``list_comments``, and
-    ``find_pr_by_branch`` are reads. Every other method is a write and must be
-    safe for dispatcher retries where its provider supports idempotency.
+    ``list_ready_tasks``, ``list_open_tasks``, ``get_task``,
+    ``list_comments``, and ``find_pr_by_branch`` are reads. Every other method
+    is a write and must be safe for dispatcher retries where its provider
+    supports idempotency.
     """
 
     def list_ready_tasks(self, repository: str) -> tuple[TrackerTask, ...]: ...
+
+    def list_open_tasks(
+        self, repository: str, state: TaskState
+    ) -> tuple[TrackerTask, ...]: ...
 
     def get_task(self, repository: str, task_id: str) -> TrackerTask | None: ...
 

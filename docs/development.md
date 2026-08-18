@@ -42,6 +42,8 @@ The environment-independent core now additionally contains:
 - a provider-independent service joining WorkItem recovery, deterministic Turn prompts, and Runner
   invocation without GitHub/Slack writes;
 - an atomic Prompt Turn-number check and a protected non-blocking Control Host process lock.
+- read-only enumeration of dispatching/running Issues and a fail-closed recovery planner for orphan
+  claims, active Runner reconciliation, and pending publication.
 
 The fixed OpenSSH argv/byte-stream adapter is covered by isolated unit tests, and the installed
 Runner protocol has also completed the disposable SSH/real-Codex fixture recorded in

@@ -395,6 +395,21 @@ class StateStore:
         ).fetchone()
         return self._row_to_work_item(row) if row is not None else None
 
+    def list_work_items(self, *, include_completed: bool = True) -> tuple[WorkItem, ...]:
+        """Return persisted WorkItems in stable creation order for reconciliation."""
+        if type(include_completed) is not bool:
+            raise TypeError("include_completed must be a bool")
+        sql = "SELECT * FROM work_items"
+        parameters: tuple[str, ...] = ()
+        if not include_completed:
+            sql += " WHERE state != ?"
+            parameters = (WorkItemState.COMPLETED.value,)
+        sql += " ORDER BY created_at, work_item_id"
+        return tuple(
+            self._row_to_work_item(row)
+            for row in self._connection.execute(sql, parameters)
+        )
+
     def get_active_turn(self) -> Turn | None:
         """Return the globally unique active Turn, if one exists."""
         placeholders = ", ".join("?" for _ in ACTIVE_TURN_STATES)

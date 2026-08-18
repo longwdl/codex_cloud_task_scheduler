@@ -69,6 +69,19 @@ class FakeTracker(_ConfigurableFake):
         default = tuple(task for task in self.ready_tasks if task.repository == repository)
         return self._outcome("list_ready_tasks", default)  # type: ignore[return-value]
 
+    def list_open_tasks(
+        self, repository: str, state: TaskState
+    ) -> tuple[TrackerTask, ...]:
+        self._record("list_open_tasks", repository, state)
+        default = tuple(
+            task
+            for task in (*self.ready_tasks, *self.tasks.values())
+            if task.repository == repository and task.state is state and task.is_open
+        )
+        unique = {task.task_id: task for task in default}
+        ordered = tuple(unique[key] for key in sorted(unique, key=lambda item: int(item)))
+        return self._outcome("list_open_tasks", ordered)  # type: ignore[return-value]
+
     def get_task(self, repository: str, task_id: str) -> TrackerTask | None:
         self._record("get_task", repository, task_id)
         task = self.tasks.get(task_id)
