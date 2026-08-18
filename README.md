@@ -44,14 +44,16 @@ created one persistent session, and resumed that exact session on the same branc
 the read-only task produced no diff or publication checkpoint. The first-phase Runner release is
 installed on `s3`, but remains user-owned because the Fixture account has no passwordless sudo.
 
-The live dependency assembly now includes exact-SHA task-branch publication, unique Draft PR
-reconciliation, and ordered Issue comment/label delivery, but the write-enabled entry point has not
-yet been exercised against the Fixture. The trusted-mirror fetch, Publisher push, and GitHub writes
-are therefore still offline-tested only. The Slack coordination core is wired only through injected
-ports; a real Slack HTTP publisher remains disabled until its provider-side deduplication behavior is
-proven in a live fixture. Merge and production deployment remain absent. Existing Codex Cloud
-adapter code is retained only during migration; Cloud writes remain disabled and are not part of the
-target architecture.
+The write-enabled dependency assembly has now completed one bounded happy-path run against Fixture
+Issue `#2`: it claimed one SSH-labelled Issue, created one persistent Codex session, published the
+exact checkpoint SHA to the deterministic task branch, opened one Draft PR, projected the Issue to
+`agent:review`, and passed the Fixture GitHub Actions workflow. Read-back confirmed that `main` did
+not move and a following read-only preflight was idle. Live crash/lost-receipt injection and a second
+write-enabled reconciliation sweep remain intentionally outstanding. The Slack coordination core is
+wired only through injected ports; a real Slack HTTP publisher remains disabled until its
+provider-side deduplication behavior is proven in a live fixture. Merge and production deployment
+remain absent. Existing Codex Cloud adapter code is retained only during migration; Cloud writes
+remain disabled and are not part of the target architecture.
 
 Current SSH candidate and recovery planning is exposed through `ssh-preflight`. It checks Git, gh,
 and OpenSSH versions, reads GitHub, and migrates only a temporary copy of SQLite. It does not alter

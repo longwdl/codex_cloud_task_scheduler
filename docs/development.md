@@ -71,17 +71,18 @@ The fixed OpenSSH argv/byte-stream adapter is covered by isolated unit tests, an
 Runner protocol has also completed the disposable SSH/real-Codex fixture recorded in
 `docs/live-test-evidence.md`. The offline Control Host sweep and runtime assembly are covered through
 injected fakes, including Publisher and Draft PR lost-receipt, Issue projection ordering, and
-post-record crash recovery. The trusted-mirror command boundary, Publisher push, Draft PR, and Issue
-writes are covered without network access. Slack root/result receipt loss and outbox recovery are
-also covered through an idempotent fake publisher. The next phase is a bounded live GitHub
-claim/Runner/Publisher/PR fixture, followed by proof of the real Slack publisher contract.
+post-record crash recovery. A bounded live happy-path run has now exercised the real GitHub claim,
+trusted-mirror fetch, SSH Runner, Publisher push, unique Draft PR, Issue projection, and Fixture CI.
+It did not exercise live crash/lost-receipt recovery or a second write-enabled sweep. Slack
+root/result receipt loss and outbox recovery remain covered only through an idempotent fake
+publisher; proof of the real Slack publisher contract is the next external integration phase.
 The Runner must not receive GitHub write or production credentials.
 
 Explicitly deferred:
 
 - systemd/timer activation of the one-sweep entry point;
-- live GitHub claim/reconciliation in the SSH workflow;
-- live GitHub Publisher, Draft PR, and Issue projection verification;
+- live failure injection for GitHub/Publisher lost-receipt reconciliation;
+- a repeated write-enabled sweep after a published checkpoint;
 - a live Slack HTTP publisher or Slack API calls;
 - systemd deployment;
 - Docker isolation on the Runner;

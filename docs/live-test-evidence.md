@@ -3,6 +3,62 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## SSH CLI Dispatcher and Publisher fixture — 2026-08-18
+
+This section records the first bounded write-enabled happy-path sweep. It is evidence for the
+specific observed run, not authorization for unattended production use or evidence that live crash
+recovery and Slack delivery have been proven.
+
+### Admission and immutable identity
+
+- Private Fixture Issue: [`longwdl/codex-dispatcher-fixture#2`](https://github.com/longwdl/codex-dispatcher-fixture/issues/2).
+- Initial labels were `agent:ready`, `exec:ssh-cli`, and `priority:p1`.
+- The strict task spec allowed only the README marker value to change to
+  `ssh-publisher-phase-d-v1`; Codex was explicitly forbidden to push, create a PR, merge, or deploy.
+- GitHub Issue node ID: `I_kwDOT3NfX88AAAABNPZJlw`.
+- WorkItem: `wi_70da53f08c0e7d96a08901b8`.
+- Task branch: `codex/issue-2-70da53f08c0e`.
+- Runner directory:
+  `/srv/codex-runner/work-items/longwdl__codex-dispatcher-fixture/issue-2`.
+
+Before the write, `ssh-preflight` selected exactly Issue `#2` as `ready_candidate`, reported no
+rejections, and stated `authorizes_apply=false`. The task branch and matching PR did not exist;
+Fixture `main` was `b992e1e52c8f11ed2e6776f78ec20bb1667a8fb5`. The existing SQLite database passed
+`integrity_check`, and a mode-`0600` online backup preserved the earlier WorkItem/session/Turn
+history before additive migrations or new state were written.
+
+### One write-enabled sweep
+
+The exact entry point required both `--apply` and
+`CODEX_DISPATCHER_ENABLE_SSH_WRITES=1`. It returned success for one Turn:
+
+- Turn: `turn_c4e2249059de4b139deff19867c68a27`, number `1`;
+- Runner result: `finished/completed`;
+- checkpoint: `071ec769c63b8ab594865611cdc8af46ddd07b7f`;
+- resulting WorkItem state: `review`.
+
+The Dispatcher then published only that exact checkpoint to the deterministic task branch, created
+Draft PR [`#3`](https://github.com/longwdl/codex-dispatcher-fixture/pull/3), updated the one fixed
+Issue status comment, and projected Issue `#2` to `agent:review`. The PR uses base `main`, the exact
+task branch as head, and the same checkpoint SHA. SQLite binds PR number `3` and the published SHA
+to the same WorkItem and contains exactly one finished Turn for this Issue.
+
+### Independent read-back
+
+- The remote task branch resolved to the checkpoint SHA; `main` remained at its original SHA.
+- The PR diff contained only `README.md`, with one insertion and one deletion inside the allowed
+  marker; the marker boundaries were unchanged.
+- GitHub Actions run [`32155421239`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32155421239)
+  was `completed/success` for workflow `fixture`, event `pull_request`, the exact task branch, and
+  the exact checkpoint SHA.
+- A following read-only `ssh-preflight` returned `idle` with no candidate or recovery action.
+- No merge, deployment, release, main-branch update, Slack delivery, or second Codex Turn occurred.
+
+The fine-grained PAT could list Actions runs but could not read check runs through either the
+GraphQL `statusCheckRollup` field or the REST Checks endpoint. CI success is therefore evidenced by
+the accessible Actions workflow run, not inferred from those denied check APIs. A second
+write-enabled sweep and live push/PR/comment lost-receipt injection remain outstanding.
+
 ## SSH CLI Runner fixture — 2026-08-18
 
 This section records the first real SSH CLI protocol run. The Fixture Issue remained open with
