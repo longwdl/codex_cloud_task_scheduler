@@ -69,6 +69,10 @@ codex/issue-<number>-<stable-issue-key-prefix>
 `stable-issue-key-prefix` 从仓库身份和不可变 Issue 身份确定性计算，不能使用创建时间或本地
 随机数。相同 Issue 在任何状态流转后都解析成同一分支。
 
+迁移例外：旧调度器已经持久化且已创建远端 task branch 的 Issue，不重新计算或替换分支。
+只有旧 SQLite 中的 repository/Issue/branch/base/head 与远端 ref 精确一致时，才以
+`task_branch_source=migrated` 导入；新 Issue 使用 `derived`。两种绑定一经持久化都不可替换。
+
 ### 2.2 项目视角和任务视角
 
 - GitHub Issue/PR 是项目视角，也是所有人工输入和审批的入口。

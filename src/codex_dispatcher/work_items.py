@@ -33,6 +33,11 @@ class WorkItemState(StrEnum):
     PAUSED = "paused"
 
 
+class TaskBranchSource(StrEnum):
+    DERIVED = "derived"
+    MIGRATED = "migrated"
+
+
 class TurnState(StrEnum):
     PLANNED = "planned"
     STARTING = "starting"
@@ -183,6 +188,7 @@ class WorkItem:
     base_sha: str
     created_at: str
     updated_at: str
+    task_branch_source: TaskBranchSource = TaskBranchSource.DERIVED
     codex_session_id: str | None = None
     slack_channel_id: str | None = None
     slack_thread_ts: str | None = None
@@ -192,6 +198,8 @@ class WorkItem:
     def __post_init__(self) -> None:
         if not isinstance(self.state, WorkItemState):
             raise ValueError("state must be a WorkItemState")
+        if not isinstance(self.task_branch_source, TaskBranchSource):
+            raise ValueError("task_branch_source must be a TaskBranchSource")
         validate_work_item_id(self.work_item_id)
         validate_repository(self.repository)
         _positive_int(self.issue_number, "issue_number")
@@ -205,8 +213,14 @@ class WorkItem:
         digest = _identity_digest(self.repository, self.issue_node_id)
         if self.work_item_id != f"wi_{digest[:24]}":
             raise ValueError("work_item_id does not match the immutable Issue identity")
-        if self.task_branch != f"codex/issue-{self.issue_number}-{digest[:12]}":
-            raise ValueError("task_branch must match the immutable Issue identity")
+        derived_branch = f"codex/issue-{self.issue_number}-{digest[:12]}"
+        if self.task_branch_source is TaskBranchSource.DERIVED:
+            if self.task_branch != derived_branch:
+                raise ValueError("task_branch must match the immutable Issue identity")
+        elif re.fullmatch(
+            rf"codex/issue-{self.issue_number}-[0-9a-f]{{12}}", self.task_branch
+        ) is None:
+            raise ValueError("migrated task_branch must match the legacy stable branch shape")
         if self.task_branch == self.base_branch:
             raise ValueError("task_branch must not equal base_branch")
         expected_tail = (
@@ -261,6 +275,42 @@ class WorkItem:
             base_sha=base_sha,
             created_at=now,
             updated_at=now,
+        )
+
+    @classmethod
+    def from_existing_branch_binding(
+        cls,
+        *,
+        repository: str,
+        issue_number: int,
+        issue_node_id: str,
+        base_branch: str,
+        base_sha: str,
+        task_branch: str,
+        runner_root: str = "/srv/codex-runner/work-items",
+        at: str | None = None,
+    ) -> "WorkItem":
+        """Import one previously persisted and externally verified task-branch binding."""
+        identity = stable_work_item_identity(
+            repository=repository,
+            issue_number=issue_number,
+            issue_node_id=issue_node_id,
+            runner_root=runner_root,
+        )
+        now = at or utc_now_iso()
+        return cls(
+            work_item_id=identity.work_item_id,
+            repository=repository,
+            issue_number=issue_number,
+            issue_node_id=issue_node_id,
+            state=WorkItemState.DISCOVERED,
+            base_branch=base_branch,
+            task_branch=task_branch,
+            runner_directory=identity.runner_directory,
+            base_sha=base_sha,
+            created_at=now,
+            updated_at=now,
+            task_branch_source=TaskBranchSource.MIGRATED,
         )
 
     def transition_to(self, state: WorkItemState, *, at: str | None = None) -> "WorkItem":

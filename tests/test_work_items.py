@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from codex_dispatcher.domain import InvalidStateTransition
 from codex_dispatcher.work_items import (
+    TaskBranchSource,
     Turn,
     TurnState,
     WorkItem,
@@ -68,6 +69,32 @@ class WorkItemDomainTests(unittest.TestCase):
             self.assertEqual(identity, (item.work_item_id, item.task_branch, item.runner_directory))
         with self.assertRaises(InvalidStateTransition):
             item.transition_to(WorkItemState.READY)
+
+    def test_verified_existing_branch_binding_is_preserved_across_migration(self) -> None:
+        item = WorkItem.from_existing_branch_binding(
+            repository="owner/repo",
+            issue_number=42,
+            issue_node_id="I_kwDOFixture42",
+            base_branch="main",
+            base_sha="a" * 40,
+            task_branch="codex/issue-42-8e3775879000",
+            at="2026-01-01T00:00:00.000000Z",
+        )
+        self.assertEqual(TaskBranchSource.MIGRATED, item.task_branch_source)
+        self.assertEqual("codex/issue-42-8e3775879000", item.task_branch)
+        self.assertEqual(
+            item.task_branch,
+            item.transition_to(WorkItemState.PREPARING).task_branch,
+        )
+        with self.assertRaisesRegex(ValueError, "legacy stable branch shape"):
+            WorkItem.from_existing_branch_binding(
+                repository="owner/repo",
+                issue_number=42,
+                issue_node_id="I_kwDOFixture42",
+                base_branch="main",
+                base_sha="a" * 40,
+                task_branch="codex/issue-42-wrong",
+            )
 
     def test_session_and_slack_bindings_are_idempotent_but_not_replaceable(self) -> None:
         item = work_item().bind_session(SESSION)

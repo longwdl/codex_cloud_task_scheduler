@@ -13,6 +13,7 @@ from typing import Any
 
 from codex_dispatcher.domain import Run, RunState, utc_now_iso
 from codex_dispatcher.work_items import (
+    TaskBranchSource,
     Turn,
     TurnState,
     WorkItem,
@@ -342,6 +343,7 @@ class StateStore:
             "state",
             "base_branch",
             "task_branch",
+            "task_branch_source",
             "runner_directory",
             "codex_session_id",
             "slack_channel_id",
@@ -353,7 +355,9 @@ class StateStore:
             "updated_at",
         )
         values = tuple(
-            getattr(work_item, field).value if field == "state" else getattr(work_item, field)
+            getattr(work_item, field).value
+            if field in {"state", "task_branch_source"}
+            else getattr(work_item, field)
             for field in fields
         )
         with self._transaction() as connection:
@@ -371,6 +375,7 @@ class StateStore:
                     "repository": work_item.repository,
                     "issue_number": work_item.issue_number,
                     "task_branch": work_item.task_branch,
+                    "task_branch_source": work_item.task_branch_source.value,
                 },
                 work_item.created_at,
             )
@@ -1009,6 +1014,7 @@ class StateStore:
     def _row_to_work_item(row: sqlite3.Row) -> WorkItem:
         values = dict(row)
         values["state"] = WorkItemState(values["state"])
+        values["task_branch_source"] = TaskBranchSource(values["task_branch_source"])
         return WorkItem(**values)
 
     @staticmethod

@@ -62,6 +62,11 @@ attempt number. A suitable form is:
 codex/issue-<issue-number>-<stable-issue-key-prefix>
 ```
 
+Migration never replaces a branch that was already durably bound under the earlier scheduler. An
+existing binding may be imported only after the legacy SQLite anchor and the exact remote ref both
+agree on repository, Issue, branch, base SHA, and head SHA. It is marked `migrated`; new Issues use
+the derived identity. Both forms remain immutable after persistence.
+
 ## Work item and turn
 
 `WorkItem` is the long-lived aggregate. `Turn` is one bounded invocation of the persistent Codex

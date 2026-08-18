@@ -8,7 +8,12 @@ from importlib.resources import files
 from pathlib import Path
 
 from codex_dispatcher.state_store import StateStore
-from codex_dispatcher.work_items import TurnState, WorkItem, WorkItemState
+from codex_dispatcher.work_items import (
+    TaskBranchSource,
+    TurnState,
+    WorkItem,
+    WorkItemState,
+)
 
 
 SESSION = "123e4567-e89b-12d3-a456-426614174000"
@@ -61,7 +66,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
                 legacy_runs = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
-            self.assertEqual([(1,), (2,)], versions)
+            self.assertEqual([(1,), (2,), (3,)], versions)
             self.assertEqual(0, legacy_runs)
 
     def test_additive_migration_persists_one_issue_identity_and_bindings(self) -> None:
@@ -127,7 +132,30 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 versions = connection.execute(
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
-            self.assertEqual([(1,), (2,)], versions)
+            self.assertEqual([(1,), (2,), (3,)], versions)
+
+    def test_persists_a_verified_migrated_task_branch_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "state.db"
+            item = WorkItem.from_existing_branch_binding(
+                repository="owner/repo",
+                issue_number=7,
+                issue_node_id="I_kwDOFixture7",
+                base_branch="main",
+                base_sha="a" * 40,
+                task_branch="codex/issue-7-8e3775879000",
+                at="2026-01-07T00:00:00.000000Z",
+            )
+            with StateStore(path) as store:
+                store.migrate()
+                store.create_work_item(item)
+            with StateStore(path, read_only=True) as reopened:
+                loaded = reopened.get_work_item(item.work_item_id)
+
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(TaskBranchSource.MIGRATED, loaded.task_branch_source)
+            self.assertEqual(item.task_branch, loaded.task_branch)
 
     def test_database_enforces_one_active_turn_globally_and_orders_followups(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
