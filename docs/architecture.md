@@ -171,6 +171,13 @@ an Issue claimed without a recoverable base. The intended transfer is:
 7. The Publisher pushes that exact SHA to the already-bound task branch.
 8. The Dispatcher creates or updates the one Draft PR and Issue metadata.
 
+For a new WorkItem, the mirror updater fetches only
+`refs/heads/<configured-base>:refs/codex-dispatcher/base` from the GitHub URL derived from the
+configured repository slug. It stores no remote, tags, or credentials. Git system/global config,
+credential helpers, hooks, submodules, automatic maintenance, and interactive prompts are disabled;
+an optional read token exists only in the bounded Git child environment. Recovery of an existing
+PREPARING WorkItem never fetches a moving branch: it builds from the already-persisted base SHA.
+
 The Publisher does not review semantics, edit files, stage changes, create commits, run repository
 code, merge, or deploy. It never accepts a remote URL, arbitrary refspec, local path, Git option, or
 shell fragment from the runner or issue.

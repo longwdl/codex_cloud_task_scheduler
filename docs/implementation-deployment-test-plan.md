@@ -522,7 +522,8 @@ repository，使用固定 Git 配置执行 `bundle verify`、`fsck`、anchor anc
 文本、大小和凭据检查；不执行 checkout、hook、filter、textconv、submodule 或仓库代码。
 
 状态：source/result bundle、Runner workspace 和 Control Host quarantine 的本地 Git fixture 已
-完成；未访问 GitHub。
+完成；固定 GitHub URL/base ref 的可信 mirror refresher 已通过 mocked command boundary 验证，
+但尚未执行 live GitHub fetch。
 
 ### Phase C：Linux SSH Runner Fixture
 
@@ -674,6 +675,9 @@ git diff --check
 | AC-036 | START 回执丢失 | 下一轮只发送 STATUS；START/RESUME 调用数不增加 |
 | AC-037 | 终态 label 回写丢失 | 新 claim 前将现有 dispatching/running Issue 恢复为 SQLite 终态 |
 | AC-038 | checkpoint 等待 Publisher | Turn 保持 checkpointing，重复 sweep 不再启动 Codex |
+| AC-039 | mirror 远端/引用注入 | URL 只能从配置 slug 派生，只 fetch 配置 base 到固定内部 ref |
+| AC-040 | mirror 凭据隔离 | token 不进入 argv、持久 Git config、异常或命令输出；只注入受控 Git 子进程环境 |
+| AC-041 | PREPARE 恢复时主干已前进 | 不 fetch 当前 base，exact bundle 仍使用持久化旧 base SHA |
 
 ### 12.3 Live Fixture 顺序
 

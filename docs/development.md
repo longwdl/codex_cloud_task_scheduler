@@ -48,18 +48,21 @@ The environment-independent core now additionally contains:
   by each Turn, without persisting Prompt content;
 - a recovery-first, single-process Control Host sweep that prepares a source bundle before claiming a
   new Issue, freezes a stable post-claim snapshot, starts or resumes exactly one Turn, and stops at a
-  Publisher checkpoint.
+  Publisher checkpoint;
+- a protected GitHub mirror refresher that fetches one configured base branch into a fixed internal
+  ref, keeps credentials out of argv and persistent Git config, and composes with the exact-source
+  bundle builder.
 
 The fixed OpenSSH argv/byte-stream adapter is covered by isolated unit tests, and the installed
 Runner protocol has also completed the disposable SSH/real-Codex fixture recorded in
-`docs/live-test-evidence.md`. The offline Control Host sweep is now covered through injected fakes.
-The next phase is trusted-mirror refresh and runtime wiring for live GitHub claim/reconciliation,
-followed by explicit Publisher/Slack delivery. The Runner must not receive GitHub write or production
-credentials.
+`docs/live-test-evidence.md`. The offline Control Host sweep is now covered through injected fakes,
+and the trusted-mirror command boundary is covered without network access. The next phase is runtime
+wiring for live GitHub claim/reconciliation, followed by explicit Publisher/Slack delivery. The
+Runner must not receive GitHub write or production credentials.
 
 Explicitly deferred:
 
-- an unattended Control Host scheduling entry point and concrete trusted-mirror refresh provider;
+- an unattended Control Host scheduling entry point;
 - live GitHub claim/reconciliation in the SSH workflow;
 - live GitHub Publisher writes and Draft PR creation;
 - Slack API calls;
