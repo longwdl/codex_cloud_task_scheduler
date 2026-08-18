@@ -69,6 +69,15 @@ def _build_parser() -> argparse.ArgumentParser:
     ssh_run_once.add_argument(
         "--json", action="store_true", help="Emit machine-readable output."
     )
+
+    ssh_preflight = subparsers.add_parser(
+        "ssh-preflight",
+        help="Read GitHub and a temporary state snapshot without external writes.",
+    )
+    ssh_preflight.add_argument("--config", required=True, type=Path)
+    ssh_preflight.add_argument(
+        "--json", action="store_true", help="Emit machine-readable output."
+    )
     return parser
 
 
@@ -297,6 +306,64 @@ def _ssh_run_once(config_path: Path) -> tuple[int, dict[str, object]]:
     }
 
 
+def _ssh_preflight(config_path: Path) -> tuple[int, dict[str, object]]:
+    token = _github_token()
+    if token is None:
+        return 1, {"ok": False, "error": "a recognized explicit GitHub token is required"}
+    try:
+        from codex_dispatcher.redaction import redact_text
+        from codex_dispatcher.ssh_preflight import SshPreflightStatus
+        from codex_dispatcher.ssh_runtime import (
+            load_protected_ssh_config,
+            run_ssh_preflight,
+            validate_runtime_state_path,
+        )
+
+        config = load_protected_ssh_config(config_path)
+        validate_runtime_state_path(config.scheduler.database_path)
+        inspection = run_ssh_preflight(config=config, github_token=token)
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        return 1, {
+            "ok": False,
+            "error": redact_text(str(exc), (token,)),
+        }
+
+    plan = inspection.plan
+    task = plan.task
+    work_item = plan.work_item
+    ok = plan.status is not SshPreflightStatus.BLOCKED
+    return (0 if ok else 1), {
+        "ok": ok,
+        "ssh_preflight": True,
+        "external_writes": False,
+        "authorizes_apply": False,
+        "status": plan.status.value,
+        "recovery_action": plan.recovery_action.value,
+        "repository": None if task is None else task.repository,
+        "issue_number": None if task is None else task.issue_number,
+        "work_item_id": None if work_item is None else work_item.work_item_id,
+        "reason": plan.reason,
+        "database_preexisting": inspection.database_preexisting,
+        "rejected": [
+            {
+                "repository": rejection.repository,
+                "issue_number": rejection.issue_number,
+                "code": rejection.code,
+            }
+            for rejection in plan.rejected
+        ],
+        "checks": [
+            {
+                "name": f"contract:{check.name}",
+                "ok": check.ok,
+                "detail": check.detail,
+                "required_now": True,
+            }
+            for check in inspection.checks
+        ],
+    }
+
+
 def _emit(payload: dict[str, object], as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
@@ -320,6 +387,12 @@ def _emit(payload: dict[str, object], as_json: bool) -> None:
         if payload.get("repository") is not None:
             print(f"repository: {payload.get('repository')}")
             print(f"issue_number: {payload.get('issue_number')}")
+    if payload.get("ssh_preflight") is True:
+        print(f"status: {payload.get('status')}")
+        print(f"recovery_action: {payload.get('recovery_action')}")
+        if payload.get("repository") is not None:
+            print(f"repository: {payload.get('repository')}")
+            print(f"issue_number: {payload.get('issue_number')}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -338,6 +411,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return code
     if args.command == "ssh-run-once":
         code, payload = _ssh_run_once(args.config)
+        _emit(payload, args.json)
+        return code
+    if args.command == "ssh-preflight":
+        code, payload = _ssh_preflight(args.config)
         _emit(payload, args.json)
         return code
     raise AssertionError(f"unhandled command: {args.command}")

@@ -579,6 +579,10 @@ Fixture 通过。该结果尚不代表 GitHub 调度、Publisher 或 Slack 端�
 的情况下恢复。唯一 Draft PR 已按稳定 task branch 查找、创建、读回并绑定 SQLite；Issue 固定
 状态评论成功后才允许写终态 label。PR 创建回执或评论回执丢失时，下一轮不会重启 Runner、
 重复 push 或创建第二个 PR。真实 GitHub 凭据合同以及这些写入仍待 live fixture。
+当前另有只读 `ssh-preflight`：先校验固定 Git/gh/OpenSSH 版本，在原 SQLite 的临时迁移快照上
+执行 recovery-first 规划，再通过 GitHub 只读接口选择至多一个 `exec:ssh-cli` Issue。它不创建
+或迁移原数据库、不连接 Runner、不 fetch/push、不 claim、不写评论/label，也不创建 PR。输出
+固定声明 `authorizes_apply=false`；它是不持有进程锁的瞬时快照，写入口仍须在锁内重新校验。
 
 ### Phase E：Slack 只读投影
 
@@ -723,23 +727,25 @@ git diff --check
 | AC-049 | Issue 状态评论回执丢失 | 保持 Issue 在 dispatching/running；按固定 marker 幂等补写后才更新终态 label |
 | AC-050 | Slack root 回执丢失 | Codex 尚未 START；以同一 key/payload 找回同一 root 并原子绑定，不创建第二个 thread |
 | AC-051 | Slack 终态回执丢失 | commit/PR 保持不变；只重试同一 Turn report，不重启 Codex、不重复 push/PR，成功后才写终态 label |
+| AC-052 | SSH live 只读预检 | 固定工具版本通过后，在临时 SQLite 快照上先报告恢复动作，否则只选择一个 `exec:ssh-cli` 候选；原 DB、Runner、Git refs、Issue 和 PR 均不改变，歧义状态非零退出 |
 
 ### 12.3 Live Fixture 顺序
 
-截至 2026-08-18，步骤 1-3 已通过；步骤 5 的 WorkItem/branch/directory/session 复用已通过
+截至 2026-08-18，步骤 1-3 已通过；步骤 6 的 WorkItem/branch/directory/session 复用已通过
 直连协议验收。该次 Issue 仍保持 `agent:paused + exec:cloud`，因此不代表 SSH 调度标签接线已
 完成。完整非敏感证据见 `docs/live-test-evidence.md`。
 
 1. SSH 只读连接与 host key 固定。
 2. 创建 Fixture WorkItem 目录和独立 repo。
 3. 首次 `codex exec --json` 获得 session ID。
-4. 在 Issue 添加维护者 `/codex-context` 并再次 ready。
-5. 证明使用同一个 Issue、branch、directory、session 和 Slack thread。
-6. Codex 创建本地 commit，Control Host 拉取 bundle。
-7. Publisher 将精确 SHA 推到任务分支并创建唯一 Draft PR。
-8. 重复所有对账命令，证明不新增 session、branch 或 PR。
-9. 中断 SSH、Dispatcher 和 Publisher 各一次，验证 fail-closed 恢复。
-10. 人工审核并合并后，Issue 进入 completed；后续变化必须新建 Issue。
+4. 运行 `ssh-preflight` 并保存非敏感 JSON；必须明确得到一个预期 Fixture 候选或已有恢复动作。
+5. 在 Issue 添加维护者 `/codex-context` 并再次 ready。
+6. 证明使用同一个 Issue、branch、directory、session 和 Slack thread。
+7. Codex 创建本地 commit，Control Host 拉取 bundle。
+8. Publisher 将精确 SHA 推到任务分支并创建唯一 Draft PR。
+9. 重复所有对账命令，证明不新增 session、branch 或 PR。
+10. 中断 SSH、Dispatcher 和 Publisher 各一次，验证 fail-closed 恢复。
+11. 人工审核并合并后，Issue 进入 completed；后续变化必须新建 Issue。
 
 ## 13. 主要风险与回滚
 

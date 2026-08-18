@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import os
 import stat
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from codex_dispatcher.config import Config, SshRuntimeConfig, load_config
-from codex_dispatcher.contract import run_control_host_contract_checks
+from codex_dispatcher.contract import ContractCheck, run_control_host_contract_checks
 from codex_dispatcher.control_sweep import ControlSweepResult, SshControlSweep
 from codex_dispatcher.dispatcher_lock import DispatcherProcessLock
 from codex_dispatcher.git_bundle_verifier import GitBundleQuarantineVerifier
@@ -15,6 +19,7 @@ from codex_dispatcher.git_publisher import GitTaskBranchPublisher
 from codex_dispatcher.github_delivery import GitHubDeliveryCoordinator
 from codex_dispatcher.source_bundle import GitSourceBundleBuilder
 from codex_dispatcher.ssh_dispatch_service import OfflineSshDispatchService
+from codex_dispatcher.ssh_preflight import SshPreflightPlan, build_ssh_preflight_plan
 from codex_dispatcher.ssh_runner_transport import SshRunnerTransport
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.trackers.github_cli import GitHubCliTracker
@@ -24,6 +29,15 @@ from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator
 
 class SshRuntimeError(RuntimeError):
     """Raised before a live sweep when the trusted runtime boundary is incomplete."""
+
+
+@dataclass(frozen=True, slots=True)
+class SshPreflightInspection:
+    """Auditable read-only evidence for one potential live SSH sweep."""
+
+    plan: SshPreflightPlan
+    checks: tuple[ContractCheck, ...]
+    database_preexisting: bool
 
 
 def load_protected_ssh_config(path: Path) -> Config:
@@ -190,6 +204,56 @@ def run_ssh_control_sweep(
         ssh_path=ssh_path,
     )
     return sweep.run_once()
+
+
+def run_ssh_preflight(
+    *,
+    config: Config,
+    github_token: str,
+) -> SshPreflightInspection:
+    """Inspect tools, GitHub state, and a migrated temporary SQLite snapshot."""
+    if not isinstance(config, Config):
+        raise TypeError("config must be a Config")
+    runtime = _require_runtime(config)
+    git_path = _protected_executable(runtime.git_path, "ssh_runtime.git_path")
+    gh_path = _protected_executable(runtime.gh_path, "ssh_runtime.gh_path")
+    ssh_path = _protected_executable(runtime.ssh_path, "ssh_runtime.ssh_path")
+    checks = run_control_host_contract_checks(
+        pins=config.tools,
+        git_path=git_path,
+        gh_path=gh_path,
+        ssh_path=ssh_path,
+    )
+    failed = tuple(check.name for check in checks if not check.ok)
+    if failed:
+        raise SshRuntimeError(
+            f"Control Host tool contract failed: {', '.join(failed)}"
+        )
+    tracker = GitHubCliTracker(gh_path=gh_path, token=github_token)
+    with _temporary_state_snapshot(config.scheduler.database_path) as snapshot:
+        store, database_preexisting = snapshot
+        plan = build_ssh_preflight_plan(config, store, tracker)
+    return SshPreflightInspection(plan, checks, database_preexisting)
+
+
+@contextmanager
+def _temporary_state_snapshot(
+    database_path: Path,
+) -> Iterator[tuple[StateStore, bool]]:
+    """Migrate a disposable snapshot without modifying the configured database."""
+    database_preexisting = database_path.is_file()
+    with tempfile.TemporaryDirectory(prefix="codex-dispatcher-preflight-") as root:
+        snapshot_path = Path(root) / "state.db"
+        if database_preexisting:
+            with StateStore(database_path, read_only=True) as source:
+                if source.integrity_check() != "ok":
+                    raise SshRuntimeError("state database integrity check failed")
+                source.backup(snapshot_path)
+        with StateStore(snapshot_path) as store:
+            store.migrate()
+            if store.integrity_check() != "ok":
+                raise SshRuntimeError("temporary state snapshot integrity check failed")
+            yield store, database_preexisting
 
 
 def _require_runtime(config: Config) -> SshRuntimeConfig:

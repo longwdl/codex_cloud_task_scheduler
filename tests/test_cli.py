@@ -14,6 +14,12 @@ from codex_dispatcher.cli import main, run_once_dry_run
 from codex_dispatcher.contract import ContractCheck
 from codex_dispatcher.control_sweep import ControlSweepResult, ControlSweepStatus
 from codex_dispatcher.domain import Run
+from codex_dispatcher.ssh_preflight import (
+    SshPreflightPlan,
+    SshPreflightStatus,
+)
+from codex_dispatcher.ssh_recovery import SshRecoveryAction
+from codex_dispatcher.ssh_runtime import SshPreflightInspection
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.testing.fakes import FakeTracker
 from tests.test_scheduler import make_config
@@ -152,6 +158,94 @@ class CliTests(unittest.TestCase):
         self.assertEqual(1, exit_code)
         self.assertIn("token", json.loads(stdout.getvalue())["error"])
         load.assert_not_called()
+
+    def test_ssh_preflight_is_read_only_and_needs_no_write_opt_in(self) -> None:
+        token = "github_pat_ssh_preflight_fixture"
+        config = make_config(global_max_active=1)
+        inspection = SshPreflightInspection(
+            SshPreflightPlan(
+                status=SshPreflightStatus.IDLE,
+                recovery_action=SshRecoveryAction.IDLE,
+            ),
+            (ContractCheck("git", True, "2.55.0"),),
+            False,
+        )
+        stdout = io.StringIO()
+        with (
+            patch.dict("os.environ", {"GITHUB_TOKEN": token}, clear=True),
+            patch(
+                "codex_dispatcher.ssh_runtime.load_protected_ssh_config",
+                return_value=config,
+            ),
+            patch("codex_dispatcher.ssh_runtime.validate_runtime_state_path"),
+            patch(
+                "codex_dispatcher.ssh_runtime.run_ssh_preflight",
+                return_value=inspection,
+            ) as run_preflight,
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = main(
+                ["ssh-preflight", "--config", "config.toml", "--json"]
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(0, exit_code)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["external_writes"])
+        self.assertFalse(payload["authorizes_apply"])
+        self.assertEqual("idle", payload["status"])
+        self.assertNotIn(token, stdout.getvalue())
+        self.assertEqual(token, run_preflight.call_args.kwargs["github_token"])
+
+    def test_ssh_preflight_blocks_before_config_without_token(self) -> None:
+        stdout = io.StringIO()
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch("codex_dispatcher.ssh_runtime.load_protected_ssh_config") as load,
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = main(
+                ["ssh-preflight", "--config", "config.toml", "--json"]
+            )
+
+        self.assertEqual(1, exit_code)
+        self.assertIn("token", json.loads(stdout.getvalue())["error"])
+        load.assert_not_called()
+
+    def test_ssh_preflight_blocked_plan_exits_nonzero(self) -> None:
+        token = "github_pat_ssh_preflight_fixture"
+        config = make_config(global_max_active=1)
+        inspection = SshPreflightInspection(
+            SshPreflightPlan(
+                status=SshPreflightStatus.BLOCKED,
+                recovery_action=SshRecoveryAction.BLOCK,
+                reason="multiple_remote_claims",
+            ),
+            (ContractCheck("git", True, "2.55.0"),),
+            True,
+        )
+        stdout = io.StringIO()
+        with (
+            patch.dict("os.environ", {"GH_TOKEN": token}, clear=True),
+            patch(
+                "codex_dispatcher.ssh_runtime.load_protected_ssh_config",
+                return_value=config,
+            ),
+            patch("codex_dispatcher.ssh_runtime.validate_runtime_state_path"),
+            patch(
+                "codex_dispatcher.ssh_runtime.run_ssh_preflight",
+                return_value=inspection,
+            ),
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = main(
+                ["ssh-preflight", "--config", "config.toml", "--json"]
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(1, exit_code)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("multiple_remote_claims", payload["reason"])
 
     def test_ssh_run_once_migrates_state_and_redacts_failures(self) -> None:
         token = "github_pat_ssh_runtime_fixture"

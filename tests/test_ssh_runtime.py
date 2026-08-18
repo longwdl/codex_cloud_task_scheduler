@@ -19,9 +19,12 @@ from codex_dispatcher.ssh_runtime import (
     build_ssh_control_sweep,
     load_protected_ssh_config,
     run_ssh_control_sweep,
+    run_ssh_preflight,
     validate_runtime_state_path,
 )
+from codex_dispatcher.ssh_preflight import SshPreflightStatus
 from codex_dispatcher.state_store import StateStore
+from codex_dispatcher.testing.fakes import FakeTracker
 from tests.test_config import SSH_RUNTIME, VALID
 from tests.test_scheduler import make_config
 
@@ -195,6 +198,92 @@ class SshRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result, observed)
         sweep.run_once.assert_called_once_with()
+
+    def test_preflight_uses_temporary_snapshot_and_only_tracker_reads(self) -> None:
+        tracker = FakeTracker()
+        database_bytes = self.config.scheduler.database_path.read_bytes()
+        checks = (
+            ContractCheck("git", True, "2.55.0"),
+            ContractCheck("gh", True, "2.97.0"),
+            ContractCheck("ssh", True, "9.6"),
+        )
+        with (
+            patch(
+                "codex_dispatcher.ssh_runtime.run_control_host_contract_checks",
+                return_value=checks,
+            ),
+            patch(
+                "codex_dispatcher.ssh_runtime.GitHubCliTracker",
+                return_value=tracker,
+            ),
+        ):
+            inspection = run_ssh_preflight(
+                config=self.config,
+                github_token=TOKEN,
+            )
+
+        self.assertIs(SshPreflightStatus.IDLE, inspection.plan.status)
+        self.assertTrue(inspection.database_preexisting)
+        self.assertEqual(checks, inspection.checks)
+        self.assertEqual(database_bytes, self.config.scheduler.database_path.read_bytes())
+        self.assertFalse((self.root / "mirrors").exists())
+        self.assertFalse((self.root / "quarantine").exists())
+        self.assertFalse((self.root / "publisher-temporary").exists())
+        self.assertFalse((self.lock_dir / "dispatcher.lock").exists())
+        self.assertFalse(
+            any(
+                call.method
+                in {"claim", "set_state", "upsert_run_comment", "create_draft_pr"}
+                for call in tracker.calls
+            )
+        )
+
+    def test_preflight_does_not_create_a_missing_configured_database(self) -> None:
+        tracker = FakeTracker()
+        missing_path = self.root / "missing-state.db"
+        config = replace(
+            self.config,
+            scheduler=replace(
+                self.config.scheduler,
+                database_path=missing_path,
+            ),
+        )
+        with (
+            patch(
+                "codex_dispatcher.ssh_runtime.run_control_host_contract_checks",
+                return_value=(ContractCheck("git", True, "2.55.0"),),
+            ),
+            patch(
+                "codex_dispatcher.ssh_runtime.GitHubCliTracker",
+                return_value=tracker,
+            ),
+        ):
+            inspection = run_ssh_preflight(config=config, github_token=TOKEN)
+
+        self.assertFalse(inspection.database_preexisting)
+        self.assertFalse(missing_path.exists())
+
+    def test_preflight_tool_failure_happens_before_github_or_state_snapshot(self) -> None:
+        missing_path = self.root / "preflight-must-not-create.db"
+        config = replace(
+            self.config,
+            scheduler=replace(
+                self.config.scheduler,
+                database_path=missing_path,
+            ),
+        )
+        with (
+            patch(
+                "codex_dispatcher.ssh_runtime.run_control_host_contract_checks",
+                return_value=(ContractCheck("ssh", False, "version drift"),),
+            ),
+            patch("codex_dispatcher.ssh_runtime.GitHubCliTracker") as tracker,
+        ):
+            with self.assertRaisesRegex(SshRuntimeError, "ssh"):
+                run_ssh_preflight(config=config, github_token=TOKEN)
+
+        tracker.assert_not_called()
+        self.assertFalse(missing_path.exists())
 
 
 if __name__ == "__main__":

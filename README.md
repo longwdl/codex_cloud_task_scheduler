@@ -32,6 +32,8 @@ executor. The environment-independent implementation now includes:
   idempotent Publisher checkpoint completion;
 - strict same-repository Draft PR lookup/creation, branch read-back, SQLite binding, and ordered
   Issue status projection with lost-receipt recovery;
+- a read-only `ssh-preflight` that verifies pinned Control Host tools, plans recovery from a
+  migrated disposable SQLite snapshot, and selects only `exec:ssh-cli` Issues through GitHub reads;
 - a double-opt-in `ssh-run-once` entry point that assembles only fixed GitHub, mirror, and SSH ports;
 - a hashed Slack outbox, unique root/thread binding, redacted terminal reports, and offline
   lost-receipt recovery behind an idempotent outbound publisher port.
@@ -51,9 +53,12 @@ proven in a live fixture. Merge and production deployment remain absent. Existin
 adapter code is retained only during migration; Cloud writes remain disabled and are not part of the
 target architecture.
 
-Candidate planning is exposed through a dependency-injected Python entry point and a read-only
-GitHub CLI dry-run command. The command performs tracker reads but does not claim issues, mutate
-labels, create branches, invoke a Runner, or publish commits.
+Current SSH candidate and recovery planning is exposed through `ssh-preflight`. It checks Git, gh,
+and OpenSSH versions, reads GitHub, and migrates only a temporary copy of SQLite. It does not alter
+the configured database, claim Issues, mutate labels, fetch or push Git, invoke a Runner, or create a
+pull request. Its result is a point-in-time snapshot and never authorizes a write; `ssh-run-once`
+revalidates state while holding the Dispatcher lock. The older `run-once --dry-run` remains
+Cloud-labelled migration code.
 
 ## Requirements
 
@@ -77,6 +82,14 @@ PYTHONPATH=src python3 -m codex_dispatcher doctor \
   --config config/dispatcher.example.toml --contract --json
 PYTHONPATH=src python3 -m codex_dispatcher run-once \
   --dry-run --config config/dispatcher.example.toml --json
+```
+
+With a recognized GitHub token already present in the process environment, inspect one protected
+live SSH configuration without enabling writes:
+
+```bash
+PYTHONPATH=src python3 -m codex_dispatcher ssh-preflight \
+  --config /absolute/path/dispatcher.toml --json
 ```
 
 The write-enabled SSH command is intentionally not part of routine offline verification. It requires

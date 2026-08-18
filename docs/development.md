@@ -62,6 +62,8 @@ The environment-independent core now additionally contains:
 - a provider-independent Slack coordinator that creates one root before Codex starts, binds its
   receipt atomically, projects the link to GitHub, and retries terminal reports without replaying the
   Runner or Publisher;
+- a read-only `ssh-preflight` that checks pinned local tools, plans recovery before new work, and
+  evaluates SSH-labelled candidates against a migrated temporary SQLite snapshot;
 - a double-opt-in `ssh-run-once` CLI whose Git/gh/OpenSSH version checks and local SQLite integrity check
   complete before the sweep can claim an Issue.
 
@@ -119,6 +121,20 @@ PYTHONPATH=src python3 -m codex_dispatcher doctor \
 The existing Cloud contract command is historical migration code. It must not be expanded or treated
 as the target executor contract.
 
+The SSH preflight uses real GitHub reads but has no write opt-in and never assembles the mirror,
+Publisher, or Runner transport:
+
+```bash
+PYTHONPATH=src python3 -m codex_dispatcher ssh-preflight \
+  --config /absolute/path/dispatcher.toml --json
+```
+
+It returns `ready_candidate`, `ready_recovery`, `idle`, or `blocked`. `blocked` exits nonzero. An
+existing configured database is copied with SQLite backup and migrated only in a disposable
+directory; a missing configured database is not created. The JSON always reports
+`authorizes_apply=false`: preflight does not hold the Dispatcher lock, and a later write-enabled
+sweep must re-read and revalidate state under that lock.
+
 ## Test conventions
 
 - Unit tests must not use the network.
@@ -126,6 +142,8 @@ as the target executor contract.
 - Time, UUIDs, paths, command results, and external responses are injected where they affect
   determinism.
 - Failure-path tests assert that no external write was attempted.
+- SSH preflight tests prove recovery-first ordering, SSH-only candidate selection, ambiguous-claim
+  blocking, and non-mutation of both existing and missing configured databases.
 - Control Host sweep tests use fake tracker/source/Runner/Publisher ports and exercise process-lock
   contention, claim loss, snapshot drift, interrupted PREPARE/START, ambiguous push, recorded
   publication recovery, Draft PR receipt loss, and Issue projection retry ordering.

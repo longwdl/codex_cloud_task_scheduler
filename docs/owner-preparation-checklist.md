@@ -42,6 +42,22 @@ Provide a dedicated `publisher_temporary_root`; it holds only short-lived verifi
 and must be Dispatcher-owned and non-group/world-writable. Do not share it with the Runner or expose
 it as an Issue-controlled path.
 
+Before requesting approval for a write-enabled sweep, run the SSH-specific read-only preflight with
+the recognized GitHub token already in the environment:
+
+```bash
+PYTHONPATH=src python3 -m codex_dispatcher ssh-preflight \
+  --config /absolute/path/dispatcher.toml --json
+```
+
+This command does not require `CODEX_DISPATCHER_ENABLE_SSH_WRITES`. It checks pinned Control Host
+tools, reads GitHub recovery/candidate state, and migrates only a disposable SQLite snapshot. It does
+not connect to the Runner or modify the configured database, repository refs, Issues, comments,
+labels, or pull requests. Preserve the non-sensitive JSON and verify the repository, Issue number,
+status, recovery action, and rejection codes before separately authorizing `ssh-run-once`. The
+preflight JSON always says `authorizes_apply=false`; it is a point-in-time snapshot, and the live
+sweep revalidates state while holding the Dispatcher lock.
+
 ### 2. Dedicated Linux Runner
 
 Prepare a rebuildable Linux host with:
