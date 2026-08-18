@@ -25,6 +25,12 @@ class TaskState(StrEnum):
     DISCARD = "discard"
 
 
+class PullRequestState(StrEnum):
+    OPEN = "open"
+    CLOSED = "closed"
+    MERGED = "merged"
+
+
 @dataclass(frozen=True, slots=True)
 class TrackerTask:
     """A reviewed tracker item eligible for dispatch or already being tracked."""
@@ -70,6 +76,9 @@ class PullRequest:
     branch_name: str
     title: str
     is_draft: bool
+    base_branch: str | None = None
+    state: PullRequestState = PullRequestState.OPEN
+    is_cross_repository: bool = False
 
 
 @dataclass(frozen=True, slots=True)

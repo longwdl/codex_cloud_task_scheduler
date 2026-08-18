@@ -6,12 +6,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from codex_dispatcher.command_runner import CommandResult
-from codex_dispatcher.trackers.base import TaskState
+from codex_dispatcher.trackers.base import (
+    DraftPullRequestRequest,
+    PullRequestState,
+    TaskState,
+)
 from codex_dispatcher.trackers.github_cli import (
-    GitHubCliReadOnlyError,
     GitHubCliTracker,
     GitHubCliTrackerError,
-    GitHubCliUnsupportedReadError,
 )
 
 
@@ -38,6 +40,25 @@ def issue(*, number: int = 12, labels: object | None = None) -> dict[str, object
 
 def label(name: str) -> dict[str, object]:
     return {"id": f"id-{name}", "name": name, "description": None, "color": "abcdef"}
+
+
+def pull_request(
+    *,
+    number: int = 7,
+    branch: str = "codex/issue-12-abcdef123456",
+    state: str = "OPEN",
+    cross_repository: bool = False,
+) -> dict[str, object]:
+    return {
+        "number": number,
+        "url": f"https://github.com/{REPOSITORY}/pull/{number}",
+        "headRefName": branch,
+        "baseRefName": "main",
+        "title": "Codex work for Issue #12",
+        "isDraft": True,
+        "state": state,
+        "isCrossRepository": cross_repository,
+    }
 
 
 class GitHubCliTrackerTests(unittest.TestCase):
@@ -350,14 +371,91 @@ class GitHubCliTrackerTests(unittest.TestCase):
                 )
         runner.assert_called_once()
 
-    def test_unsupported_draft_pr_and_optional_read_are_clear(self) -> None:
+    def test_finds_the_only_same_repository_pr_by_exact_branch(self) -> None:
+        branch = "codex/issue-12-abcdef123456"
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            return_value=result([pull_request(branch=branch)]),
+        ) as runner:
+            observed = GitHubCliTracker(gh_path=GH).find_pr_by_branch(
+                REPOSITORY,
+                branch,
+            )
+
+        assert observed is not None
+        self.assertEqual(7, observed.number)
+        self.assertEqual("main", observed.base_branch)
+        self.assertIs(PullRequestState.OPEN, observed.state)
+        argv = runner.call_args.args[0]
+        self.assertEqual((GH, "pr", "list"), argv[:3])
+        self.assertIn("all", argv)
+        self.assertEqual(branch, argv[argv.index("--head") + 1])
+
+    def test_ambiguous_or_cross_repository_pr_list_fails_closed(self) -> None:
+        branch = "codex/issue-12-abcdef123456"
+        for payload in (
+            [pull_request(branch=branch), pull_request(number=8, branch=branch)],
+            [pull_request(branch=branch, cross_repository=True)],
+        ):
+            with self.subTest(count=len(payload)):
+                with patch(
+                    "codex_dispatcher.trackers.github_cli.run_command",
+                    return_value=result(payload),
+                ):
+                    with self.assertRaises(GitHubCliTrackerError):
+                        GitHubCliTracker(gh_path=GH).find_pr_by_branch(
+                            REPOSITORY,
+                            branch,
+                        )
+
+    def test_creates_draft_pr_with_fixed_noninteractive_arguments(self) -> None:
+        branch = "codex/issue-12-abcdef123456"
+        request = DraftPullRequestRequest(
+            REPOSITORY,
+            branch,
+            "main",
+            "Codex work for Issue #12",
+            "Review and merge remain manual.",
+        )
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            return_value=CommandResult(
+                0,
+                "https://github.com/owner/repo/pull/7\n",
+                "",
+            ),
+        ) as runner:
+            created = GitHubCliTracker(
+                gh_path=GH,
+                token="github_pat_fixture_only",
+            ).create_draft_pr(request)
+
+        self.assertEqual(7, created.number)
+        argv = runner.call_args.args[0]
+        self.assertEqual((GH, "pr", "create"), argv[:3])
+        self.assertEqual(branch, argv[argv.index("--head") + 1])
+        self.assertIn("--draft", argv)
+        self.assertIn("--no-maintainer-edit", argv)
+        self.assertNotIn("--fill", argv)
+        self.assertEqual(
+            {"GH_PROMPT_DISABLED": "1", "GH_TOKEN": "github_pat_fixture_only"},
+            runner.call_args.kwargs["env"],
+        )
+
+    def test_draft_pr_creation_rejects_protected_head_before_write(self) -> None:
         tracker = GitHubCliTracker(gh_path=GH)
         with patch("codex_dispatcher.trackers.github_cli.run_command") as runner:
-            with self.assertRaises(GitHubCliReadOnlyError):
-                tracker.create_draft_pr(None)  # type: ignore[arg-type]
+            with self.assertRaises(ValueError):
+                tracker.create_draft_pr(
+                    DraftPullRequestRequest(
+                        REPOSITORY,
+                        "main",
+                        "main",
+                        "Unsafe",
+                        "Unsafe",
+                    )
+                )
         runner.assert_not_called()
-        with self.assertRaises(GitHubCliUnsupportedReadError):
-            tracker.find_pr_by_branch(REPOSITORY, "branch")
 
 
 if __name__ == "__main__":

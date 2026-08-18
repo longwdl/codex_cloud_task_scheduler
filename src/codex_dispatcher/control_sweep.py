@@ -8,6 +8,7 @@ from typing import Protocol
 
 from codex_dispatcher.config import Config, RepositoryConfig
 from codex_dispatcher.dispatcher_lock import DispatcherProcessLock
+from codex_dispatcher.github_delivery import GitHubDeliveryCoordinator
 from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_dispatch_service import (
     CheckpointPublicationInterrupted,
@@ -67,6 +68,7 @@ class SshControlSweep:
         source: SourceSnapshotProvider,
         process_lock: DispatcherProcessLock,
         publisher: TaskBranchPublisher | None = None,
+        delivery: GitHubDeliveryCoordinator | None = None,
         claimant: str = "codex-dispatcher",
         runner_root: str = "/srv/codex-runner/work-items",
     ) -> None:
@@ -86,6 +88,7 @@ class SshControlSweep:
         self._source = source
         self._lock = process_lock
         self._publisher = publisher
+        self._delivery = delivery
         self._claimant = claimant
         self._runner_root = runner_root
         self._repositories = {item.slug: item for item in config.repositories}
@@ -162,7 +165,21 @@ class SshControlSweep:
         if recovery.action is SshRecoveryAction.SYNC_TRACKER_STATE:
             assert recovery.task is not None
             assert recovery.desired_task_state is not None
-            updated = self._set_task_state(recovery.task, recovery.desired_task_state)
+            if self._delivery is not None and recovery.desired_task_state in {
+                TaskState.REVIEW,
+                TaskState.NEEDS_INPUT,
+                TaskState.BLOCKED,
+            }:
+                assert recovery.work_item is not None
+                self._delivery.reconcile(
+                    recovery.task,
+                    work_item=recovery.work_item,
+                    desired_task_state=recovery.desired_task_state,
+                )
+            updated = self._set_task_state(
+                recovery.task,
+                recovery.desired_task_state,
+            )
             return _task_result(
                 ControlSweepStatus.STATE_SYNCHRONIZED,
                 updated,
@@ -325,6 +342,16 @@ class SshControlSweep:
                 reason="turn_state_requires_manual_recovery",
             )
         status, desired_state = outcome
+        if self._delivery is not None and status in {
+            ControlSweepStatus.REVIEW,
+            ControlSweepStatus.NEEDS_INPUT,
+            ControlSweepStatus.BLOCKED,
+        }:
+            self._delivery.reconcile(
+                task,
+                work_item=progress.work_item,
+                desired_task_state=desired_state,
+            )
         updated = self._set_task_state(task, desired_state)
         return _task_result(
             status,

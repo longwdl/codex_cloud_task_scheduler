@@ -178,13 +178,18 @@ an Issue claimed without a recoverable base. The intended transfer is:
 6. The Publisher verifies bundle integrity, ancestry, exact head SHA, task branch, path policy,
    secret policy, size limits, and fast-forward behavior.
 7. The Publisher pushes that exact SHA to the already-bound task branch.
-8. The Dispatcher creates or updates the one Draft PR and Issue metadata.
+8. The Dispatcher finds or creates the one same-repository Draft PR by exact task branch, reads it
+   back, binds its number in SQLite, and then upserts the fixed Issue status metadata.
 
 The Issue allowlist used in step 6 is stored with the Turn before Codex starts. Publication recovery
 never reparses a later Issue body to widen that frozen policy. An ambiguous push remains
 `checkpointing` and retries by remote read-back without restarting Codex. If the verified remote SHA
 was already stored but the process stopped before the Turn became `published`, the durable SHA is
 sufficient to finish the recorded result without exporting or pushing again.
+If Draft PR creation succeeds but its response is lost, the next sweep finds the PR by the stable
+task branch and binds it instead of creating another. The terminal Issue label is written only after
+the PR binding and idempotent status comment succeed; a delivery interruption therefore remains a
+recoverable dispatching/running Issue and cannot trigger a new Turn.
 Migration gives historical Turns an empty frozen policy. A pre-migration Turn that is still waiting
 at a checkpoint is therefore rejected rather than inferring permissions from the current Issue.
 

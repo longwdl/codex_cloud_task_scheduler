@@ -163,8 +163,18 @@ class FakeTracker(_ConfigurableFake):
 
     def create_draft_pr(self, request: DraftPullRequestRequest) -> PullRequest:
         self._record("create_draft_pr", request)
-        default = PullRequest(0, "", request.branch_name, request.title, True)
-        return self._outcome("create_draft_pr", default)  # type: ignore[return-value]
+        default = PullRequest(
+            1,
+            f"https://github.com/{request.repository}/pull/1",
+            request.branch_name,
+            request.title,
+            True,
+            request.base_branch,
+        )
+        outcome = self._outcome("create_draft_pr", default)
+        if isinstance(outcome, PullRequest):
+            self.pull_requests[(request.repository, request.branch_name)] = outcome
+        return outcome  # type: ignore[return-value]
 
 
 class FakeExecutor(_ConfigurableFake):

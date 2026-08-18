@@ -550,7 +550,9 @@ Fixture 通过。该结果尚不代表 GitHub 调度、Publisher 或 Slack 端�
 状态：Publisher 的 bundle import、精确 SHA、精确 `--force-with-lease`、远端 read-back、push
 回执丢失恢复和竞态拒绝已在本地 bare remote 完成，并已接入 recovery-first sweep。Turn 会在
 启动前持久化 Issue 路径策略；push 已记账但 Turn 未终态化的崩溃窗口也可在不重新 export/push
-的情况下恢复。真实 GitHub 凭据合同、Draft PR 与 Issue 写入仍待 live fixture。
+的情况下恢复。唯一 Draft PR 已按稳定 task branch 查找、创建、读回并绑定 SQLite；Issue 固定
+状态评论成功后才允许写终态 label。PR 创建回执或评论回执丢失时，下一轮不会重启 Runner、
+重复 push 或创建第二个 PR。真实 GitHub 凭据合同以及这些写入仍待 live fixture。
 
 ### Phase E：Slack 只读投影
 
@@ -686,6 +688,8 @@ git diff --check
 | AC-045 | runtime TOML/SQLite 路径替换 | 配置父目录及单链接普通文件、DB 目录及已有 DB/WAL/SHM 必须同用户拥有、非 symlink 且不可被 group/world 写 |
 | AC-046 | Issue 在 checkpoint 后扩大允许路径 | Publisher 只使用 Turn 启动前持久化的路径策略，拒绝调用方覆盖或重新解析新正文 |
 | AC-047 | push 记账后、Turn 终态前崩溃 | 依据已落库的 exact SHA 完成 Turn，不重新 EXPORT、不重复 push、不重启 Codex |
+| AC-048 | Draft PR 创建回执丢失 | 按持久化 task branch 找回并绑定同一 PR，不重启 Codex、不重复 push、不创建第二个 PR |
+| AC-049 | Issue 状态评论回执丢失 | 保持 Issue 在 dispatching/running；按固定 marker 幂等补写后才更新终态 label |
 
 ### 12.3 Live Fixture 顺序
 

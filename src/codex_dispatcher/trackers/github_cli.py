@@ -11,17 +11,19 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Never
+from typing import Any
 
 from codex_dispatcher.command_runner import CommandResult, run_command
 from codex_dispatcher.trackers.base import (
     ClaimResult,
     DraftPullRequestRequest,
     PullRequest,
+    PullRequestState,
     TaskState,
     TrackerComment,
     TrackerTask,
 )
+from codex_dispatcher.work_items import validate_branch
 
 
 class GitHubCliTrackerError(RuntimeError):
@@ -41,6 +43,9 @@ _RUN_COMMENT_PREFIX = "<!-- codex-dispatcher:"
 
 _STATUS_LABELS = {f"agent:{state.value}": state for state in TaskState}
 _ISSUE_FIELDS = "id,number,title,body,labels,createdAt,updatedAt,state"
+_PR_FIELDS = (
+    "number,url,headRefName,baseRefName,title,isDraft,state,isCrossRepository"
+)
 _REPOSITORY_RE = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,99})"
 )
@@ -154,9 +159,35 @@ class GitHubCliTracker:
         return _parse_comments(pages)
 
     def find_pr_by_branch(self, repository: str, branch_name: str) -> PullRequest | None:
-        raise GitHubCliUnsupportedReadError(
-            "find_pr_by_branch is not implemented by read-only adapter"
+        """Find the only same-repository PR ever created for a task branch."""
+        repository = _validate_repository(repository)
+        branch_name = validate_branch(branch_name)
+        pull_requests = self._json_command(
+            (
+                self._gh_path,
+                "pr",
+                "list",
+                "--repo",
+                repository,
+                "--state",
+                "all",
+                "--head",
+                branch_name,
+                "--limit",
+                "100",
+                "--json",
+                _PR_FIELDS,
+            )
         )
+        if not isinstance(pull_requests, list):
+            raise GitHubCliTrackerError("gh pull request list JSON must be an array")
+        parsed = tuple(
+            _parse_pull_request(value, repository, branch_name, f"pulls[{index}]")
+            for index, value in enumerate(pull_requests)
+        )
+        if len(parsed) > 1:
+            raise GitHubCliTrackerError("multiple pull requests use the task branch")
+        return parsed[0] if parsed else None
 
     def claim(
         self,
@@ -244,8 +275,51 @@ class GitHubCliTracker:
             )
         )
 
-    def create_draft_pr(self, request: DraftPullRequestRequest) -> Never:
-        raise GitHubCliReadOnlyError("draft pull request creation is not implemented")
+    def create_draft_pr(self, request: DraftPullRequestRequest) -> PullRequest:
+        """Create one Draft PR using only the fixed request fields and explicit head."""
+        if not isinstance(request, DraftPullRequestRequest):
+            raise TypeError("request must be a DraftPullRequestRequest")
+        repository = _validate_repository(request.repository)
+        branch_name = validate_branch(request.branch_name)
+        base_branch = validate_branch(request.base_branch)
+        title = _validate_bounded_text(request.title, "title", maximum=256)
+        body = _validate_bounded_text(request.body, "body", maximum=16_000)
+        if branch_name in {base_branch, "main", "master"}:
+            raise ValueError("Draft PR head must be a non-protected task branch")
+        output = self._text_command(
+            (
+                self._gh_path,
+                "pr",
+                "create",
+                "--repo",
+                repository,
+                "--head",
+                branch_name,
+                "--base",
+                base_branch,
+                "--title",
+                title,
+                "--body",
+                body,
+                "--draft",
+                "--no-maintainer-edit",
+            )
+        )
+        match = re.fullmatch(
+            rf"https://github\.com/{re.escape(repository)}/pull/([1-9][0-9]*)",
+            output.strip(),
+        )
+        if match is None:
+            raise GitHubCliTrackerError("gh returned an invalid Draft PR URL")
+        return PullRequest(
+            number=int(match.group(1)),
+            url=output.strip(),
+            branch_name=branch_name,
+            title=title,
+            is_draft=True,
+            base_branch=base_branch,
+            state=PullRequestState.OPEN,
+        )
 
     def _replace_state_label(
         self,
@@ -322,6 +396,16 @@ class GitHubCliTracker:
         return None if latest is None else latest[1]
 
     def _json_command(self, argv: tuple[str, ...]) -> Any:
+        result = self._command(argv)
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise GitHubCliTrackerError("gh returned malformed JSON") from exc
+
+    def _text_command(self, argv: tuple[str, ...]) -> str:
+        return self._command(argv).stdout
+
+    def _command(self, argv: tuple[str, ...]) -> CommandResult:
         command_env = {"GH_PROMPT_DISABLED": "1"}
         secrets: tuple[str, ...] = ()
         if self._token is not None:
@@ -341,10 +425,7 @@ class GitHubCliTracker:
             or result.stderr_truncated
         ):
             raise GitHubCliTrackerError(_command_failure(result))
-        try:
-            return json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
-            raise GitHubCliTrackerError("gh returned malformed JSON") from exc
+        return result
 
 
 def _command_failure(result: CommandResult) -> str:
@@ -382,6 +463,13 @@ def _validate_text(value: str, field: str) -> str:
     return value
 
 
+def _validate_bounded_text(value: str, field: str, *, maximum: int) -> str:
+    value = _validate_text(value, field)
+    if len(value.encode("utf-8")) > maximum:
+        raise ValueError(f"{field} exceeds its safe size boundary")
+    return value
+
+
 def _validate_comment_marker(marker: str) -> str:
     marker = _validate_text(marker, "marker")
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}", marker) is None:
@@ -410,6 +498,60 @@ def _matching_comment_ids(value: Any, signature: str) -> tuple[int, ...]:
             if body.startswith(signature):
                 matches.append(comment_id)
     return tuple(matches)
+
+
+def _parse_pull_request(
+    value: Any,
+    repository: str,
+    branch_name: str,
+    path: str,
+) -> PullRequest:
+    if not isinstance(value, dict) or set(value) != {
+        "number",
+        "url",
+        "headRefName",
+        "baseRefName",
+        "title",
+        "isDraft",
+        "state",
+        "isCrossRepository",
+    }:
+        raise GitHubCliTrackerError(f"{path} has unexpected JSON fields")
+    number = value["number"]
+    url = value["url"]
+    head = value["headRefName"]
+    base = value["baseRefName"]
+    title = value["title"]
+    is_draft = value["isDraft"]
+    state = value["state"]
+    cross_repository = value["isCrossRepository"]
+    if (
+        type(number) is not int
+        or number <= 0
+        or url != f"https://github.com/{repository}/pull/{number}"
+        or head != branch_name
+        or not isinstance(base, str)
+        or not isinstance(title, str)
+        or type(is_draft) is not bool
+        or type(cross_repository) is not bool
+        or cross_repository
+    ):
+        raise GitHubCliTrackerError(f"{path} has invalid values")
+    try:
+        base = validate_branch(base)
+        parsed_state = PullRequestState(str(state).lower())
+    except (TypeError, ValueError) as exc:
+        raise GitHubCliTrackerError(f"{path} has invalid values") from exc
+    return PullRequest(
+        number,
+        url,
+        head,
+        title,
+        is_draft,
+        base,
+        parsed_state,
+        cross_repository,
+    )
 
 
 def _parse_issue(value: Any, repository: str, path: str) -> TrackerTask:

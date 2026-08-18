@@ -12,6 +12,7 @@ from codex_dispatcher.control_sweep import ControlSweepResult, SshControlSweep
 from codex_dispatcher.dispatcher_lock import DispatcherProcessLock
 from codex_dispatcher.git_bundle_verifier import GitBundleQuarantineVerifier
 from codex_dispatcher.git_publisher import GitTaskBranchPublisher
+from codex_dispatcher.github_delivery import GitHubDeliveryCoordinator
 from codex_dispatcher.source_bundle import GitSourceBundleBuilder
 from codex_dispatcher.ssh_dispatch_service import OfflineSshDispatchService
 from codex_dispatcher.ssh_runner_transport import SshRunnerTransport
@@ -148,6 +149,7 @@ def _assemble_ssh_control_sweep(
             temporary_root=runtime.publisher_temporary_root,
             github_token=github_token,
         ),
+        delivery=GitHubDeliveryCoordinator(store=store, tracker=tracker),
         runner_root=runtime.runner_root,
     )
 

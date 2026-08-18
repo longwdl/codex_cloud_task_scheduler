@@ -18,6 +18,7 @@ from codex_dispatcher.dispatcher_lock import (
     DispatcherProcessLock,
 )
 from codex_dispatcher.git_publisher import GitPublicationInterrupted
+from codex_dispatcher.github_delivery import GitHubDeliveryCoordinator
 from codex_dispatcher.publisher import VerifiedBundle
 from codex_dispatcher.runner_protocol import RunnerOperation, parse_agent_result
 from codex_dispatcher.source_bundle import SourceBundle
@@ -147,6 +148,37 @@ class _ChangingSnapshotTracker(FakeTracker):
             return super().get_task(repository, task_id)
 
 
+class _InterruptingDeliveryTracker(FakeTracker):
+    def __init__(
+        self,
+        *,
+        interrupt_create_once: bool = False,
+        interrupt_comment_once: bool = False,
+    ) -> None:
+        super().__init__()
+        self.interrupt_create_once = interrupt_create_once
+        self.interrupt_comment_once = interrupt_comment_once
+
+    def create_draft_pr(self, request):
+        pull_request = super().create_draft_pr(request)
+        if self.interrupt_create_once:
+            self.interrupt_create_once = False
+            raise RuntimeError("fixture lost Draft PR receipt")
+        return pull_request
+
+    def upsert_run_comment(
+        self,
+        repository: str,
+        task_id: str,
+        marker: str,
+        body: str,
+    ) -> None:
+        super().upsert_run_comment(repository, task_id, marker, body)
+        if self.interrupt_comment_once:
+            self.interrupt_comment_once = False
+            raise RuntimeError("fixture lost Issue comment receipt")
+
+
 class _RecordingPublisher:
     def __init__(self, *, interrupt_once: bool = False) -> None:
         self.calls: list[tuple[bytes, object, object]] = []
@@ -188,6 +220,7 @@ class SshControlSweepTests(unittest.TestCase):
         tracker: FakeTracker,
         source: _RecordingSource,
         publisher: _RecordingPublisher | None = None,
+        delivery: GitHubDeliveryCoordinator | None = None,
     ) -> SshControlSweep:
         return SshControlSweep(
             config=make_config(global_max_active=4),
@@ -197,6 +230,7 @@ class SshControlSweepTests(unittest.TestCase):
             source=source,
             process_lock=DispatcherProcessLock(self.lock_path),
             publisher=publisher,
+            delivery=delivery,
         )
 
     def _register_checkpoint(
@@ -445,9 +479,13 @@ class SshControlSweepTests(unittest.TestCase):
             ),
         )
         publisher = _RecordingPublisher()
+        delivery = GitHubDeliveryCoordinator(store=self.store, tracker=tracker)
 
         result = self._sweep(
-            tracker, _RecordingSource(), publisher=publisher
+            tracker,
+            _RecordingSource(),
+            publisher=publisher,
+            delivery=delivery,
         ).run_once(turn_id=TURN_ID)
 
         self.assertEqual(ControlSweepStatus.REVIEW, result.status)
@@ -462,6 +500,111 @@ class SshControlSweepTests(unittest.TestCase):
         item = self.store.get_work_item(work_item_id)
         assert item is not None
         self.assertEqual(head_sha, item.last_published_sha)
+        self.assertEqual(1, item.pr_number)
+        methods = [call.method for call in tracker.calls]
+        self.assertLess(
+            methods.index("create_draft_pr"),
+            methods.index("upsert_run_comment"),
+        )
+        review_write = next(
+            index
+            for index, call in enumerate(tracker.calls)
+            if call.method == "set_state" and call.args[-1] is TaskState.REVIEW
+        )
+        self.assertLess(methods.index("upsert_run_comment"), review_write)
+
+    def test_lost_draft_pr_receipt_is_recovered_without_reexecution(self) -> None:
+        tracker = _InterruptingDeliveryTracker(interrupt_create_once=True)
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        artifact = b"fixture-lost-pr-receipt"
+        head_sha = "b" * 40
+        self._register_checkpoint(artifact, head_sha)
+        work_item_id = self._expected_work_item_id(task)
+        self.transport.queue_turn(
+            work_item_id,
+            FakeTurnFixture(SESSION, head_sha, _completed_result(), artifact),
+        )
+        publisher = _RecordingPublisher()
+        delivery = GitHubDeliveryCoordinator(store=self.store, tracker=tracker)
+        sweep = self._sweep(
+            tracker,
+            _RecordingSource(),
+            publisher=publisher,
+            delivery=delivery,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "lost Draft PR receipt"):
+            sweep.run_once(turn_id=TURN_ID)
+
+        interrupted = self.store.get_work_item(work_item_id)
+        assert interrupted is not None
+        self.assertEqual(WorkItemState.REVIEW, interrupted.state)
+        self.assertEqual(head_sha, interrupted.last_published_sha)
+        self.assertIsNone(interrupted.pr_number)
+        self.assertEqual(TaskState.DISPATCHING, tracker.tasks[task.task_id].state)
+        runner_calls = tuple(self.transport.calls)
+
+        recovered = sweep.run_once()
+
+        self.assertEqual(ControlSweepStatus.STATE_SYNCHRONIZED, recovered.status)
+        self.assertEqual(TaskState.REVIEW, tracker.tasks[task.task_id].state)
+        self.assertEqual(runner_calls, tuple(self.transport.calls))
+        self.assertEqual(1, len(publisher.calls))
+        self.assertEqual(
+            1,
+            sum(call.method == "create_draft_pr" for call in tracker.calls),
+        )
+        persisted = self.store.get_work_item(work_item_id)
+        assert persisted is not None
+        self.assertEqual(1, persisted.pr_number)
+
+    def test_issue_state_waits_for_recoverable_comment_delivery(self) -> None:
+        tracker = _InterruptingDeliveryTracker(interrupt_comment_once=True)
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        artifact = b"fixture-lost-comment-receipt"
+        head_sha = "b" * 40
+        self._register_checkpoint(artifact, head_sha)
+        work_item_id = self._expected_work_item_id(task)
+        self.transport.queue_turn(
+            work_item_id,
+            FakeTurnFixture(SESSION, head_sha, _completed_result(), artifact),
+        )
+        publisher = _RecordingPublisher()
+        delivery = GitHubDeliveryCoordinator(store=self.store, tracker=tracker)
+        sweep = self._sweep(
+            tracker,
+            _RecordingSource(),
+            publisher=publisher,
+            delivery=delivery,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "lost Issue comment receipt"):
+            sweep.run_once(turn_id=TURN_ID)
+
+        interrupted = self.store.get_work_item(work_item_id)
+        assert interrupted is not None
+        self.assertEqual(1, interrupted.pr_number)
+        self.assertEqual(TaskState.DISPATCHING, tracker.tasks[task.task_id].state)
+        runner_calls = tuple(self.transport.calls)
+
+        recovered = sweep.run_once()
+
+        self.assertEqual(ControlSweepStatus.STATE_SYNCHRONIZED, recovered.status)
+        self.assertEqual(TaskState.REVIEW, tracker.tasks[task.task_id].state)
+        self.assertEqual(runner_calls, tuple(self.transport.calls))
+        self.assertEqual(1, len(publisher.calls))
+        self.assertEqual(
+            1,
+            sum(call.method == "create_draft_pr" for call in tracker.calls),
+        )
+        self.assertEqual(
+            2,
+            sum(call.method == "upsert_run_comment" for call in tracker.calls),
+        )
 
     def test_ambiguous_publish_retries_without_restarting_codex(self) -> None:
         tracker = FakeTracker()

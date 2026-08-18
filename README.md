@@ -30,6 +30,8 @@ executor. The environment-independent implementation now includes:
 - persistent Runner workspaces and idempotent first/resume Turn execution;
 - a recovery-first, process-locked Control Host sweep with stable Issue/comment snapshots and
   idempotent Publisher checkpoint completion;
+- strict same-repository Draft PR lookup/creation, branch read-back, SQLite binding, and ordered
+  Issue status projection with lost-receipt recovery;
 - a double-opt-in `ssh-run-once` entry point that assembles only fixed GitHub, mirror, and SSH ports;
 - outbound-only Slack projection models and offline integration tests.
 
@@ -39,11 +41,12 @@ created one persistent session, and resumed that exact session on the same branc
 the read-only task produced no diff or publication checkpoint. The first-phase Runner release is
 installed on `s3`, but remains user-owned because the Fixture account has no passwordless sudo.
 
-The live dependency assembly now includes exact-SHA task-branch publication, but the write-enabled
-entry point has not yet been exercised against the Fixture. The trusted-mirror fetch and Publisher
-push are therefore still offline-tested only. Slack delivery, automatic Draft PR creation, merge,
-and production deployment remain absent. Existing Codex Cloud adapter code is retained only during
-migration; Cloud writes remain disabled and are not part of the target architecture.
+The live dependency assembly now includes exact-SHA task-branch publication, unique Draft PR
+reconciliation, and ordered Issue comment/label delivery, but the write-enabled entry point has not
+yet been exercised against the Fixture. The trusted-mirror fetch, Publisher push, and GitHub writes
+are therefore still offline-tested only. Slack delivery, merge, and production deployment remain
+absent. Existing Codex Cloud adapter code is retained only during migration; Cloud writes remain
+disabled and are not part of the target architecture.
 
 Candidate planning is exposed through a dependency-injected Python entry point and a read-only
 GitHub CLI dry-run command. The command performs tracker reads but does not claim issues, mutate

@@ -56,22 +56,26 @@ The environment-independent core now additionally contains:
   bundle builder;
 - strict, secret-free SSH runtime configuration and a dependency assembly boundary for GitHub,
   mirror, quarantine, fixed SSH transport, process lock, and the single sweep;
+- a strict GitHub CLI Draft PR adapter and delivery coordinator that read back the exact task branch,
+  bind one PR in SQLite, upsert one fixed Issue status comment, and recover lost write receipts before
+  changing the terminal Issue label;
 - a double-opt-in `ssh-run-once` CLI whose Git/gh/OpenSSH version checks and local SQLite integrity check
   complete before the sweep can claim an Issue.
 
 The fixed OpenSSH argv/byte-stream adapter is covered by isolated unit tests, and the installed
 Runner protocol has also completed the disposable SSH/real-Codex fixture recorded in
 `docs/live-test-evidence.md`. The offline Control Host sweep and runtime assembly are covered through
-injected fakes, including Publisher lost-receipt and post-record crash recovery. The trusted-mirror
-command boundary and Publisher push are covered without network access. The next phase is a bounded
-live GitHub claim/Runner/Publisher fixture, followed by Draft PR and Slack delivery.
+injected fakes, including Publisher and Draft PR lost-receipt, Issue projection ordering, and
+post-record crash recovery. The trusted-mirror command boundary, Publisher push, Draft PR, and Issue
+writes are covered without network access. The next phase is a bounded live GitHub
+claim/Runner/Publisher/PR fixture, followed by Slack delivery.
 The Runner must not receive GitHub write or production credentials.
 
 Explicitly deferred:
 
 - systemd/timer activation of the one-sweep entry point;
 - live GitHub claim/reconciliation in the SSH workflow;
-- live GitHub Publisher verification and Draft PR creation;
+- live GitHub Publisher, Draft PR, and Issue projection verification;
 - Slack API calls;
 - systemd deployment;
 - Docker isolation on the Runner;
@@ -119,8 +123,8 @@ as the target executor contract.
   determinism.
 - Failure-path tests assert that no external write was attempted.
 - Control Host sweep tests use fake tracker/source/Runner/Publisher ports and exercise process-lock
-  contention, claim loss, snapshot drift, interrupted PREPARE/START, ambiguous push, and recorded
-  publication recovery.
+  contention, claim loss, snapshot drift, interrupted PREPARE/START, ambiguous push, recorded
+  publication recovery, Draft PR receipt loss, and Issue projection retry ordering.
 - Git tests use temporary local repositories and never a configured GitHub remote.
 - Runner tests operate on JSON/JSONL fixtures and temporary directories, not a real SSH daemon.
 - Publisher tests push only to temporary local bare repositories and never to GitHub.
