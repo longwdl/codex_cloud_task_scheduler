@@ -623,6 +623,7 @@ class StateStore:
         issue_revision: str,
         prompt_sha256: str,
         input_head_sha: str,
+        included_comment_ids: tuple[str, ...] = (),
         turn_id: str | None = None,
         created_at: str | None = None,
     ) -> Turn:
@@ -650,6 +651,7 @@ class StateStore:
                 issue_revision=issue_revision,
                 prompt_sha256=prompt_sha256,
                 input_head_sha=input_head_sha,
+                included_comment_ids=included_comment_ids,
                 at=now,
             )
             self._insert_turn(connection, turn)
@@ -675,6 +677,7 @@ class StateStore:
         issue_revision: str,
         prompt_sha256: str,
         input_head_sha: str,
+        included_comment_ids: tuple[str, ...] = (),
         expected_turn_number: int | None = None,
         turn_id: str | None = None,
         created_at: str | None = None,
@@ -709,6 +712,7 @@ class StateStore:
                 issue_revision=issue_revision,
                 prompt_sha256=prompt_sha256,
                 input_head_sha=input_head_sha,
+                included_comment_ids=included_comment_ids,
                 at=now,
             )
             self._insert_turn(connection, turn)
@@ -825,6 +829,7 @@ class StateStore:
                 error_code=error_code,
                 started_at=turn.started_at,
                 finished_at=turn.finished_at,
+                included_comment_ids=turn.included_comment_ids,
                 created_at=turn.created_at,
                 updated_at=now,
             )
@@ -1016,6 +1021,7 @@ class StateStore:
             "issue_revision",
             "prompt_sha256",
             "input_head_sha",
+            "included_comment_ids_json",
             "output_sha256",
             "output_head_sha",
             "result_status",
@@ -1027,7 +1033,11 @@ class StateStore:
             "updated_at",
         )
         values = tuple(
-            getattr(turn, field).value if field == "state" else getattr(turn, field)
+            turn.state.value
+            if field == "state"
+            else json.dumps(turn.included_comment_ids, separators=(",", ":"))
+            if field == "included_comment_ids_json"
+            else getattr(turn, field)
             for field in fields
         )
         connection.execute(
@@ -1112,4 +1122,14 @@ class StateStore:
     def _row_to_turn(row: sqlite3.Row) -> Turn:
         values = dict(row)
         values["state"] = TurnState(values["state"])
+        raw_comment_ids = values.pop("included_comment_ids_json", "[]")
+        try:
+            parsed_comment_ids = json.loads(raw_comment_ids)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("persisted Turn comment IDs are malformed") from exc
+        if not isinstance(parsed_comment_ids, list) or any(
+            not isinstance(item, str) for item in parsed_comment_ids
+        ):
+            raise ValueError("persisted Turn comment IDs are malformed")
+        values["included_comment_ids"] = tuple(parsed_comment_ids)
         return Turn(**values)

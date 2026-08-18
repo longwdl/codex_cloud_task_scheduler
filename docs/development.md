@@ -41,19 +41,25 @@ The environment-independent core now additionally contains:
 - immutable GitHub Issue node/revision snapshots and SSH-only candidate selection;
 - a provider-independent service joining WorkItem recovery, deterministic Turn prompts, and Runner
   invocation without GitHub/Slack writes;
-- an atomic Prompt Turn-number check and a protected non-blocking Control Host process lock.
+- an atomic Prompt Turn-number check and a protected non-blocking Control Host process lock;
 - read-only enumeration of dispatching/running Issues and a fail-closed recovery planner for orphan
-  claims, active Runner reconciliation, and pending publication.
+  claims, active Runner reconciliation, terminal label repair, and pending publication;
+- persisted Issue revisions, Prompt hashes, input HEADs, and the exact allowlisted comment IDs used
+  by each Turn, without persisting Prompt content;
+- a recovery-first, single-process Control Host sweep that prepares a source bundle before claiming a
+  new Issue, freezes a stable post-claim snapshot, starts or resumes exactly one Turn, and stops at a
+  Publisher checkpoint.
 
 The fixed OpenSSH argv/byte-stream adapter is covered by isolated unit tests, and the installed
 Runner protocol has also completed the disposable SSH/real-Codex fixture recorded in
-`docs/live-test-evidence.md`. The next phase is the Control Host sweep around the process lock:
-trusted mirror refresh, GitHub claim/reconciliation, source-bundle preparation, and explicit
-Publisher/Slack delivery. The Runner must not receive GitHub write or production credentials.
+`docs/live-test-evidence.md`. The offline Control Host sweep is now covered through injected fakes.
+The next phase is trusted-mirror refresh and runtime wiring for live GitHub claim/reconciliation,
+followed by explicit Publisher/Slack delivery. The Runner must not receive GitHub write or production
+credentials.
 
 Explicitly deferred:
 
-- an unattended Control Host scheduling entry point;
+- an unattended Control Host scheduling entry point and concrete trusted-mirror refresh provider;
 - live GitHub claim/reconciliation in the SSH workflow;
 - live GitHub Publisher writes and Draft PR creation;
 - Slack API calls;
@@ -102,6 +108,8 @@ as the target executor contract.
 - Time, UUIDs, paths, command results, and external responses are injected where they affect
   determinism.
 - Failure-path tests assert that no external write was attempted.
+- Control Host sweep tests use fake tracker/source/Runner ports and exercise process-lock contention,
+  claim loss, snapshot drift, interrupted PREPARE/START recovery, and publication checkpoints.
 - Git tests use temporary local repositories and never a configured GitHub remote.
 - Runner tests operate on JSON/JSONL fixtures and temporary directories, not a real SSH daemon.
 - Publisher tests produce a publication plan or rejection; they do not push.

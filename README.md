@@ -27,6 +27,7 @@ executor. The environment-independent implementation now includes:
 - fixed-lease task-branch publication with exact-SHA read-back recovery;
 - fixed OpenSSH framing and an absolute-path `codex-runner-v1` forced-command service;
 - persistent Runner workspaces and idempotent first/resume Turn execution;
+- a recovery-first, process-locked offline Control Host sweep with stable Issue/comment snapshots;
 - outbound-only Slack projection models and offline integration tests.
 
 The Runner path has now been exercised against the private Fixture through the real pinned SSH
@@ -35,9 +36,11 @@ created one persistent session, and resumed that exact session on the same branc
 the read-only task produced no diff or publication checkpoint. The first-phase Runner release is
 installed on `s3`, but remains user-owned because the Fixture account has no passwordless sudo.
 
-End-to-end SSH scheduler selection, Publisher push, Slack delivery, automatic draft PR creation,
-merge, and production deployment are still absent. Existing Codex Cloud adapter code is retained
-only during migration; Cloud writes remain disabled and are not part of the target architecture.
+The sweep currently stops at a verified local state or Publisher checkpoint and is tested only with
+injected tracker/source/Runner fakes. Live trusted-mirror refresh and GitHub scheduling wiring,
+Publisher push, Slack delivery, automatic draft PR creation, merge, and production deployment are
+still absent. Existing Codex Cloud adapter code is retained only during migration; Cloud writes
+remain disabled and are not part of the target architecture.
 
 Candidate planning is exposed through a dependency-injected Python entry point and a read-only
 GitHub CLI dry-run command. The command performs tracker reads but does not claim issues, mutate

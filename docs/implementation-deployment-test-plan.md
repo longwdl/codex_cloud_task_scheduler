@@ -178,7 +178,7 @@ Docker 不在当前离线逻辑和第一轮 SSH Fixture 的完成条件内。
 | `agent:ready` | 维护者确认可以开始或继续原 session |
 | `agent:dispatching` | 正在冻结输入并启动一个 Turn |
 | `agent:running` | 原 Codex session 正在执行 |
-| `agent:needs-input` | 原 session 暂停，等待 Issue 中补充信息 |
+| `agent:needs_input` | 原 session 暂停，等待 Issue 中补充信息 |
 | `agent:review` | Draft PR 等待人工审核，仍可恢复原 session |
 | `agent:blocked` | 外部状态歧义或安全校验失败 |
 | `agent:paused` | 人工暂停，不执行新 Turn |
@@ -288,6 +288,7 @@ CREATE TABLE turns (
   issue_revision TEXT NOT NULL,
   prompt_sha256 TEXT NOT NULL,
   input_head_sha TEXT NOT NULL,
+  included_comment_ids_json TEXT NOT NULL DEFAULT '[]',
   output_sha256 TEXT,
   output_head_sha TEXT,
   result_status TEXT,
@@ -471,13 +472,19 @@ Slack 中人工消息对系统行为没有任何影响。
 3. 对账上次 `starting/running/checkpointing` Turn；外部状态不明确则停止。
 4. 对账 Publisher push、Draft PR、Issue label 和 Slack 输出。
 5. 如果没有活动 Turn，按优先级、创建时间和 Issue number 选择一个 `agent:ready` Issue。
-6. 新 Issue 创建 WorkItem；既有 Issue 恢复原 WorkItem。
-7. 冻结 Issue revision、Prompt hash、input HEAD，创建下一个 Turn。
-8. 通过 SSH `start` 或 `resume` 原 session。
-9. 解析、脱敏并保存结构化结果。
-10. 若有安全且一致的 checkpoint，拉取 bundle 并调用 Publisher。
-11. 创建/更新唯一 Draft PR、Issue 和 Slack thread。
-12. 根据结构化结果进入 `needs_input`、`review` 或 `blocked`。
+6. 对从未持久化的新 Issue，先从可信 mirror 取得当前 base 并生成 source bundle；失败时不得
+   claim。既有 Issue 只使用持久化的 base 锚点。
+7. 通过维护者审批和当前标签的重新读取 claim 至 `agent:dispatching`；一轮最多 claim 一个。
+8. 新 Issue 创建 WorkItem 并 PREPARE；既有 Issue 恢复原 WorkItem、branch、directory 和
+   session。
+9. 先读取允许评论，再重新读取 Issue；只有 Issue identity、状态和 revision 稳定时才冻结
+   comment IDs、Prompt hash、input HEAD 和下一个 turn number。漂移时不启动 Turn，下一轮重试。
+10. 通过 SSH `start` 或 `resume` 原 session；SSH 回执不明确时只允许 `status` 对账，不重放
+    Prompt。
+11. 解析、脱敏并保存结构化结果。
+12. 若有安全且一致的 checkpoint，拉取 bundle 并调用 Publisher。
+13. 创建/更新唯一 Draft PR、Issue 和 Slack thread。
+14. 根据结构化结果进入 `needs_input`、`review` 或 `blocked`。
 
 同一个 Issue 即使多次从 `needs_input/review` 回到 `ready`，步骤 6 也只能解析到原 WorkItem。
 
@@ -496,7 +503,9 @@ Slack 中人工消息对系统行为没有任何影响。
 - Slack 出站消息模型和去重键；
 - 全部 Fake 和故障路径单测。
 
-状态：离线实现完成，尚未接真实外部服务。
+状态：离线实现完成，包括恢复优先的单次 Control Host sweep；该 sweep 使用注入端口和 fake
+覆盖 GitHub claim/state、source snapshot 与 SSH Runner，尚未暴露无人值守入口或接真实外部
+服务。
 
 ### Phase B：本地 Git bundle/quarantine
 
@@ -525,7 +534,8 @@ repository，使用固定 Git 配置执行 `bundle verify`、`fsck`、anchor anc
 - 第一阶段不增加 Docker 或 per-task OS 隔离。
 
 状态：forced-command 服务、严格配置、OpenSSH adapter、Codex argv/JSONL parser 和 fake Codex
-集成已经离线实现；两台 Linux、真实 SSH、Codex 登录与真实 session resume 仍待 live fixture。
+集成已经离线实现；真实 SSH、ChatGPT 登录、首次 session 与同一 session resume 已在 `s3`
+Fixture 通过。该结果尚不代表 GitHub 调度、Publisher 或 Slack 端到端接线完成。
 
 ### Phase D：Publisher + GitHub Fixture
 
@@ -657,6 +667,13 @@ git diff --check
 | AC-027 | 相同 Turn 重试 | 返回同一持久化结果，Codex 调用数和 commit 数不增加 |
 | AC-028 | Turn 请求冲突 | 相同 turn ID 的不同 Prompt/session/anchor 被拒绝，不执行 Codex |
 | AC-029 | Runner 输入残留 executing | STATUS 返回 unknown；Dispatcher 保持 reconcile 且不重放 Prompt |
+| AC-032 | 新 Issue source 失败 | claim 调用数为 0，SQLite 和 Runner 均无新 WorkItem |
+| AC-033 | claim 竞争失败 | 不创建 WorkItem、不调用 Runner，下一轮可重新选择 |
+| AC-034 | Issue/评论快照漂移 | 不创建 Turn、不发送 Prompt，保留 PREPARE 后的可恢复 WorkItem |
+| AC-035 | PREPARE 回执丢失 | 使用持久化 base SHA 重建 exact bundle 并幂等重试 PREPARE |
+| AC-036 | START 回执丢失 | 下一轮只发送 STATUS；START/RESUME 调用数不增加 |
+| AC-037 | 终态 label 回写丢失 | 新 claim 前将现有 dispatching/running Issue 恢复为 SQLite 终态 |
+| AC-038 | checkpoint 等待 Publisher | Turn 保持 checkpointing，重复 sweep 不再启动 Codex |
 
 ### 12.3 Live Fixture 顺序
 

@@ -165,6 +165,18 @@ class SshRecoveryTests(unittest.TestCase):
         plan = plan_ssh_recovery(self.config, self.store, self.tracker)
         self.assertEqual("multiple_remote_claims", plan.reason)
 
+    def test_lost_terminal_tracker_write_is_planned_for_idempotent_sync(self) -> None:
+        work_item = item()
+        work_item = work_item.transition_to(WorkItemState.BLOCKED)
+        self.store.create_work_item(work_item)
+        self.tracker.tasks["42"] = task_in(TaskState.DISPATCHING)
+
+        plan = plan_ssh_recovery(self.config, self.store, self.tracker)
+
+        self.assertEqual(SshRecoveryAction.SYNC_TRACKER_STATE, plan.action)
+        self.assertEqual(TaskState.BLOCKED, plan.desired_task_state)
+        self.assertEqual(work_item.work_item_id, plan.work_item.work_item_id)
+
 
 if __name__ == "__main__":
     unittest.main()

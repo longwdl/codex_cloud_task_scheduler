@@ -366,6 +366,7 @@ class Turn:
     error_code: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
+    included_comment_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.state, TurnState):
@@ -407,6 +408,14 @@ class Turn:
         for field, value in (("started_at", self.started_at), ("finished_at", self.finished_at)):
             if value is not None:
                 _bounded_text(value, field, maximum=64)
+        if (
+            not isinstance(self.included_comment_ids, tuple)
+            or len(self.included_comment_ids) > 1_000
+            or len(set(self.included_comment_ids)) != len(self.included_comment_ids)
+        ):
+            raise ValueError("included_comment_ids must be a bounded unique tuple")
+        for comment_id in self.included_comment_ids:
+            _bounded_text(comment_id, "included_comment_id", maximum=256)
 
     @classmethod
     def new(
@@ -417,6 +426,7 @@ class Turn:
         issue_revision: str,
         prompt_sha256: str,
         input_head_sha: str,
+        included_comment_ids: tuple[str, ...] = (),
         turn_id: str | None = None,
         at: str | None = None,
     ) -> "Turn":
@@ -429,6 +439,7 @@ class Turn:
             issue_revision=issue_revision,
             prompt_sha256=prompt_sha256,
             input_head_sha=input_head_sha,
+            included_comment_ids=included_comment_ids,
             created_at=now,
             updated_at=now,
         )

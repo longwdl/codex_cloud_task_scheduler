@@ -81,7 +81,7 @@ WorkItem
 
 Turn
   work_item_id, turn_number
-  issue_revision, prompt_sha256, input_head_sha
+  issue_revision, included_comment_ids, prompt_sha256, input_head_sha
   started_at, finished_at, status
   output_sha256, output_head_sha, result_status, result_summary, error_code
 ```
@@ -154,7 +154,9 @@ reported as `unknown`, never replayed.
 
 ## Source and publication flow
 
-The runner has no GitHub write credential. The intended transfer is:
+The runner has no GitHub write credential. For a never-seen Issue, the control host prepares the
+exact source artifact before attempting the GitHub claim, so a mirror or bundle failure cannot leave
+an Issue claimed without a recoverable base. The intended transfer is:
 
 1. The control host copies the exact recorded base commit from its trusted local mirror into an
    isolated, self-contained source bundle; it does not mutate the mirror.
@@ -178,6 +180,8 @@ shell fragment from the runner or issue.
 - One work item per repository and issue; no automatic second work item for the same issue.
 - One stable branch, runner directory, Codex session, Slack thread, and Draft PR per work item.
 - One active Codex turn globally.
+- Every sweep holds the process lock, performs recovery before selection, and claims at most one new
+  Issue.
 - A turn never starts before its issue snapshot, prompt hash, input HEAD, and turn number are stored.
 - A changed issue snapshot never receives a stale turn result automatically.
 - A missing or conflicting Codex session ID is blocked, not replaced.

@@ -291,6 +291,34 @@ class TurnOrchestrationTests(unittest.TestCase):
         self.assertEqual((), self.store.list_turns(item.work_item_id))
         self.assertEqual(WorkItemState.READY, self.store.get_work_item(item.work_item_id).state)
 
+    def test_turn_persists_only_included_context_ids_not_prompt_content(self) -> None:
+        item = work_item(47)
+        self.store.create_work_item(item)
+        self.service.prepare_work_item(
+            item.work_item_id, source_bundle=b"fixture-base-bundle"
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(
+                SESSION,
+                "a" * 40,
+                result("blocked", path="src/none.py", summary="Blocked safely"),
+            ),
+        )
+        content = "private context must not be persisted\n"
+        snapshot = PromptSnapshot(content, sha256(content.encode()).hexdigest(), ("IC_1",))
+
+        progress = self.service.run_turn(
+            item.work_item_id,
+            issue_revision="revision-context",
+            prompt=snapshot,
+            turn_id="turn_" + "7" * 32,
+        )
+
+        persisted = self.store.get_turn(progress.turn.turn_id)
+        self.assertEqual(("IC_1",), persisted.included_comment_ids)
+        self.assertNotIn(content.strip(), repr(persisted))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -124,6 +124,7 @@ class OfflineTurnOrchestrator:
             issue_revision=issue_revision,
             prompt_sha256=prompt.sha256,
             input_head_sha=input_head_sha,
+            included_comment_ids=prompt.included_comment_ids,
             expected_turn_number=expected_turn_number,
             turn_id=turn_id,
         )

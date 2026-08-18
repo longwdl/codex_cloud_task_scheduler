@@ -19,6 +19,7 @@ class SshRecoveryAction(StrEnum):
     RESUME_PREPARATION = "resume_preparation"
     START_CLAIMED_TURN = "start_claimed_turn"
     RECOVER_ORPHAN_CLAIM = "recover_orphan_claim"
+    SYNC_TRACKER_STATE = "sync_tracker_state"
     BLOCK = "block"
 
 
@@ -28,6 +29,7 @@ class SshRecoveryPlan:
     task: TrackerTask | None = None
     work_item: WorkItem | None = None
     turn: Turn | None = None
+    desired_task_state: TaskState | None = None
     reason: str | None = None
 
 
@@ -126,7 +128,28 @@ def plan_ssh_recovery(
         return _blocked("orphan_claim_executor_conflict", task=task)
     existing = store.get_work_item_by_issue(task.repository, task.issue_number)
     if existing is not None:
-        return _blocked("remote_claim_conflicts_with_settled_work_item", task=task, work_item=existing)
+        desired = {
+            WorkItemState.WAITING_INPUT: TaskState.NEEDS_INPUT,
+            WorkItemState.REVIEW: TaskState.REVIEW,
+            WorkItemState.BLOCKED: TaskState.BLOCKED,
+            WorkItemState.PAUSED: TaskState.PAUSED,
+            WorkItemState.COMPLETED: TaskState.COMPLETED,
+        }.get(existing.state)
+        error = _binding_error(task, existing, configured)
+        if error is not None:
+            return _blocked(error, task=task, work_item=existing)
+        if desired is None:
+            return _blocked(
+                "remote_claim_conflicts_with_unexpected_work_item",
+                task=task,
+                work_item=existing,
+            )
+        return SshRecoveryPlan(
+            SshRecoveryAction.SYNC_TRACKER_STATE,
+            task=task,
+            work_item=existing,
+            desired_task_state=desired,
+        )
     return SshRecoveryPlan(SshRecoveryAction.RECOVER_ORPHAN_CLAIM, task=task)
 
 
@@ -172,4 +195,10 @@ def _blocked(
     work_item: WorkItem | None = None,
     turn: Turn | None = None,
 ) -> SshRecoveryPlan:
-    return SshRecoveryPlan(SshRecoveryAction.BLOCK, task, work_item, turn, reason)
+    return SshRecoveryPlan(
+        SshRecoveryAction.BLOCK,
+        task=task,
+        work_item=work_item,
+        turn=turn,
+        reason=reason,
+    )

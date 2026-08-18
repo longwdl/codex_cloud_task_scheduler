@@ -1,0 +1,425 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from dataclasses import replace
+from hashlib import sha256
+from pathlib import Path
+
+from codex_dispatcher.control_sweep import (
+    ControlSweepStatus,
+    SourceSnapshotProvider,
+    SshControlSweep,
+)
+from codex_dispatcher.dispatcher_lock import (
+    DispatcherLockUnavailable,
+    DispatcherProcessLock,
+)
+from codex_dispatcher.runner_protocol import RunnerOperation, parse_agent_result
+from codex_dispatcher.source_bundle import SourceBundle
+from codex_dispatcher.ssh_dispatch_service import OfflineSshDispatchService
+from codex_dispatcher.state_store import StateStore
+from codex_dispatcher.testing.fake_runner import (
+    FakeBundleVerifier,
+    FakeSshRunnerTransport,
+    FakeTurnFixture,
+)
+from codex_dispatcher.testing.fakes import FakeTracker
+from codex_dispatcher.trackers.base import TaskState, TrackerComment, TrackerTask
+from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator
+from codex_dispatcher.work_items import TurnState, WorkItemState
+from tests.test_scheduler import make_config
+from tests.test_ssh_dispatch_planning import BASE_SHA, claimed_task
+
+
+SESSION = "123e4567-e89b-12d3-a456-426614174000"
+TURN_ID = "turn_" + "1" * 32
+
+
+def _bundle(base_sha: str = BASE_SHA) -> SourceBundle:
+    artifact = b"control-sweep-source"
+    return SourceBundle(
+        artifact,
+        base_sha,
+        sha256(artifact).hexdigest(),
+        len(artifact),
+    )
+
+
+def _blocked_result():
+    return parse_agent_result(
+        json.dumps(
+            {
+                "status": "blocked",
+                "summary": "Fixture stopped at a reviewed boundary",
+                "needs_input": [],
+                "tests": [{"name": "fixture", "status": "passed"}],
+                "changed_paths": [],
+                "next_step": "Record the bounded result",
+            }
+        )
+    )
+
+
+def _ready_task(issue_number: int = 42) -> TrackerTask:
+    return replace(
+        claimed_task(issue_number),
+        state=TaskState.READY,
+        labels=("agent:ready", "exec:ssh-cli", "priority:p1"),
+    )
+
+
+class _RecordingSource(SourceSnapshotProvider):
+    def __init__(self, events: list[str] | None = None) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+        self.events = events
+
+    def current(self, repository: str, base_branch: str) -> SourceBundle:
+        self.calls.append(("current", repository, base_branch))
+        if self.events is not None:
+            self.events.append("source.current")
+        return _bundle()
+
+    def exact(self, repository: str, base_sha: str) -> SourceBundle:
+        self.calls.append(("exact", repository, base_sha))
+        if self.events is not None:
+            self.events.append("source.exact")
+        return _bundle(base_sha)
+
+
+class _FailingSource(_RecordingSource):
+    def current(self, repository: str, base_branch: str) -> SourceBundle:
+        super().current(repository, base_branch)
+        raise RuntimeError("fixture source refresh failed")
+
+
+class _RecordingTracker(FakeTracker):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self.events = events
+
+    def claim(
+        self,
+        repository: str,
+        task_id: str,
+        claimant: str,
+        *,
+        approved_by: tuple[str, ...] | None = None,
+    ):
+        self.events.append("tracker.claim")
+        return super().claim(
+            repository,
+            task_id,
+            claimant,
+            approved_by=approved_by,
+        )
+
+
+class _ChangingSnapshotTracker(FakeTracker):
+    def __init__(self, snapshots: tuple[TrackerTask, ...]) -> None:
+        super().__init__()
+        self._snapshots = iter(snapshots)
+
+    def get_task(self, repository: str, task_id: str) -> TrackerTask | None:
+        self._record("get_task", repository, task_id)
+        try:
+            return next(self._snapshots)
+        except StopIteration:
+            return super().get_task(repository, task_id)
+
+
+class SshControlSweepTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name)
+        self.store = StateStore(root / "state.db")
+        self.store.migrate()
+        self.transport = FakeSshRunnerTransport()
+        self.dispatch = OfflineSshDispatchService(
+            config=make_config(global_max_active=4),
+            store=self.store,
+            orchestrator=OfflineTurnOrchestrator(
+                store=self.store,
+                transport=self.transport,
+                bundle_verifier=FakeBundleVerifier(),
+            ),
+        )
+        self.lock_path = root / "dispatcher.lock"
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.temp_dir.cleanup()
+
+    def _sweep(
+        self,
+        tracker: FakeTracker,
+        source: _RecordingSource,
+    ) -> SshControlSweep:
+        return SshControlSweep(
+            config=make_config(global_max_active=4),
+            store=self.store,
+            tracker=tracker,
+            dispatch=self.dispatch,
+            source=source,
+            process_lock=DispatcherProcessLock(self.lock_path),
+        )
+
+    def test_new_issue_bundles_before_claim_and_runs_one_turn(self) -> None:
+        events: list[str] = []
+        tracker = _RecordingTracker(events)
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        tracker.comments[task.task_id] = (
+            TrackerComment(
+                "IC_fixture",
+                "alice",
+                "/codex-context\nUse the reviewed fixture constraint",
+                "2026-08-13T00:30:00Z",
+                "2026-08-13T00:30:00Z",
+            ),
+        )
+        source = _RecordingSource(events)
+        work_item_id = self._expected_work_item_id(task)
+        self.transport.queue_turn(
+            work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, _blocked_result()),
+        )
+
+        result = self._sweep(tracker, source).run_once(turn_id=TURN_ID)
+
+        self.assertEqual(ControlSweepStatus.BLOCKED, result.status)
+        self.assertEqual(["source.current", "tracker.claim"], events)
+        self.assertEqual(TaskState.BLOCKED, tracker.tasks[task.task_id].state)
+        self.assertEqual(
+            [RunnerOperation.PREPARE, RunnerOperation.START],
+            [call.operation for call in self.transport.calls],
+        )
+        persisted = self.store.get_work_item_by_issue(task.repository, task.issue_number)
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual(WorkItemState.BLOCKED, persisted.state)
+        turns = self.store.list_turns(persisted.work_item_id)
+        self.assertEqual(("IC_fixture",), turns[0].included_comment_ids)
+
+    def test_source_failure_happens_before_claim_or_persistence(self) -> None:
+        tracker = FakeTracker()
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+
+        with self.assertRaisesRegex(RuntimeError, "source refresh failed"):
+            self._sweep(tracker, _FailingSource()).run_once(turn_id=TURN_ID)
+
+        self.assertFalse(any(call.method == "claim" for call in tracker.calls))
+        self.assertIsNone(
+            self.store.get_work_item_by_issue(task.repository, task.issue_number)
+        )
+        self.assertEqual([], self.transport.calls)
+
+    def test_lost_claim_does_not_persist_or_contact_runner(self) -> None:
+        tracker = FakeTracker()
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        source = _RecordingSource()
+
+        result = self._sweep(tracker, source).run_once(turn_id=TURN_ID)
+
+        self.assertEqual(ControlSweepStatus.CLAIM_NOT_ACQUIRED, result.status)
+        self.assertEqual([("current", "owner/repo", "main")], source.calls)
+        self.assertIsNone(
+            self.store.get_work_item_by_issue(task.repository, task.issue_number)
+        )
+        self.assertEqual([], self.transport.calls)
+
+    def test_completed_work_item_is_not_claimed_or_reactivated(self) -> None:
+        tracker = FakeTracker()
+        ready = _ready_task()
+        tracker.ready_tasks = (ready,)
+        tracker.tasks[ready.task_id] = ready
+        source = _RecordingSource()
+        item = self.dispatch.resolve_and_prepare(
+            claimed_task(),
+            base_sha=BASE_SHA,
+            source_bundle=_bundle(),
+        )
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.RUNNING)
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.REVIEW)
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.COMPLETED)
+        tracker.calls.clear()
+        self.transport.calls.clear()
+
+        result = self._sweep(tracker, source).run_once()
+
+        self.assertEqual(ControlSweepStatus.BLOCKED, result.status)
+        self.assertEqual("completed_work_item_cannot_be_reactivated", result.reason)
+        self.assertFalse(any(call.method == "claim" for call in tracker.calls))
+        self.assertEqual([], source.calls)
+        self.assertEqual([], self.transport.calls)
+
+    def test_interrupted_prepare_retries_exact_persisted_source(self) -> None:
+        tracker = FakeTracker()
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        source = _RecordingSource()
+        self.transport.interrupt_next(RunnerOperation.PREPARE)
+
+        first = self._sweep(tracker, source).run_once(turn_id=TURN_ID)
+
+        self.assertEqual(ControlSweepStatus.RETRY, first.status)
+        item = self.store.get_work_item_by_issue(task.repository, task.issue_number)
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertEqual(WorkItemState.PREPARING, item.state)
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, _blocked_result()),
+        )
+
+        second = self._sweep(tracker, source).run_once(turn_id=TURN_ID)
+
+        self.assertEqual(ControlSweepStatus.BLOCKED, second.status)
+        self.assertEqual(
+            [
+                ("current", "owner/repo", "main"),
+                ("exact", "owner/repo", BASE_SHA),
+            ],
+            source.calls,
+        )
+        self.assertEqual(
+            [
+                RunnerOperation.PREPARE,
+                RunnerOperation.PREPARE,
+                RunnerOperation.START,
+            ],
+            [call.operation for call in self.transport.calls],
+        )
+
+    def test_interrupted_start_is_reconciled_without_prompt_replay(self) -> None:
+        tracker = FakeTracker()
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        source = _RecordingSource()
+        work_item_id = self._expected_work_item_id(task)
+        self.transport.queue_turn(
+            work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, _blocked_result()),
+        )
+        self.transport.interrupt_next(RunnerOperation.START)
+
+        first = self._sweep(tracker, source).run_once(turn_id=TURN_ID)
+        second = self._sweep(tracker, source).run_once()
+
+        self.assertEqual(ControlSweepStatus.RUNNER_ACTIVE, first.status)
+        self.assertEqual(ControlSweepStatus.BLOCKED, second.status)
+        self.assertEqual(
+            [RunnerOperation.PREPARE, RunnerOperation.START, RunnerOperation.STATUS],
+            [call.operation for call in self.transport.calls],
+        )
+        self.assertEqual(TaskState.BLOCKED, tracker.tasks[task.task_id].state)
+
+    def test_changing_issue_snapshot_retries_without_starting_turn(self) -> None:
+        task = _ready_task()
+        claimed = replace(
+            task,
+            state=TaskState.DISPATCHING,
+            labels=("agent:dispatching", "exec:ssh-cli", "priority:p1"),
+        )
+        tracker = _ChangingSnapshotTracker(
+            (
+                replace(claimed, updated_at="2026-08-13T01:01:00Z"),
+                replace(claimed, updated_at="2026-08-13T01:02:00Z"),
+            )
+        )
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+
+        result = self._sweep(tracker, _RecordingSource()).run_once(turn_id=TURN_ID)
+
+        self.assertEqual(ControlSweepStatus.RETRY, result.status)
+        self.assertEqual("issue_snapshot_changed_during_freeze", result.reason)
+        self.assertIsNone(self.store.get_active_turn())
+        self.assertEqual(
+            [RunnerOperation.PREPARE],
+            [call.operation for call in self.transport.calls],
+        )
+
+    def test_checkpoint_waits_for_publisher_and_recovery_does_not_restart(self) -> None:
+        tracker = FakeTracker()
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        source = _RecordingSource()
+        work_item_id = self._expected_work_item_id(task)
+        self.transport.queue_turn(
+            work_item_id,
+            FakeTurnFixture(SESSION, "b" * 40, _blocked_result()),
+        )
+
+        first = self._sweep(tracker, source).run_once(turn_id=TURN_ID)
+        second = self._sweep(tracker, source).run_once()
+
+        self.assertEqual(ControlSweepStatus.AWAITING_PUBLICATION, first.status)
+        self.assertEqual(ControlSweepStatus.AWAITING_PUBLICATION, second.status)
+        active = self.store.get_active_turn()
+        self.assertIsNotNone(active)
+        assert active is not None
+        self.assertEqual(TurnState.CHECKPOINTING, active.state)
+        self.assertEqual(TaskState.RUNNING, tracker.tasks[task.task_id].state)
+        self.assertEqual(
+            [RunnerOperation.PREPARE, RunnerOperation.START],
+            [call.operation for call in self.transport.calls],
+        )
+
+    def test_lost_terminal_tracker_write_is_repaired_before_new_claim(self) -> None:
+        tracker = FakeTracker()
+        task = claimed_task()
+        tracker.tasks[task.task_id] = task
+        source = _RecordingSource()
+        item = self.dispatch.resolve_and_prepare(
+            task,
+            base_sha=BASE_SHA,
+            source_bundle=_bundle(),
+        )
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.RUNNING)
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.BLOCKED)
+        self.transport.calls.clear()
+
+        result = self._sweep(tracker, source).run_once()
+
+        self.assertEqual(ControlSweepStatus.STATE_SYNCHRONIZED, result.status)
+        self.assertEqual(TaskState.BLOCKED, tracker.tasks[task.task_id].state)
+        self.assertEqual([], source.calls)
+        self.assertEqual([], self.transport.calls)
+
+    def test_process_lock_prevents_overlapping_sweeps(self) -> None:
+        tracker = FakeTracker()
+        source = _RecordingSource()
+        owner = DispatcherProcessLock(self.lock_path)
+        owner.acquire()
+        try:
+            with self.assertRaises(DispatcherLockUnavailable):
+                self._sweep(tracker, source).run_once()
+        finally:
+            owner.release()
+
+        self.assertEqual([], tracker.calls)
+        self.assertEqual([], source.calls)
+
+    @staticmethod
+    def _expected_work_item_id(task: TrackerTask) -> str:
+        from codex_dispatcher.work_items import stable_work_item_identity
+
+        assert task.issue_node_id is not None
+        return stable_work_item_identity(
+            repository=task.repository,
+            issue_number=task.issue_number,
+            issue_node_id=task.issue_node_id,
+        ).work_item_id
+
+
+if __name__ == "__main__":
+    unittest.main()

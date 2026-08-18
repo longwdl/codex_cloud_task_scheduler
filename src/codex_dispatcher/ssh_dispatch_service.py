@@ -125,6 +125,10 @@ class OfflineSshDispatchService:
             turn_id=turn_id,
         )
 
+    def reconcile_turn(self, turn_id: str) -> TurnProgress:
+        """Reconcile one ambiguous active Turn without replaying its Prompt."""
+        return self._orchestrator.reconcile_turn(turn_id)
+
     def _repository(self, slug: str) -> RepositoryConfig:
         try:
             return self._repositories[slug]

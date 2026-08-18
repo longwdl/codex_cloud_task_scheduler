@@ -110,9 +110,29 @@ class FakeTracker(_ConfigurableFake):
     ) -> ClaimResult:
         self._record("claim", repository, task_id, claimant, approved_by)
         task = self.tasks.get(task_id)
-        matches = task is not None and task.repository == repository
-        default = ClaimResult(matches, task if matches else None)
-        return self._outcome("claim", default)  # type: ignore[return-value]
+        matches = (
+            task is not None
+            and task.repository == repository
+            and task.is_open
+            and task.state is TaskState.READY
+            and approved_by is not None
+            and task.ready_approved_by in approved_by
+        )
+        if matches:
+            assert task is not None
+            labels = tuple(
+                "agent:dispatching" if label == "agent:ready" else label
+                for label in task.labels
+            )
+            claimed = replace(task, state=TaskState.DISPATCHING, labels=labels)
+            default = ClaimResult(True, claimed)
+        else:
+            default = ClaimResult(False, task, "task is not open and approved ready")
+        outcome = self._outcome("claim", default)
+        if "claim" not in self._results and matches:
+            assert isinstance(outcome, ClaimResult) and outcome.task is not None
+            self.tasks[task_id] = outcome.task
+        return outcome  # type: ignore[return-value]
 
     def set_state(self, repository: str, task_id: str, state: TaskState) -> TrackerTask:
         self._record("set_state", repository, task_id, state)
@@ -120,7 +140,16 @@ class FakeTracker(_ConfigurableFake):
         if task is None or task.repository != repository:
             raise KeyError(task_id)
         default = replace(task, state=state)
-        return self._outcome("set_state", default)  # type: ignore[return-value]
+        labels = tuple(
+            f"agent:{state.value}" if label.startswith("agent:") else label
+            for label in task.labels
+        )
+        default = replace(default, labels=labels)
+        outcome = self._outcome("set_state", default)
+        if "set_state" not in self._results:
+            assert isinstance(outcome, TrackerTask)
+            self.tasks[task_id] = outcome
+        return outcome  # type: ignore[return-value]
 
     def upsert_run_comment(self, repository: str, task_id: str, marker: str, body: str) -> None:
         self._record("upsert_run_comment", repository, task_id, marker, body)
