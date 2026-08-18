@@ -73,16 +73,17 @@ Runner protocol has also completed the disposable SSH/real-Codex fixture recorde
 injected fakes, including Publisher and Draft PR lost-receipt, Issue projection ordering, and
 post-record crash recovery. A bounded live happy-path run has now exercised the real GitHub claim,
 trusted-mirror fetch, SSH Runner, Publisher push, unique Draft PR, Issue projection, and Fixture CI.
-It did not exercise live crash/lost-receipt recovery or a second write-enabled sweep. Slack
-root/result receipt loss and outbox recovery remain covered only through an idempotent fake
-publisher; proof of the real Slack publisher contract is the next external integration phase.
+An immediate second write-enabled sweep returned idle, with unchanged SQLite rows and GitHub state;
+it did not create a second Turn, session, push, PR, comment, or workflow run. Live
+crash/lost-receipt recovery remains unexercised. Slack root/result receipt loss and outbox recovery
+remain covered only through an idempotent fake publisher; proof of the real Slack publisher contract
+is the next external integration phase.
 The Runner must not receive GitHub write or production credentials.
 
 Explicitly deferred:
 
 - systemd/timer activation of the one-sweep entry point;
 - live failure injection for GitHub/Publisher lost-receipt reconciliation;
-- a repeated write-enabled sweep after a published checkpoint;
 - a live Slack HTTP publisher or Slack API calls;
 - systemd deployment;
 - Docker isolation on the Runner;

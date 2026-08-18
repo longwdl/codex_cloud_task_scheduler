@@ -33,6 +33,7 @@ The exact entry point required both `--apply` and
 `CODEX_DISPATCHER_ENABLE_SSH_WRITES=1`. It returned success for one Turn:
 
 - Turn: `turn_c4e2249059de4b139deff19867c68a27`, number `1`;
+- Codex session: `01a01583-2133-7a82-bd40-62278e57bd0d`;
 - Runner result: `finished/completed`;
 - checkpoint: `071ec769c63b8ab594865611cdc8af46ddd07b7f`;
 - resulting WorkItem state: `review`.
@@ -54,10 +55,32 @@ to the same WorkItem and contains exactly one finished Turn for this Issue.
 - A following read-only `ssh-preflight` returned `idle` with no candidate or recovery action.
 - No merge, deployment, release, main-branch update, Slack delivery, or second Codex Turn occurred.
 
+### Second write-enabled sweep
+
+After a new mode-`0600` online SQLite backup passed `integrity_check`, the same double-opt-in
+`ssh-run-once` command was executed again. It completed in 3.36 seconds with `status=idle` and null
+Issue, WorkItem, and Turn identifiers.
+
+Independent before/after reads proved:
+
+- SQLite remained at two WorkItems and four total Turns;
+- Issue `#2` retained the same `review` WorkItem row, PR binding, published SHA, session ID, and
+  `updated_at` value;
+- it retained exactly one finished Turn with the same ID, number, result, checkpoint, and
+  `updated_at` value;
+- Issue labels, comment count, and `updated_at` value did not change;
+- exactly one Draft PR remained, with the same `updated_at` value and head SHA;
+- task-branch and `main` refs did not move;
+- the Actions query still returned exactly the original successful workflow run;
+- a final read-only `ssh-preflight` again returned `idle`.
+
+This proves the completed happy-path is idle on an immediate repeated sweep. It does not prove the
+separate crash/lost-receipt recovery paths.
+
 The fine-grained PAT could list Actions runs but could not read check runs through either the
 GraphQL `statusCheckRollup` field or the REST Checks endpoint. CI success is therefore evidenced by
-the accessible Actions workflow run, not inferred from those denied check APIs. A second
-write-enabled sweep and live push/PR/comment lost-receipt injection remain outstanding.
+the accessible Actions workflow run, not inferred from those denied check APIs. Live
+push/PR/comment lost-receipt injection remains outstanding.
 
 ## SSH CLI Runner fixture — 2026-08-18
 

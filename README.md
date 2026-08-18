@@ -48,8 +48,9 @@ The write-enabled dependency assembly has now completed one bounded happy-path r
 Issue `#2`: it claimed one SSH-labelled Issue, created one persistent Codex session, published the
 exact checkpoint SHA to the deterministic task branch, opened one Draft PR, projected the Issue to
 `agent:review`, and passed the Fixture GitHub Actions workflow. Read-back confirmed that `main` did
-not move and a following read-only preflight was idle. Live crash/lost-receipt injection and a second
-write-enabled reconciliation sweep remain intentionally outstanding. The Slack coordination core is
+not move. A second write-enabled sweep returned `idle`; SQLite, Issue, PR, refs, and the single CI run
+remained unchanged, so it did not create another Turn, session, push, comment, PR, or workflow run.
+Live crash/lost-receipt injection remains intentionally outstanding. The Slack coordination core is
 wired only through injected ports; a real Slack HTTP publisher remains disabled until its
 provider-side deduplication behavior is proven in a live fixture. Merge and production deployment
 remain absent. Existing Codex Cloud adapter code is retained only during migration; Cloud writes

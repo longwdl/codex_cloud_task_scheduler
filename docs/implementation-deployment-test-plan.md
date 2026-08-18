@@ -585,8 +585,10 @@ Fixture 通过。该结果尚不代表 GitHub 调度、Publisher 或 Slack 端�
 Issue `#2` 绑定到一个 WorkItem、确定性分支和 Runner 目录；一个 Codex Turn 产生 checkpoint
 `071ec769c63b8ab594865611cdc8af46ddd07b7f`，Publisher 只更新该任务分支，创建唯一 Draft PR
 `#3`，固定评论和 `agent:review` 状态完成，Fixture Actions run `32155421239` 成功，`main` 仍为
-原 SHA。随后只读 preflight 返回 idle。尚未 live 注入 push/PR/comment 回执丢失，也未执行第二次
-write-enabled sweep；这些恢复性质继续由离线故障测试覆盖，不能从本次 happy-path 外推。
+原 SHA。随后第二次 write-enabled sweep 返回 idle；SQLite 的 WorkItem/Turn 行、Issue、唯一 PR、
+任务分支、`main` 及 Actions run 均保持不变，之后只读 preflight 仍返回 idle。尚未 live 注入
+push/PR/comment 回执丢失；这些恢复性质继续由离线故障测试覆盖，不能从本次正常路径和空闲重扫
+外推。
 当前另有只读 `ssh-preflight`：先校验固定 Git/gh/OpenSSH 版本，在原 SQLite 的临时迁移快照上
 执行 recovery-first 规划，再通过 GitHub 只读接口选择至多一个 `exec:ssh-cli` Issue。它不创建
 或迁移原数据库、不连接 Runner、不 fetch/push、不 claim、不写评论/label，也不创建 PR。输出
@@ -741,9 +743,8 @@ git diff --check
 
 截至 2026-08-18，步骤 1-4、7-8 已通过。步骤 6 的 WorkItem/branch/directory/session 复用先由
 直连协议验收；随后 Fixture Issue `#2` 又验证了 SSH 调度标签接线和一个完整 happy-path，但
-Slack 仍禁用，因此尚未证明同一 Slack thread。步骤 9 仅完成了只读对账和 idle preflight，尚未
-执行第二次 write-enabled sweep；步骤 5、10-11 仍待执行。完整非敏感证据见
-`docs/live-test-evidence.md`。
+Slack 仍禁用，因此尚未证明同一 Slack thread。步骤 9 已通过第二次 write-enabled sweep 和独立
+读回验证；步骤 5、10-11 仍待执行。完整非敏感证据见 `docs/live-test-evidence.md`。
 
 1. SSH 只读连接与 host key 固定。
 2. 创建 Fixture WorkItem 目录和独立 repo。
