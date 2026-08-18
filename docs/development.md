@@ -65,7 +65,10 @@ The environment-independent core now additionally contains:
 - a read-only `ssh-preflight` that checks pinned local tools, plans recovery before new work, and
   evaluates SSH-labelled candidates against a migrated temporary SQLite snapshot;
 - a double-opt-in `ssh-run-once` CLI whose Git/gh/OpenSSH version checks and local SQLite integrity check
-  complete before the sweep can claim an Issue.
+  complete before the sweep can claim an Issue;
+- an isolated `codex_dispatcher.fixture_fault_cli` source-tree entry that is hard-coded to the
+  private README-only Fixture and can discard exactly one successful Publisher, Draft PR, or Issue
+  comment receipt after an exact recovery-stage preflight and private SQLite backup.
 
 The fixed OpenSSH argv/byte-stream adapter is covered by isolated unit tests, and the installed
 Runner protocol has also completed the disposable SSH/real-Codex fixture recorded in

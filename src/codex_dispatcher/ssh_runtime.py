@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from codex_dispatcher.config import Config, SshRuntimeConfig, load_config
 from codex_dispatcher.contract import ContractCheck, run_control_host_contract_checks
@@ -25,6 +26,9 @@ from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.trackers.github_cli import GitHubCliTracker
 from codex_dispatcher.trusted_mirror import GitHubMirrorRefresher, TrustedMirrorSource
 from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator
+
+if TYPE_CHECKING:
+    from codex_dispatcher.fixture_faults import FixtureFaultInjection
 
 
 class SshRuntimeError(RuntimeError):
@@ -100,6 +104,61 @@ def build_ssh_control_sweep(
     )
 
 
+def build_ssh_fixture_fault_sweep(
+    *,
+    config: Config,
+    store: StateStore,
+    github_token: str,
+    injection: FixtureFaultInjection,
+) -> SshControlSweep:
+    """Assemble the hard-coded live Fixture fault path after exact tool checks."""
+    from codex_dispatcher.fixture_faults import (
+        FIXTURE_REPOSITORY,
+        FixtureFaultInjection,
+        FixtureFaultRejected,
+        validate_fixture_config,
+    )
+
+    if not isinstance(config, Config):
+        raise TypeError("config must be a Config")
+    if not isinstance(store, StateStore):
+        raise TypeError("store must be a StateStore")
+    if not isinstance(injection, FixtureFaultInjection):
+        raise TypeError("injection must be a FixtureFaultInjection")
+    try:
+        validate_fixture_config(config)
+    except FixtureFaultRejected as exc:
+        raise SshRuntimeError(str(exc)) from exc
+    if injection.repository != FIXTURE_REPOSITORY:
+        raise SshRuntimeError("Fixture fault injection repository conflicts with its contract")
+
+    runtime = _require_runtime(config)
+    git_path = _protected_executable(runtime.git_path, "ssh_runtime.git_path")
+    gh_path = _protected_executable(runtime.gh_path, "ssh_runtime.gh_path")
+    ssh_path = _protected_executable(runtime.ssh_path, "ssh_runtime.ssh_path")
+    checks = run_control_host_contract_checks(
+        pins=config.tools,
+        git_path=git_path,
+        gh_path=gh_path,
+        ssh_path=ssh_path,
+    )
+    failed = tuple(check.name for check in checks if not check.ok)
+    if failed:
+        raise SshRuntimeError(
+            f"Control Host tool contract failed: {', '.join(failed)}"
+        )
+    return _assemble_ssh_control_sweep(
+        config=config,
+        store=store,
+        github_token=github_token,
+        runtime=runtime,
+        git_path=git_path,
+        gh_path=gh_path,
+        ssh_path=ssh_path,
+        fixture_fault_injection=injection,
+    )
+
+
 def _assemble_ssh_control_sweep(
     *,
     config: Config,
@@ -109,6 +168,7 @@ def _assemble_ssh_control_sweep(
     git_path: Path,
     gh_path: Path,
     ssh_path: Path,
+    fixture_fault_injection: FixtureFaultInjection | None = None,
 ) -> SshControlSweep:
     """Assemble ports using the exact executable paths that were verified."""
 
@@ -150,6 +210,15 @@ def _assemble_ssh_control_sweep(
         store=store,
         orchestrator=orchestrator,
     )
+    publisher = GitTaskBranchPublisher(
+        git_path=git_path,
+        mirror_root=runtime.mirror_root,
+        temporary_root=runtime.publisher_temporary_root,
+        github_token=github_token,
+    )
+    if fixture_fault_injection is not None:
+        tracker = fixture_fault_injection.wrap_tracker(tracker)
+        publisher = fixture_fault_injection.wrap_publisher(publisher)
     return SshControlSweep(
         config=config,
         store=store,
@@ -157,12 +226,7 @@ def _assemble_ssh_control_sweep(
         dispatch=dispatch,
         source=source,
         process_lock=DispatcherProcessLock(runtime.lock_path),
-        publisher=GitTaskBranchPublisher(
-            git_path=git_path,
-            mirror_root=runtime.mirror_root,
-            temporary_root=runtime.publisher_temporary_root,
-            github_token=github_token,
-        ),
+        publisher=publisher,
         delivery=GitHubDeliveryCoordinator(store=store, tracker=tracker),
         runner_root=runtime.runner_root,
     )

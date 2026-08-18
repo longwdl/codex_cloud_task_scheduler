@@ -17,14 +17,22 @@ from codex_dispatcher.control_sweep import (
 from codex_dispatcher.ssh_runtime import (
     SshRuntimeError,
     build_ssh_control_sweep,
+    build_ssh_fixture_fault_sweep,
     load_protected_ssh_config,
     run_ssh_control_sweep,
     run_ssh_preflight,
     validate_runtime_state_path,
 )
+from codex_dispatcher.fixture_faults import (
+    FIXTURE_REPOSITORY,
+    FixtureFaultInjection,
+    FixtureFaultPoint,
+)
+from codex_dispatcher.git_publisher import GitTaskBranchPublisher
 from codex_dispatcher.ssh_preflight import SshPreflightStatus
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.testing.fakes import FakeTracker
+from codex_dispatcher.trackers.github_cli import GitHubCliTracker
 from tests.test_config import SSH_RUNTIME, VALID
 from tests.test_scheduler import make_config
 
@@ -95,10 +103,66 @@ class SshRuntimeTests(unittest.TestCase):
         )
 
         self.assertIsInstance(sweep, SshControlSweep)
+        self.assertIsInstance(sweep._tracker, GitHubCliTracker)
+        self.assertIsInstance(sweep._publisher, GitTaskBranchPublisher)
         self.assertFalse((self.root / "mirrors").exists())
         self.assertFalse((self.root / "quarantine").exists())
         self.assertFalse((self.root / "publisher-temporary").exists())
         self.assertFalse((self.lock_dir / "dispatcher.lock").exists())
+
+    def test_fixture_fault_builder_requires_only_the_hard_coded_repository(self) -> None:
+        injection = FixtureFaultInjection(
+            FixtureFaultPoint.PUBLISHER_RECEIPT,
+            7,
+        )
+        with self.assertRaisesRegex(SshRuntimeError, "fixed Fixture"):
+            build_ssh_fixture_fault_sweep(
+                config=self.config,
+                store=self.store,
+                github_token=TOKEN,
+                injection=injection,
+            )
+
+        fixture_config = replace(
+            self.config,
+            repositories=(
+                replace(
+                    self.config.repositories[0],
+                    slug=FIXTURE_REPOSITORY,
+                    allowed_paths=("README.md",),
+                    denied_paths=(),
+                    maintainers=("longwdl",),
+                    required_checks=("fixture",),
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(SshRuntimeError, "contract"):
+            build_ssh_fixture_fault_sweep(
+                config=replace(
+                    fixture_config,
+                    repositories=(
+                        replace(
+                            fixture_config.repositories[0],
+                            allowed_paths=("src",),
+                        ),
+                    ),
+                ),
+                store=self.store,
+                github_token=TOKEN,
+                injection=injection,
+            )
+        with patch(
+            "codex_dispatcher.ssh_runtime.run_control_host_contract_checks",
+            return_value=(ContractCheck("tools", True, "fixture"),),
+        ):
+            sweep = build_ssh_fixture_fault_sweep(
+                config=fixture_config,
+                store=self.store,
+                github_token=TOKEN,
+                injection=injection,
+            )
+
+        self.assertIsInstance(sweep, SshControlSweep)
 
     def test_live_config_and_sqlite_paths_must_be_owned_and_protected(self) -> None:
         config_path = self.root / "dispatcher.toml"

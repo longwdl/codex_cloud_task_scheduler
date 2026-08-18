@@ -589,6 +589,11 @@ Issue `#2` 绑定到一个 WorkItem、确定性分支和 Runner 目录；一个 
 任务分支、`main` 及 Actions run 均保持不变，之后只读 preflight 仍返回 idle。尚未 live 注入
 push/PR/comment 回执丢失；这些恢复性质继续由离线故障测试覆盖，不能从本次正常路径和空闲重扫
 外推。
+截至 2026-08-19，另有一个不接入正式 CLI 的 source-tree Fixture 故障入口完成离线实现。它硬编码
+上述私有 Fixture 及 README-only 合同，要求第三个仓库名级开关、精确 Issue/恢复阶段和自动
+SQLite 在线备份，只能在真实远端操作成功后丢弃一次 Publisher、Draft PR 或固定 Issue comment
+回执。正式 `ssh-run-once` 的组装和参数未改变。该入口已通过 fake/组装/安全开关测试，但尚未对
+新的 live Issue 执行，不能作为 AC-047 至 AC-049 的 live 证据。
 当前另有只读 `ssh-preflight`：先校验固定 Git/gh/OpenSSH 版本，在原 SQLite 的临时迁移快照上
 执行 recovery-first 规划，再通过 GitHub 只读接口选择至多一个 `exec:ssh-cli` Issue。它不创建
 或迁移原数据库、不连接 Runner、不 fetch/push、不 claim、不写评论/label，也不创建 PR。输出
@@ -738,6 +743,7 @@ git diff --check
 | AC-050 | Slack root 回执丢失 | Codex 尚未 START；以同一 key/payload 找回同一 root 并原子绑定，不创建第二个 thread |
 | AC-051 | Slack 终态回执丢失 | commit/PR 保持不变；只重试同一 Turn report，不重启 Codex、不重复 push/PR，成功后才写终态 label |
 | AC-052 | SSH live 只读预检 | 固定工具版本通过后，在临时 SQLite 快照上先报告恢复动作，否则只选择一个 `exec:ssh-cli` 候选；原 DB、Runner、Git refs、Issue 和 PR 均不改变，歧义状态非零退出 |
+| AC-053 | Fixture 故障入口越界或误触 | 正式 CLI 不暴露该入口；缺少任一开关、仓库/README 策略/Issue/恢复阶段不精确时在目标写入前拒绝；每次接受前生成并校验私有 SQLite 在线备份 |
 
 ### 12.3 Live Fixture 顺序
 

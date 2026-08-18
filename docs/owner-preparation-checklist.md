@@ -135,6 +135,44 @@ For the private fixture, the previously accepted absence of a personal-account r
 known residual risk. This does not permit exposing the write token to Codex; Publisher parameter
 restrictions remain mandatory.
 
+### 5.1 Controlled lost-receipt fixture
+
+The source-tree-only fault entry is never a systemd command and must not be installed on a production
+Control Host. It rejects any configuration other than the single private
+`longwdl/codex-dispatcher-fixture` repository with base `main`, README-only policy, maintainer
+`longwdl`, and required check `fixture`. It also requires an existing protected database, an exact
+read-only preflight stage, `--apply`, the normal SSH write opt-in, and a third opt-in whose value is
+the complete Fixture repository name. Every accepted invocation first creates and verifies a mode
+`0600` SQLite online backup in the configured state directory.
+
+Use one new reviewed Fixture Issue and execute the stages only in this order:
+
+```bash
+CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS=longwdl/codex-dispatcher-fixture \
+PYTHONPATH=src python3 -m codex_dispatcher.fixture_fault_cli \
+  --config /absolute/path/dispatcher.toml --issue ISSUE_NUMBER \
+  --fault publisher-receipt --apply --json
+
+CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS=longwdl/codex-dispatcher-fixture \
+PYTHONPATH=src python3 -m codex_dispatcher.fixture_fault_cli \
+  --config /absolute/path/dispatcher.toml --issue ISSUE_NUMBER \
+  --fault draft-pr-receipt --apply --json
+
+CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS=longwdl/codex-dispatcher-fixture \
+PYTHONPATH=src python3 -m codex_dispatcher.fixture_fault_cli \
+  --config /absolute/path/dispatcher.toml --issue ISSUE_NUMBER \
+  --fault issue-comment-receipt --apply --json
+```
+
+Each command must report `fault_triggered=true` and `recovery_required=true`. Run `ssh-preflight`
+between stages and require, respectively, `resume_publication`, then `sync_tracker_state`, then
+`sync_tracker_state`. After the third injected receipt loss, use the normal `ssh-run-once` exactly
+once to repair the existing comment/PR binding and terminal label. Stop immediately on any different
+status; do not skip a stage, substitute another repository, delete a branch, or edit SQLite.
+
 ### 6. Slack outbound app
 
 The existing official Codex Slack binding is not the Dispatcher integration. A custom outbound-only

@@ -35,6 +35,8 @@ executor. The environment-independent implementation now includes:
 - a read-only `ssh-preflight` that verifies pinned Control Host tools, plans recovery from a
   migrated disposable SQLite snapshot, and selects only `exec:ssh-cli` Issues through GitHub reads;
 - a double-opt-in `ssh-run-once` entry point that assembles only fixed GitHub, mirror, and SSH ports;
+- a separate triple-opt-in, hard-coded Fixture fault entry that can discard one successful
+  Publisher, Draft PR, or Issue comment receipt without changing the normal runtime path;
 - a hashed Slack outbox, unique root/thread binding, redacted terminal reports, and offline
   lost-receipt recovery behind an idempotent outbound publisher port.
 
@@ -62,6 +64,11 @@ the configured database, claim Issues, mutate labels, fetch or push Git, invoke 
 pull request. Its result is a point-in-time snapshot and never authorizes a write; `ssh-run-once`
 revalidates state while holding the Dispatcher lock. The older `run-once --dry-run` remains
 Cloud-labelled migration code.
+
+The fault entry is not a production command and is not exposed through the normal CLI. It accepts
+only `longwdl/codex-dispatcher-fixture`, its exact README-only repository contract, and one exact
+Issue/stage selected by read-only preflight. It requires a third repository-name environment opt-in
+and creates a private SQLite online backup before entering the normal process-locked sweep.
 
 ## Requirements
 
