@@ -1,8 +1,70 @@
-# Historical live test evidence
+# Live test evidence
 
-> This file records the earlier Codex Cloud-oriented fixture checks. It is retained as historical
-> evidence only. `exec:cloud` and the Cloud Environment are not part of the current SSH CLI target
-> architecture.
+> The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
+> Cloud Environment are not part of the current SSH CLI target architecture.
+
+## SSH CLI Runner fixture — 2026-08-18
+
+This section records the first real SSH CLI protocol run. The Fixture Issue remained open with
+`agent:paused`, `exec:cloud`, and `priority:p2`; the test invoked the new protocol directly and did
+not claim that end-to-end SSH scheduler label routing exists.
+
+### Release and transport
+
+- Current Runner release: `057226b185dfef70aa1b09bb54561b357f094743`.
+- Fixed remote entrypoint: `/srv/codex-runner/bin/codex-runner-v1`.
+- Fixed configuration selected Git `/usr/bin/git`, Codex CLI 0.147.0, shared
+  `CODEX_HOME=/srv/codex-runner`, and `/srv/codex-runner/work-items`.
+- The real `SshRunnerTransport` used the protected host key and identity plus the explicitly
+  approved Mac Fixture `assh` proxy shape. An unknown STATUS request was definitively rejected.
+- `codex login status` returned `Logged in using ChatGPT`; no API-key billing path was used.
+- The release, wrapper, and configuration are user-owned in this Fixture because `ecs-user` has no
+  passwordless sudo. Older releases remain available for symlink rollback. This is not the
+  production ownership model.
+
+### Migrated 1:1:1 binding and PREPARE
+
+The legacy SQLite anchor, local mirror, GitHub `main`, and the exact remote task ref all agreed on
+SHA `b992e1e52c8f11ed2e6776f78ec20bb1667a8fb5`. The existing branch was imported rather than
+re-derived:
+
+- WorkItem: `wi_3a97e3d99c30bdcbb50501dd`;
+- GitHub Issue: `longwdl/codex-dispatcher-fixture#1`;
+- task branch: `codex/issue-1-8e3775879000` with `task_branch_source=migrated`;
+- Runner directory:
+  `/srv/codex-runner/work-items/longwdl__codex-dispatcher-fixture/issue-1`.
+
+Real PREPARE transferred a 4,804-byte self-contained Git bundle, verified its SHA-256, and created
+one clean local repository with no remote. The repository branch and HEAD matched the migrated
+binding and base SHA.
+
+### START and resume evidence
+
+All three Turns used the same WorkItem, branch, directory, input HEAD, and Codex session
+`01a01486-0eee-7511-85ee-abe46c8bfb8b`:
+
+1. Turn 1 created the session. Its Schema-valid Agent output used `status=blocked` with one question,
+   conflicting with the stricter domain rule, so the Runner returned `agent_result_invalid` and no
+   checkpoint.
+2. Prompt and Schema descriptions were aligned without weakening the parser. Turn 2 resumed the
+   exact session and produced a domain-valid final result in the rollout, but the bounded JSONL
+   parser returned `codex_output_invalid`. No raw provider output was persisted or forwarded.
+3. Static JSONL failure classification was added and deployed. Turn 3 again resumed the exact
+   session; it completed with a parsed business result `blocked`, an unchanged output HEAD, and no
+   error code. The blocker accurately reported that the isolated Runner cannot prove GitHub
+   Timeline and dispatcher dry-run acceptance evidence.
+
+Turn 2's JSONL anomaly did not reproduce in Turn 3, so it remains an observed transient rather
+than a confirmed root cause. Future occurrences return a specific bounded JSONL error code.
+
+Post-checks proved the worktree clean, no Git remote, the global lock acquirable, the GitHub task
+branch unchanged at the base SHA, `last_published_sha` unset, and no Publisher, PR, Slack, merge, or
+deployment action triggered by the task. The
+[official Codex non-interactive documentation](https://learn.chatgpt.com/docs/non-interactive-mode)
+confirms that `codex exec --json` emits JSONL, `--output-schema` constrains the final JSON, and an
+explicit session ID can be used with `codex exec resume`.
+
+## Historical Codex Cloud fixture — 2026-08-13
 
 Snapshot date: 2026-08-13. This file records non-secret evidence from the dedicated private
 fixture. It is not a substitute for repeatable automated tests.

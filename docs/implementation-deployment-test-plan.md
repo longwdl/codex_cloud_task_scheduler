@@ -411,6 +411,11 @@ Runner；Docker 阶段继续在容器内使用，但由容器提供外部边界�
 该结果是 Agent 声明，不是 Control Host 已验证事实。Publisher 的机械校验和 GitHub CI 是独立
 证据。
 
+`needs_input` 仅在 `status=needs_input` 时非空；`completed` 和 `blocked` 时必须为空。固定 Prompt
+和 Schema description 同时声明该关系，本地解析器仍独立强制校验。Schema 合法但违反该领域
+关系的输出不自动改写，Turn 以 `agent_result_invalid` 阻塞。Runner/JSONL 失败只记录固定、
+有界的机器错误码，不保存或转发原始 stdout/stderr。
+
 ## 7. Publisher 协议
 
 Publisher 与 Dispatcher 位于同一 Control Host。推荐不同 Unix 用户和本地 Unix socket；
@@ -654,6 +659,10 @@ git diff --check
 | AC-029 | Runner 输入残留 executing | STATUS 返回 unknown；Dispatcher 保持 reconcile 且不重放 Prompt |
 
 ### 12.3 Live Fixture 顺序
+
+截至 2026-08-18，步骤 1-3 已通过；步骤 5 的 WorkItem/branch/directory/session 复用已通过
+直连协议验收。该次 Issue 仍保持 `agent:paused + exec:cloud`，因此不代表 SSH 调度标签接线已
+完成。完整非敏感证据见 `docs/live-test-evidence.md`。
 
 1. SSH 只读连接与 host key 固定。
 2. 创建 Fixture WorkItem 目录和独立 repo。

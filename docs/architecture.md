@@ -124,6 +124,12 @@ JSONL events are untrusted structured input. Output is bounded, parsed strictly,
 reduced to a schema-controlled result. Reasoning events and raw command output are not copied to
 Slack or GitHub.
 
+`--output-schema` constrains the final JSON shape, but domain invariants remain local. In
+particular, `needs_input` must be non-empty exactly when `status=needs_input`; `completed` and
+`blocked` require an empty question list. Prompt and schema descriptions state this rule, while the
+Runner parser enforces it and never silently normalizes a conflicting Agent claim. Runner and JSONL
+failures are persisted as bounded machine error codes, not provider output.
+
 The SSH adapter ignores user SSH configuration, pins a protected `known_hosts` file and identity,
 uses public-key batch authentication, disables agent/X11/all forwarding, proxy jumps, local
 commands, and TTY allocation, and sends only the fixed

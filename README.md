@@ -29,11 +29,15 @@ executor. The environment-independent implementation now includes:
 - persistent Runner workspaces and idempotent first/resume Turn execution;
 - outbound-only Slack projection models and offline integration tests.
 
-The Runner path has been exercised only with local repositories, mocked SSH, and a fake Codex
-executable. There is still no networked SSH fixture, real Codex invocation, Publisher push, Slack
-delivery, automatic PR creation, merge, or deployment. Existing Codex Cloud adapter code is
-retained only during migration; Cloud writes remain disabled and are not part of the target
-architecture.
+The Runner path has now been exercised against the private Fixture through the real pinned SSH
+transport and Codex CLI 0.147.0 using ChatGPT login. A migrated Issue binding completed PREPARE,
+created one persistent session, and resumed that exact session on the same branch and directory;
+the read-only task produced no diff or publication checkpoint. The first-phase Runner release is
+installed on `s3`, but remains user-owned because the Fixture account has no passwordless sudo.
+
+End-to-end SSH scheduler selection, Publisher push, Slack delivery, automatic draft PR creation,
+merge, and production deployment are still absent. Existing Codex Cloud adapter code is retained
+only during migration; Cloud writes remain disabled and are not part of the target architecture.
 
 Candidate planning is exposed through a dependency-injected Python entry point and a read-only
 GitHub CLI dry-run command. The command performs tracker reads but does not claim issues, mutate
