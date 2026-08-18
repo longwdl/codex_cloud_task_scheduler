@@ -41,7 +41,10 @@ from codex_dispatcher.trackers.base import TrackerTask
 
 _FAULT_ENV = "CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS"
 _WRITE_ENV = "CODEX_DISPATCHER_ENABLE_SSH_WRITES"
-_HANDSHAKE_TIMEOUT_SECONDS = 45
+# Must exceed the longest bounded pre-claim Git operation (120 seconds).  A
+# shorter parent deadline can kill Python while its isolated Git process group
+# is still active, leaving that group orphaned on POSIX.
+_HANDSHAKE_TIMEOUT_SECONDS = 180
 _POST_KILL_ATTEMPTS = 10
 _POST_KILL_DELAY_SECONDS = 1.0
 

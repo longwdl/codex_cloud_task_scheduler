@@ -15,6 +15,7 @@ from codex_dispatcher.fixture_faults import (
     validate_fixture_orphan_claim_recovery,
 )
 from codex_dispatcher.fixture_process_cli import (
+    _HANDSHAKE_TIMEOUT_SECONDS,
     _child_environment,
     _handshake,
     _run_parent,
@@ -70,6 +71,9 @@ class _FakeProcess:
 
 
 class FixtureProcessCliTests(unittest.TestCase):
+    def test_parent_handshake_deadline_exceeds_preclaim_git_timeout(self) -> None:
+        self.assertGreater(_HANDSHAKE_TIMEOUT_SECONDS, 120)
+
     def test_orphan_recovery_validator_requires_exact_unpersisted_claim(self) -> None:
         plan = SshPreflightPlan(
             SshPreflightStatus.READY_RECOVERY,
