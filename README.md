@@ -32,11 +32,14 @@ executor. The environment-independent implementation now includes:
   idempotent Publisher checkpoint completion;
 - strict same-repository Draft PR lookup/creation, branch read-back, SQLite binding, and ordered
   Issue status projection with lost-receipt recovery;
+- exact merged-PR/head reconciliation that durably closes the WorkItem before projecting
+  `agent:completed`, without merging or closing the Issue itself;
 - a read-only `ssh-preflight` that verifies pinned Control Host tools, plans recovery from a
   migrated disposable SQLite snapshot, and selects only `exec:ssh-cli` Issues through GitHub reads;
 - a double-opt-in `ssh-run-once` entry point that assembles only fixed GitHub, mirror, and SSH ports;
-- a separate triple-opt-in, hard-coded Fixture fault entry that can discard one successful
-  Publisher, Draft PR, or Issue comment receipt without changing the normal runtime path;
+- separate triple-opt-in, hard-coded Fixture entries that can discard one successful Runner,
+  Publisher, Draft PR, or Issue-comment receipt, or kill one exact post-claim child process,
+  without changing the normal runtime path;
 - a hashed Slack outbox, unique root/thread binding, redacted terminal reports, and offline
   lost-receipt recovery behind an idempotent outbound publisher port.
 
@@ -55,10 +58,10 @@ remained unchanged, so it did not create another Turn, session, push, comment, P
 A second Fixture Issue has now completed controlled live Publisher, Draft PR, and Issue-comment
 receipt loss. Recovery retained one WorkItem, session, Turn, branch, Draft PR, and status comment,
 left `main` unchanged, and passed the exact-SHA Fixture workflow. That run exposed and fixed a
-recovery-order defect for a terminal local WorkItem whose Issue was still `agent:running`. Actual SSH
-disconnects and process termination remain live-test gaps. The Slack coordination core is wired only
-through injected ports; a real Slack HTTP publisher remains disabled until its provider-side
-deduplication behavior is proven in a live fixture. Merge and production deployment remain absent.
+recovery-order defect for a terminal local WorkItem whose Issue was still `agent:running`. The Slack
+coordination core is wired only through injected ports; a real Slack HTTP publisher remains disabled
+until its provider-side deduplication behavior is proven in a live fixture. Merge and production
+deployment remain absent.
 Existing Codex Cloud adapter code is retained only during migration; Cloud writes remain disabled
 and are not part of the target architecture.
 
@@ -73,6 +76,25 @@ fixture-only hook stopped after the exact published SHA was committed but before
 terminalization; guarded recovery then completed without calling the Runner or Publisher again,
 created one Draft PR, and passed Fixture CI. This deterministic exception injection does not yet
 cover an operating-system process kill or a real SSH disconnect.
+
+Fixture Issue `#10` subsequently covered the operating-system process boundary. A parent accepted
+an identity-bound private-pipe handshake only after the Issue claim, sent `SIGKILL` to that exact
+child, and proved that no WorkItem, Turn, or Runner call existed. Read-only preflight selected
+`recover_orphan_claim`; after Git transport recovered, the ordinary dispatcher path created one
+WorkItem, Turn, session, task branch, and Draft PR `#11`, passed Fixture CI, and returned idle on an
+immediate repeated sweep.
+
+Fixture Issue `#12` covered the ambiguous START receipt. The first guarded stage discarded only a
+valid identity-matching START reply and left one `reconciling` Turn with no local session binding.
+The second stage rejected PREPARE/START/RESUME before delegation and completed through exactly
+`STATUS` then `EXPORT`, reusing the same WorkItem and Turn. Draft PR `#13` passed Fixture CI and a
+repeated sweep returned idle. This proves the protocol recovery path, not a physical network-cable
+or SSH-daemon failure.
+
+Merged-PR completion is implemented and covered offline: the dispatcher requires the bound PR to
+be merged at the exact persisted head SHA, writes the irreversible local `completed` tombstone
+first, then idempotently updates the fixed Issue comment and finally `agent:completed`. A live
+completion remains intentionally pending because merge is a separate human-authorized action.
 
 Current SSH candidate and recovery planning is exposed through `ssh-preflight`. It checks Git, gh,
 and OpenSSH versions, reads GitHub, and migrates only a temporary copy of SQLite. It does not alter

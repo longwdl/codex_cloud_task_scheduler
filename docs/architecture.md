@@ -199,6 +199,15 @@ If Draft PR creation succeeds but its response is lost, the next sweep finds the
 task branch and binds it instead of creating another. The terminal Issue label is written only after
 the PR binding and idempotent status comment succeed; a delivery interruption therefore remains a
 recoverable dispatching/running Issue and cannot trigger a new Turn.
+After a human merges the bound PR, recovery reads the PR by the immutable task branch and requires
+the persisted PR number, repository, base branch, task branch, and exact `headRefOid` to agree with
+the WorkItem's `last_published_sha`. A closed-but-unmerged PR, a different head SHA, a cross-repository
+PR, or a prematurely completed/reactivated Issue is blocked. On an exact match, the dispatcher first
+commits the irreversible local `completed` WorkItem tombstone, then idempotently rewrites the fixed
+Issue comment while preserving any durable Slack permalink, and only then changes the label to
+`agent:completed`. If either GitHub write loses its receipt, the next sweep retries only this Issue
+projection; it cannot invoke the Runner or Publisher, create another PR, or reopen the WorkItem.
+The dispatcher never performs the merge, closes the Issue, deletes the branch, or bypasses checks.
 Likewise, an ambiguous Slack root response is reconciled before Codex starts. An ambiguous terminal
 Slack response is retried from the durable Turn and outbox identity after the commit/PR work is
 already complete; it cannot restart Codex, repeat a push, or create another PR. The terminal Issue
@@ -229,6 +238,8 @@ shell fragment from the runner or issue.
 - A missing or conflicting Codex session ID is blocked, not replaced.
 - The runner never receives GitHub write credentials or control-host credentials.
 - Only the Publisher can push, and only an exact verified SHA to the recorded task branch.
+- Only an already-human-merged, exact bound PR can move a WorkItem to the terminal `completed`
+  tombstone; that tombstone cannot be reactivated.
 - No force push, ref deletion, tag write, protected-branch write, merge, deployment, or release.
 - Slack is never an input or control channel.
 - Unknown external state is never success and is never resolved by blind replay.

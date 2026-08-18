@@ -219,6 +219,76 @@ task branch, Draft PR, and status comment; confirm the task branch and SQLite pu
 the same SHA and that the default branch did not move. This fixture does not substitute for the
 separate operating-system process-kill or SSH-disconnect tests.
 
+### 5.3 Exact Dispatcher process-kill fixture
+
+Use a separate new ready Fixture Issue. The protected mirror's fixed base ref must already equal the
+current GitHub `main` SHA. The parent starts one exact child argv in a new session, waits up to 180
+seconds for a private-pipe handshake emitted only after the successful Issue claim, and sends
+`SIGKILL` only to that still-running child:
+
+```bash
+CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS=longwdl/codex-dispatcher-fixture \
+PYTHONPATH=src python3 -m codex_dispatcher.fixture_process_cli \
+  --config /absolute/path/dispatcher.toml --issue ISSUE_NUMBER \
+  --apply --json
+```
+
+Require `termination_signal=SIGKILL`, `child_exit_code=-9`,
+`local_work_item_persisted=false`, `runner_reached=false`, and
+`recovery_action=recover_orphan_claim`. Independently require SQLite integrity, no WorkItem or Turn
+for the Issue, and `agent:dispatching`. Then run the ordinary `ssh-run-once` path; it must recover the
+same Issue into exactly one WorkItem/Turn/session/branch/PR and leave an immediate repeated sweep
+idle. Do not manually reset the label or use the cached-base Fixture source for normal recovery.
+
+### 5.4 START receipt and STATUS-only recovery fixture
+
+Use another new ready Fixture Issue and run exactly these two guarded stages:
+
+```bash
+CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS=longwdl/codex-dispatcher-fixture \
+PYTHONPATH=src python3 -m codex_dispatcher.fixture_fault_cli \
+  --config /absolute/path/dispatcher.toml --issue ISSUE_NUMBER \
+  --fault start-receipt --apply --json
+
+CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS=longwdl/codex-dispatcher-fixture \
+PYTHONPATH=src python3 -m codex_dispatcher.fixture_fault_cli \
+  --config /absolute/path/dispatcher.toml --issue ISSUE_NUMBER \
+  --fault start-status-recovery --apply --json
+```
+
+After the first stage require `runner_active`, one `reconciling` Turn, a running WorkItem with no
+local session binding/checkpoint/PR, and preflight `reconcile_active_turn`. The second command must
+report `recovery_guarded=true`, `fault_triggered=false`, exact
+`runner_operations=["status","export"]`, and `review`. PREPARE, START, and RESUME are rejected before
+delegation during this recovery. Confirm the same WorkItem and Turn, one bound session and Draft PR,
+exact checkpoint equality, successful required checks, mode-`0600` backups, unchanged `main`, and an
+idle repeated sweep.
+
+### 5.5 Human merge and completion projection
+
+The dispatcher never merges. The completion reconciler treats the already-merged PR as the human
+authorization boundary; it does not separately query Actions checks. In the private
+personal-repository fixture, where a ruleset was explicitly deferred, the maintainer must therefore
+verify checks before merging.
+
+After a maintainer reviews the diff, confirms required checks, marks the Draft PR ready, and
+explicitly merges it, first run `ssh-preflight`. It must report `complete_merged_work_item` for the
+exact Issue, WorkItem, and PR number. Then run one ordinary double-opt-in `ssh-run-once` and require:
+
+- PR repository/base/head branch and `headRefOid` exactly match the persisted binding and
+  `last_published_sha`;
+- SQLite reaches the irreversible `completed` state before any Issue write;
+- the one fixed Issue comment reports `agent:completed` and retains any durable Slack permalink;
+- only after the comment succeeds does the Issue label become `agent:completed`;
+- no Runner, Publisher, new Turn, new PR, branch deletion, Issue close, deployment, or release occurs;
+- a repeated sweep is idle, and setting the same Issue back to ready is rejected.
+
+Any closed-but-unmerged PR, head mismatch, cross-repository PR, or premature completed/ready label is
+`blocked`. A lost completion comment or label receipt may retry only the same Issue projection.
+
 ### 6. Slack outbound app
 
 The existing official Codex Slack binding is not the Dispatcher integration. A custom outbound-only

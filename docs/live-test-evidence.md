@@ -3,6 +3,95 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## SSH CLI exact Dispatcher process-kill recovery fixture — 2026-08-19
+
+This fixture covers the post-claim/pre-persistence operating-system boundary with a real
+`SIGKILL`. It does not select a process by name. A dedicated parent starts one exact child argv in a
+new session, waits for an identity-bound private-pipe handshake emitted only after GitHub claim, and
+kills only that verified still-running child.
+
+### Kill boundary
+
+- Private Fixture Issue: [`longwdl/codex-dispatcher-fixture#10`](https://github.com/longwdl/codex-dispatcher-fixture/issues/10),
+  node ID `I_kwDOT3NfX88AAAABNQOefw`.
+- The successful process fixture returned `child_exit_code=-9`, `termination_signal=SIGKILL`,
+  `local_work_item_persisted=false`, and `runner_reached=false`.
+- SQLite passed `integrity_check`, contained no WorkItem for Issue `#10` and no active Turn, while
+  the Issue was exactly `agent:dispatching`.
+- Read-only preflight selected `ready_recovery/recover_orphan_claim` for that exact Issue.
+- The accepted pre-kill online backup
+  `state.pre-claim-acquired-process-kill-0ukms_yw.db` was mode `0600` and passed
+  `integrity_check`.
+
+Two earlier pre-claim attempts encountered the then-active 120-second GitHub Git transport timeout.
+The first exposed that a shorter parent handshake timeout could terminate Python while its isolated
+Git process group was still running; the exact group was stopped, the parent deadline was raised
+above the longest bounded pre-claim Git operation, and a second timeout verified clean teardown.
+Neither attempt reached claim or changed Issue `#10`. For the successful kill injection only, the
+fixture required GitHub REST `main` and the protected cached mirror ref to equal exact SHA
+`b992e1e52c8f11ed2e6776f78ec20bb1667a8fb5`; this did not alter normal dispatcher fetch behavior.
+
+### Ordinary recovery
+
+When Git HTTPS recovered, one normal double-opt-in `ssh-run-once` consumed the orphan claim without
+manual label repair:
+
+- WorkItem: `wi_56cfb4bd6efc095beabb0852`;
+- Turn: `turn_44612d44d99b4ac89947b19afd19655f`, number `1`;
+- Codex session: `01a01605-beca-7040-adb8-ca3a6e6bd06c`;
+- task branch: `codex/issue-10-56cfb4bd6efc`;
+- Runner directory:
+  `/srv/codex-runner/work-items/longwdl__codex-dispatcher-fixture/issue-10`;
+- exact checkpoint: `a17ae709a111cd84d7a08050afa975351190fa73`;
+- Draft PR [`#11`](https://github.com/longwdl/codex-dispatcher-fixture/pull/11).
+
+SQLite contained exactly one WorkItem and one finished/completed Turn for the Issue. The PR changed
+only `README.md`, one insertion and one deletion, to exact marker `p1-process-kill-v1`; its head and
+SQLite publication SHA matched. The fixed Issue comment existed once and the Issue entered
+`agent:review`. GitHub Actions run
+[`32168464039`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32168464039)
+completed successfully for that exact branch/SHA. `main` remained at the base SHA, final preflight
+was idle, and an immediate second write-enabled sweep also returned idle.
+
+## SSH CLI START receipt STATUS-only recovery fixture — 2026-08-19
+
+This fixture covers AC-036 with two guarded source-tree stages. The first stage delegates a real
+START and discards its response only after strict parsing proves the same WorkItem/Turn identity and
+a remote state of `running` or `finished`. The second stage rejects PREPARE, START, and RESUME before
+delegation and records the exact recovery operation order.
+
+- Private Fixture Issue: [`longwdl/codex-dispatcher-fixture#12`](https://github.com/longwdl/codex-dispatcher-fixture/issues/12),
+  node ID `I_kwDOT3NfX88AAAABNQlrSw`.
+- WorkItem: `wi_594a1305a087ff78a0ab32f8`.
+- Turn: `turn_be25135c133b47c6a580ee585d71cd18`, number `1`.
+- Task branch: `codex/issue-12-594a1305a087`.
+- Runner directory:
+  `/srv/codex-runner/work-items/longwdl__codex-dispatcher-fixture/issue-12`.
+
+Immediately after `start-receipt`, the command reported `fault_triggered=true`,
+`recovery_required=true`, and `runner_active`. Independent SQLite read-back found exactly one
+running WorkItem and one `reconciling` Turn; local `codex_session_id`, `last_published_sha`,
+`pr_number`, result status, and output SHA were all unset. The Issue was `agent:running`, and
+preflight selected only `reconcile_active_turn` for the exact WorkItem/Turn.
+
+The `start-status-recovery` command then reported `recovery_guarded=true`,
+`fault_triggered=false`, `runner_operations=["status","export"]`, and `review`. It reused the same
+WorkItem and Turn, bound Codex session `01a0160b-4cb9-7522-9b32-41dff7ab73b6`, and published exact
+checkpoint `41e67598b506dcbfeac00e5871a812e6e9874078` to the existing task identity. Draft PR
+[`#13`](https://github.com/longwdl/codex-dispatcher-fixture/pull/13) changed only `README.md`, one
+insertion and one deletion, to exact marker `p1-start-status-v1`. The fixed Issue comment existed
+once, the Issue entered `agent:review`, and GitHub Actions run
+[`32169064603`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32169064603)
+completed successfully for the same branch/SHA.
+
+Both stage backups were mode `0600` and passed `integrity_check`. Final SQLite contained one
+WorkItem and one finished/completed Turn, `main` remained at
+`b992e1e52c8f11ed2e6776f78ec20bb1667a8fb5`, final preflight was idle, and an immediate normal
+write-enabled sweep also returned idle. A brief Issue-list visibility delay after creation was
+resolved by an explicit maintainer ready-label transition; no fault write ran until the list read and
+preflight both selected the exact Issue. This proves STATUS-only protocol recovery and does not claim
+a physical network-link or SSH-daemon interruption.
+
 ## SSH CLI same-Issue needs-input resume fixture — 2026-08-19
 
 This section records the first end-to-end Issue lifecycle with two Turns in one persistent Codex
@@ -97,8 +186,9 @@ the exact ready candidate.
 
 This section records the bounded, three-stage live fault sequence for Publisher, Draft PR, and
 Issue-comment receipts. It used the source-tree-only triple-opt-in fault entry and the normal
-Dispatcher recovery path. It does not prove recovery from an actual SSH disconnect or process kill,
-and it does not exercise Slack.
+Dispatcher recovery path. This run itself does not prove recovery from an actual SSH disconnect or
+process kill, and it does not exercise Slack; the later Issue `#10` and `#12` sections above record
+the separate process and START-receipt boundaries.
 
 ### Admission and initial state
 
@@ -165,9 +255,10 @@ retained rather than silently deleted.
 
 The fine-grained PAT again denied the REST Checks endpoint with HTTP `403`; the permitted Actions
 runs endpoint supplied the CI evidence. This run proves the live Publisher lost-receipt read-back
-path and the Draft PR and Issue-comment recovery contracts. The narrower post-publication-record
-crash window, actual SSH interruption, actual Dispatcher termination, and Slack provider receipt
-loss remain separate acceptance work.
+path and the Draft PR and Issue-comment recovery contracts. The narrower post-publication-record,
+actual Dispatcher termination, and START-receipt recovery are recorded in the later Fixture
+sections above. A physical SSH link/daemon interruption and Slack provider receipt loss remain
+separate acceptance work.
 
 ## SSH CLI Dispatcher and Publisher fixture — 2026-08-18
 

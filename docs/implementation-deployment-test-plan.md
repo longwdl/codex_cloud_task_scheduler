@@ -512,6 +512,8 @@ fixture 证明前保持禁用，也不通过增加 message-history 权限来找�
 13. 若有安全且一致的 checkpoint，拉取 bundle 并调用 Publisher。
 14. 创建/更新唯一 Draft PR、Issue 和 Slack Turn report。
 15. 根据结构化结果进入 `needs_input`、`review` 或 `blocked`。
+16. 后续人工 merge 后，只在 PR identity 与 persisted exact head 完全一致时先落本地
+    `completed` tombstone，再更新固定 Issue comment 和 `agent:completed`；不自动 merge/close/delete。
 
 同一个 Issue 即使多次从 `needs_input/review` 回到 `ready`，步骤 6 也只能解析到原 WorkItem。
 
@@ -580,7 +582,9 @@ Fixture 通过。该结果尚不代表 GitHub 调度、Publisher 或 Slack 端�
 启动前持久化 Issue 路径策略；push 已记账但 Turn 未终态化的崩溃窗口也可在不重新 export/push
 的情况下恢复。唯一 Draft PR 已按稳定 task branch 查找、创建、读回并绑定 SQLite；Issue 固定
 状态评论成功后才允许写终态 label。PR 创建回执或评论回执丢失时，下一轮不会重启 Runner、
-重复 push 或创建第二个 PR。
+重复 push 或创建第二个 PR。人工合并后，recovery planner 还会验证 exact PR number、repository、
+base/task branch 和 `headRefOid=last_published_sha`，先提交不可逆的本地 completed tombstone，再
+幂等更新固定 Issue comment 和 `agent:completed`；它不执行 merge、close Issue 或删 branch。
 
 2026-08-18 的受控 live happy-path 已验证真实 GitHub 凭据合同和上述正常写入路径：Fixture
 Issue `#2` 绑定到一个 WorkItem、确定性分支和 Runner 目录；一个 Codex Turn 产生 checkpoint
@@ -604,8 +608,22 @@ Draft PR 回执阶段还暴露了 recovery planner 的顺序缺陷：本地 Work
 证据。AC-047 也已由 Fixture Issue `#8` 覆盖：`publication-recorded` 在 exact SHA 落库后、Turn
 仍为 `checkpointing` 时中断；后续 `recorded-publication-recovery` 使用 fail-before-delegate 的
 Runner/Publisher guard，成功完成原 Turn、创建唯一 Draft PR `#9`，Actions run `32163520437`
-成功且 `main` 未移动。这是确定性进程内异常注入，不等同于操作系统 kill。真实 SSH 断连、
-Dispatcher 进程终止和 Slack provider 回执丢失仍尚未 live 注入。
+成功且 `main` 未移动。这是确定性进程内异常注入，不等同于操作系统 kill。
+
+Fixture Issue `#10` 随后完成真实 Dispatcher 子进程 `SIGKILL`：父进程只在精确 post-claim
+private-pipe handshake 后终止其创建的同 argv 子进程。结果为 exit `-9`、没有本地 WorkItem/Turn、
+Runner 未调用，preflight 精确选择 `recover_orphan_claim`。Git HTTPS 恢复后，普通
+`ssh-run-once` 为同一 Issue 创建唯一 WorkItem `wi_56cfb4bd6efc095beabb0852`、Turn、session、
+branch 和 Draft PR `#11`；checkpoint `a17ae709a111cd84d7a08050afa975351190fa73` 的 Actions run
+`32168464039` 成功，重复 sweep idle，`main` 未移动。
+
+Fixture Issue `#12` 还完成 START 回执歧义：第一阶段只在收到身份一致的成功 START reply 后
+丢弃回执，留下唯一 `reconciling` Turn、本地 session/checkpoint/PR 均为空；第二阶段在 delegate
+前拒绝 PREPARE/START/RESUME，并自证 Runner 操作严格为 `STATUS, EXPORT`。同一 WorkItem
+`wi_594a1305a087ff78a0ab32f8` 和 Turn 完成，绑定 session、Draft PR `#13` 和 checkpoint
+`41e67598b506dcbfeac00e5871a812e6e9874078`；Actions run `32169064603` 成功，重复 sweep idle。
+这证明协议回执恢复，但不等同于物理 SSH 链路/daemon 故障。Slack provider 回执丢失仍尚未
+live 注入。
 
 同日 Fixture Issue `#6` 完成了真实 GitHub 生命周期的两次 Turn：首次因故意缺少精确值进入
 `agent:needs_input`，没有 commit、task ref 或 PR；维护者添加唯一 `/codex-context` 并重新批准
@@ -765,14 +783,17 @@ git diff --check
 | AC-051 | Slack 终态回执丢失 | commit/PR 保持不变；只重试同一 Turn report，不重启 Codex、不重复 push/PR，成功后才写终态 label |
 | AC-052 | SSH live 只读预检 | 固定工具版本通过后，在临时 SQLite 快照上先报告恢复动作，否则只选择一个 `exec:ssh-cli` 候选；原 DB、Runner、Git refs、Issue 和 PR 均不改变，歧义状态非零退出 |
 | AC-053 | Fixture 故障入口越界或误触 | 正式 CLI 不暴露该入口；缺少任一开关、仓库/README 策略/Issue/恢复阶段不精确时在目标写入前拒绝；每次接受前生成并校验私有 SQLite 在线备份 |
+| AC-054 | claim 后 Dispatcher 被 SIGKILL | 只终止精确握手子进程；无本地 WorkItem/Turn、Runner 未调用；preflight 为 `recover_orphan_claim`，普通路径恢复同一 Issue 且只创建一套 1:1:1 身份 |
+| AC-055 | 人工合并后的 completed 投影 | 仅 exact bound PR 在 persisted head SHA 合并后先落本地 completed，再写固定 comment 和 label；丢回执只重试投影，不调用 Runner/Publisher，不创建 PR；任何身份/head/merge 状态冲突均 blocked |
 
 ### 12.3 Live Fixture 顺序
 
 截至 2026-08-19，步骤 1-5、7-9 已通过。Fixture Issue `#6` 已证明步骤 6 的
 WorkItem/branch/directory/session 复用和维护者 context 过滤；Slack 仍禁用，因此尚未证明同一
 Slack thread。步骤 9 已通过第二次 write-enabled sweep 和独立读回验证。步骤 10 已完成
-Publisher、Draft PR 和 Issue comment 的受控回执丢失部分，但真实 SSH 断连和 Dispatcher 进程
-终止仍待执行；步骤 11 也仍待执行。完整非敏感证据见
+Publisher、Draft PR、Issue comment、Dispatcher `SIGKILL` 及 START 回执歧义恢复；物理 SSH
+链路/daemon 断开仍待执行。步骤 11 的离线实现和故障恢复已完成，但真实 merge 仍须维护者单独
+授权，因此 live completed 证据仍待执行。完整非敏感证据见
 `docs/live-test-evidence.md`。
 
 1. SSH 只读连接与 host key 固定。

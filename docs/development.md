@@ -59,6 +59,8 @@ The environment-independent core now additionally contains:
 - a strict GitHub CLI Draft PR adapter and delivery coordinator that read back the exact task branch,
   bind one PR in SQLite, upsert one fixed Issue status comment, and recover lost write receipts before
   changing the terminal Issue label;
+- merged-PR reconciliation that verifies the bound PR and exact persisted head SHA, commits the local
+  completed tombstone first, and then retries only the fixed Issue comment/label projection;
 - a provider-independent Slack coordinator that creates one root before Codex starts, binds its
   receipt atomically, projects the link to GitHub, and retries terminal reports without replaying the
   Runner or Publisher;
@@ -67,8 +69,11 @@ The environment-independent core now additionally contains:
 - a double-opt-in `ssh-run-once` CLI whose Git/gh/OpenSSH version checks and local SQLite integrity check
   complete before the sweep can claim an Issue;
 - an isolated `codex_dispatcher.fixture_fault_cli` source-tree entry that is hard-coded to the
-  private README-only Fixture and can discard exactly one successful Publisher, Draft PR, or Issue
-  comment receipt after an exact recovery-stage preflight and private SQLite backup.
+  private README-only Fixture and can discard exactly one successful START, Publisher, Draft PR, or
+  Issue-comment receipt after an exact recovery-stage preflight and private SQLite backup;
+- an isolated `codex_dispatcher.fixture_process_cli` parent/child entry that sends `SIGKILL` only
+  after an exact post-claim private-pipe handshake and proves no WorkItem, Turn, or Runner call was
+  reached.
 
 The fixed OpenSSH argv/byte-stream adapter is covered by isolated unit tests, and the installed
 Runner protocol has also completed the disposable SSH/real-Codex fixture recorded in
@@ -80,17 +85,20 @@ An immediate second write-enabled sweep returned idle, with unchanged SQLite row
 it did not create a second Turn, session, push, PR, comment, or workflow run. A second controlled live
 Fixture Issue has now exercised Publisher, Draft PR, and Issue-comment receipt loss.
 The recovery retained one WorkItem/session/Turn/branch/PR/comment and returned preflight to idle; it
-also exposed and fixed the ordering of terminal WorkItem recovery from a still-running Issue. Actual
-SSH disconnects and process termination remain unexercised. Slack root/result receipt loss and outbox
-recovery remain covered only through an idempotent fake publisher; proof of the real Slack publisher
-contract is the next external integration phase.
+also exposed and fixed the ordering of terminal WorkItem recovery from a still-running Issue.
+Fixture Issue `#10` then proved exact post-claim `SIGKILL` and ordinary orphan-claim recovery, while
+Issue `#12` proved a lost START receipt followed by guarded `STATUS` then `EXPORT` without replaying
+START/RESUME. A physical SSH transport break remains unexercised. Slack root/result receipt loss and
+outbox recovery remain covered only through an idempotent fake publisher; proof of the real Slack
+publisher contract is the next external integration phase.
 The Runner must not receive GitHub write or production credentials.
 
 Explicitly deferred:
 
 - systemd/timer activation of the one-sweep entry point;
-- live SSH-disconnect and process-termination recovery injection;
+- a physical SSH-disconnect recovery injection;
 - a live Slack HTTP publisher or Slack API calls;
+- a human-authorized merge followed by live `agent:completed` projection;
 - systemd deployment;
 - Docker isolation on the Runner;
 - any merge, deployment, release, or production access.
@@ -154,7 +162,8 @@ sweep must re-read and revalidate state under that lock.
   blocking, and non-mutation of both existing and missing configured databases.
 - Control Host sweep tests use fake tracker/source/Runner/Publisher ports and exercise process-lock
   contention, claim loss, snapshot drift, interrupted PREPARE/START, ambiguous push, recorded
-  publication recovery, Draft PR receipt loss, and Issue projection retry ordering.
+  publication recovery, Draft PR receipt loss, merged-PR completion, and Issue projection retry
+  ordering.
 - Git tests use temporary local repositories and never a configured GitHub remote.
 - Runner tests operate on JSON/JSONL fixtures and temporary directories, not a real SSH daemon.
 - Publisher tests push only to temporary local bare repositories and never to GitHub.
