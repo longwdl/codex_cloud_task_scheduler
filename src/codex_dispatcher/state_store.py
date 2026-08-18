@@ -14,6 +14,7 @@ from typing import Any
 
 from codex_dispatcher.domain import Run, RunState, utc_now_iso
 from codex_dispatcher.work_items import (
+    ACTIVE_TURN_STATES,
     TaskBranchSource,
     Turn,
     TurnState,
@@ -394,6 +395,33 @@ class StateStore:
         ).fetchone()
         return self._row_to_work_item(row) if row is not None else None
 
+    def get_active_turn(self) -> Turn | None:
+        """Return the globally unique active Turn, if one exists."""
+        placeholders = ", ".join("?" for _ in ACTIVE_TURN_STATES)
+        rows = self._connection.execute(
+            f"SELECT * FROM turns WHERE state IN ({placeholders}) ORDER BY created_at LIMIT 2",
+            tuple(state.value for state in ACTIVE_TURN_STATES),
+        ).fetchall()
+        if len(rows) > 1:
+            raise RuntimeError("database contains more than one active Turn")
+        return self._row_to_turn(rows[0]) if rows else None
+
+    def next_turn_number(self, work_item_id: str) -> int:
+        """Read the next Turn number; ``begin_turn`` must still compare it atomically."""
+        row = self._connection.execute(
+            "SELECT state FROM work_items WHERE work_item_id = ?", (work_item_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"work item not found: {work_item_id}")
+        if WorkItemState(row["state"]) is not WorkItemState.READY:
+            raise ValueError("work item must be ready before planning a Turn")
+        return int(
+            self._connection.execute(
+                "SELECT COALESCE(MAX(turn_number), 0) + 1 FROM turns WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone()[0]
+        )
+
     def update_work_item_state(
         self, work_item_id: str, state: WorkItemState, *, updated_at: str | None = None
     ) -> WorkItem:
@@ -632,6 +660,7 @@ class StateStore:
         issue_revision: str,
         prompt_sha256: str,
         input_head_sha: str,
+        expected_turn_number: int | None = None,
         turn_id: str | None = None,
         created_at: str | None = None,
     ) -> tuple[WorkItem, Turn]:
@@ -652,6 +681,12 @@ class StateStore:
                     (work_item_id,),
                 ).fetchone()[0]
             )
+            if expected_turn_number is not None and (
+                type(expected_turn_number) is not int or expected_turn_number <= 0
+            ):
+                raise ValueError("expected_turn_number must be a positive integer or None")
+            if expected_turn_number is not None and next_number != expected_turn_number:
+                raise RuntimeError("Turn number changed after the Prompt snapshot was built")
             turn = Turn.new(
                 turn_id=turn_id,
                 work_item_id=work_item_id,

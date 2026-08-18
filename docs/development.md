@@ -38,17 +38,21 @@ The environment-independent core now additionally contains:
 - a no-argument, protected-config `codex-runner-v1` forced-command service and global Turn lock;
 - a fixed-parameter Git Publisher tested against a local bare remote, including lost-receipt recovery
   and remote-race rejection.
+- immutable GitHub Issue node/revision snapshots and SSH-only candidate selection;
+- a provider-independent service joining WorkItem recovery, deterministic Turn prompts, and Runner
+  invocation without GitHub/Slack writes;
+- an atomic Prompt Turn-number check and a protected non-blocking Control Host process lock.
 
-The offline core also includes the fixed OpenSSH argv/byte-stream adapter. Its tests mock the
-subprocess boundary and never connect to a host. The next phase is installing these components on a
-disposable Linux Runner, preparing task-specific Codex authentication, and performing the first
-networked SSH/real-Codex fixture. The Runner must not receive GitHub write or production
-credentials.
+The fixed OpenSSH argv/byte-stream adapter is covered by isolated unit tests, and the installed
+Runner protocol has also completed the disposable SSH/real-Codex fixture recorded in
+`docs/live-test-evidence.md`. The next phase is the Control Host sweep around the process lock:
+trusted mirror refresh, GitHub claim/reconciliation, source-bundle preparation, and explicit
+Publisher/Slack delivery. The Runner must not receive GitHub write or production credentials.
 
 Explicitly deferred:
 
-- networked SSH execution;
-- live real-account `codex exec` invocation and authentication bootstrap;
+- an unattended Control Host scheduling entry point;
+- live GitHub claim/reconciliation in the SSH workflow;
 - live GitHub Publisher writes and Draft PR creation;
 - Slack API calls;
 - systemd deployment;

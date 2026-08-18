@@ -113,6 +113,7 @@ class OfflineTurnOrchestrator:
         *,
         issue_revision: str,
         prompt: PromptSnapshot,
+        expected_turn_number: int | None = None,
         turn_id: str | None = None,
     ) -> TurnProgress:
         prompt_bytes = self._validate_prompt(prompt)
@@ -123,6 +124,7 @@ class OfflineTurnOrchestrator:
             issue_revision=issue_revision,
             prompt_sha256=prompt.sha256,
             input_head_sha=input_head_sha,
+            expected_turn_number=expected_turn_number,
             turn_id=turn_id,
         )
         turn = self._store.update_turn_state(turn.turn_id, TurnState.STARTING)

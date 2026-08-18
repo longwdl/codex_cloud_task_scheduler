@@ -163,6 +163,8 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 store.migrate()
                 first = make_ready(store, make_item(1))
                 second = make_ready(store, make_item(2))
+                self.assertIsNone(store.get_active_turn())
+                self.assertEqual(1, store.next_turn_number(first.work_item_id))
                 turn = store.plan_turn(
                     first.work_item_id,
                     turn_id="turn_" + "1" * 32,
@@ -179,6 +181,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                         input_head_sha="a" * 40,
                     )
                 store.update_turn_state(turn.turn_id, TurnState.STARTING)
+                self.assertEqual(turn.turn_id, store.get_active_turn().turn_id)
                 self.assertEqual(
                     TurnState.STARTING,
                     store.update_turn_state(turn.turn_id, TurnState.STARTING).state,
@@ -223,6 +226,25 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 self.assertEqual(
                     [1, 2], [item.turn_number for item in store.list_turns(first.work_item_id)]
                 )
+
+    def test_begin_turn_rejects_a_stale_prompt_turn_number_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                item = make_ready(store, make_item(6))
+
+                with self.assertRaisesRegex(RuntimeError, "Prompt snapshot"):
+                    store.begin_turn(
+                        item.work_item_id,
+                        issue_revision="revision-1",
+                        prompt_sha256="b" * 64,
+                        input_head_sha="a" * 40,
+                        expected_turn_number=2,
+                    )
+
+                self.assertEqual((), store.list_turns(item.work_item_id))
+                self.assertIsNone(store.get_active_turn())
+                self.assertEqual(WorkItemState.READY, store.get_work_item(item.work_item_id).state)
 
     def test_records_bounded_turn_error_idempotently_before_terminal_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

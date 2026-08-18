@@ -271,6 +271,26 @@ class TurnOrchestrationTests(unittest.TestCase):
         self.assertEqual(SESSION, progress.work_item.codex_session_id)
         self.assertEqual("agent_result_invalid", progress.turn.error_code)
 
+    def test_stale_prompt_turn_number_fails_before_runner_invocation(self) -> None:
+        item = work_item(46)
+        self.store.create_work_item(item)
+        self.service.prepare_work_item(
+            item.work_item_id, source_bundle=b"fixture-base-bundle"
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "Prompt snapshot"):
+            self.service.run_turn(
+                item.work_item_id,
+                issue_revision="revision-1",
+                prompt=prompt("stale turn number\n"),
+                expected_turn_number=2,
+            )
+
+        self.assertEqual(1, len(self.transport.calls))
+        self.assertEqual(RunnerOperation.PREPARE, self.transport.calls[0].operation)
+        self.assertEqual((), self.store.list_turns(item.work_item_id))
+        self.assertEqual(WorkItemState.READY, self.store.get_work_item(item.work_item_id).state)
+
 
 if __name__ == "__main__":
     unittest.main()
