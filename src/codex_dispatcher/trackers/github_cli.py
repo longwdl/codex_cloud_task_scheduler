@@ -23,7 +23,7 @@ from codex_dispatcher.trackers.base import (
     TrackerComment,
     TrackerTask,
 )
-from codex_dispatcher.work_items import validate_branch
+from codex_dispatcher.work_items import validate_branch, validate_git_sha
 
 
 class GitHubCliTrackerError(RuntimeError):
@@ -44,7 +44,7 @@ _RUN_COMMENT_PREFIX = "<!-- codex-dispatcher:"
 _STATUS_LABELS = {f"agent:{state.value}": state for state in TaskState}
 _ISSUE_FIELDS = "id,number,title,body,labels,createdAt,updatedAt,state"
 _PR_FIELDS = (
-    "number,url,headRefName,baseRefName,title,isDraft,state,isCrossRepository"
+    "number,url,headRefName,headRefOid,baseRefName,title,isDraft,state,isCrossRepository"
 )
 _REPOSITORY_RE = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,99})"
@@ -510,6 +510,7 @@ def _parse_pull_request(
         "number",
         "url",
         "headRefName",
+        "headRefOid",
         "baseRefName",
         "title",
         "isDraft",
@@ -520,6 +521,7 @@ def _parse_pull_request(
     number = value["number"]
     url = value["url"]
     head = value["headRefName"]
+    head_sha = value["headRefOid"]
     base = value["baseRefName"]
     title = value["title"]
     is_draft = value["isDraft"]
@@ -539,6 +541,7 @@ def _parse_pull_request(
         raise GitHubCliTrackerError(f"{path} has invalid values")
     try:
         base = validate_branch(base)
+        head_sha = validate_git_sha(head_sha, "pull_request_head_sha")
         parsed_state = PullRequestState(str(state).lower())
     except (TypeError, ValueError) as exc:
         raise GitHubCliTrackerError(f"{path} has invalid values") from exc
@@ -551,6 +554,7 @@ def _parse_pull_request(
         base,
         parsed_state,
         cross_repository,
+        head_sha,
     )
 
 

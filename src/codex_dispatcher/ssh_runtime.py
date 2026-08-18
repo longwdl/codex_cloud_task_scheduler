@@ -242,6 +242,11 @@ def _assemble_ssh_control_sweep(
             if fixture_fault_injection is None
             else fixture_fault_injection.claim_acquired_hook
         ),
+        completion_candidate_hook=(
+            None
+            if fixture_fault_injection is None
+            else fixture_fault_injection.completion_candidate_hook
+        ),
         runner_root=runtime.runner_root,
     )
 

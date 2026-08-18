@@ -21,7 +21,13 @@ from codex_dispatcher.ssh_recovery import (
     plan_ssh_recovery,
 )
 from codex_dispatcher.state_store import StateStore
-from codex_dispatcher.trackers.base import TaskState, Tracker, TrackerComment, TrackerTask
+from codex_dispatcher.trackers.base import (
+    PullRequest,
+    TaskState,
+    Tracker,
+    TrackerComment,
+    TrackerTask,
+)
 from codex_dispatcher.turn_orchestration import TaskBranchPublisher, TurnProgress
 from codex_dispatcher.work_items import Turn, TurnState, WorkItem, WorkItemState
 
@@ -40,6 +46,17 @@ class ClaimAcquiredHook(Protocol):
     def __call__(self, task: TrackerTask) -> None: ...
 
 
+class CompletionCandidateHook(Protocol):
+    """Observe an exact merged completion candidate before local mutation."""
+
+    def __call__(
+        self,
+        task: TrackerTask,
+        work_item: WorkItem,
+        pull_request: PullRequest,
+    ) -> None: ...
+
+
 class ControlSweepStatus(StrEnum):
     IDLE = "idle"
     CLAIM_NOT_ACQUIRED = "claim_not_acquired"
@@ -50,6 +67,7 @@ class ControlSweepStatus(StrEnum):
     NEEDS_INPUT = "needs_input"
     BLOCKED = "blocked"
     STATE_SYNCHRONIZED = "state_synchronized"
+    COMPLETED = "completed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +96,7 @@ class SshControlSweep:
         delivery: GitHubDeliveryCoordinator | None = None,
         slack_delivery: SlackDeliveryCoordinator | None = None,
         claim_acquired_hook: ClaimAcquiredHook | None = None,
+        completion_candidate_hook: CompletionCandidateHook | None = None,
         claimant: str = "codex-dispatcher",
         runner_root: str = "/srv/codex-runner/work-items",
     ) -> None:
@@ -100,6 +119,7 @@ class SshControlSweep:
         self._delivery = delivery
         self._slack_delivery = slack_delivery
         self._claim_acquired_hook = claim_acquired_hook
+        self._completion_candidate_hook = completion_candidate_hook
         self._claimant = claimant
         self._runner_root = runner_root
         self._repositories = {item.slug: item for item in config.repositories}
@@ -175,6 +195,31 @@ class SshControlSweep:
                 recovery,
                 reason=recovery.reason or "recovery_blocked",
             )
+        if recovery.action is SshRecoveryAction.COMPLETE_MERGED_WORK_ITEM:
+            assert recovery.task is not None
+            assert recovery.work_item is not None
+            assert recovery.pull_request is not None
+            if self._completion_candidate_hook is not None:
+                self._completion_candidate_hook(
+                    recovery.task,
+                    recovery.work_item,
+                    recovery.pull_request,
+                )
+            work_item = self._store.update_work_item_state(
+                recovery.work_item.work_item_id,
+                WorkItemState.COMPLETED,
+            )
+            self._deliver_completed(
+                recovery.task,
+                work_item=work_item,
+                pull_request=recovery.pull_request,
+            )
+            updated = self._set_task_state(recovery.task, TaskState.COMPLETED)
+            return _task_result(
+                ControlSweepStatus.COMPLETED,
+                updated,
+                work_item=work_item,
+            )
         if recovery.action is SshRecoveryAction.SYNC_TRACKER_STATE:
             assert recovery.task is not None
             assert recovery.desired_task_state is not None
@@ -191,6 +236,14 @@ class SshControlSweep:
                     work_item=work_item,
                     desired_task_state=recovery.desired_task_state,
                     turn=turns[-1] if turns else None,
+                )
+            elif recovery.desired_task_state is TaskState.COMPLETED:
+                assert work_item is not None
+                assert recovery.pull_request is not None
+                self._deliver_completed(
+                    recovery.task,
+                    work_item=work_item,
+                    pull_request=recovery.pull_request,
                 )
             updated = self._set_task_state(
                 recovery.task,
@@ -458,6 +511,20 @@ class SshControlSweep:
             )
             work_item = slack.work_item
         return work_item
+
+    def _deliver_completed(
+        self,
+        task: TrackerTask,
+        *,
+        work_item: WorkItem,
+        pull_request: PullRequest,
+    ) -> None:
+        if self._delivery is not None:
+            self._delivery.reconcile_completed(
+                task,
+                work_item=work_item,
+                pull_request=pull_request,
+            )
 
     def _repository(self, slug: str) -> RepositoryConfig:
         try:

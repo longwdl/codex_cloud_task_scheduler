@@ -332,6 +332,7 @@ def _ssh_preflight(config_path: Path) -> tuple[int, dict[str, object]]:
     task = plan.task
     work_item = plan.work_item
     turn = plan.turn
+    pull_request = plan.pull_request
     ok = plan.status is not SshPreflightStatus.BLOCKED
     return (0 if ok else 1), {
         "ok": ok,
@@ -344,6 +345,7 @@ def _ssh_preflight(config_path: Path) -> tuple[int, dict[str, object]]:
         "issue_number": None if task is None else task.issue_number,
         "work_item_id": None if work_item is None else work_item.work_item_id,
         "turn_id": None if turn is None else turn.turn_id,
+        "pr_number": None if pull_request is None else pull_request.number,
         "reason": plan.reason,
         "database_preexisting": inspection.database_preexisting,
         "rejected": [

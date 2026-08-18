@@ -8,7 +8,11 @@ from pathlib import Path
 from codex_dispatcher.ssh_recovery import SshRecoveryAction, plan_ssh_recovery
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.testing.fakes import FakeTracker
-from codex_dispatcher.trackers.base import TaskState
+from codex_dispatcher.trackers.base import (
+    PullRequest,
+    PullRequestState,
+    TaskState,
+)
 from codex_dispatcher.work_items import TurnState, WorkItem, WorkItemState
 from tests.test_scheduler import make_config
 from tests.test_ssh_dispatch_planning import BASE_SHA, claimed_task
@@ -30,6 +34,41 @@ def task_in(state: TaskState, issue_number: int = 42):
         claimed_task(issue_number),
         state=state,
         labels=(f"agent:{state.value}", "exec:ssh-cli"),
+    )
+
+
+def review_item(issue_number: int = 42) -> WorkItem:
+    work_item = item(issue_number)
+    for state in (
+        WorkItemState.PREPARING,
+        WorkItemState.READY,
+        WorkItemState.RUNNING,
+        WorkItemState.REVIEW,
+    ):
+        work_item = work_item.transition_to(state)
+    return replace(
+        work_item,
+        last_published_sha="d" * 40,
+        pr_number=7,
+    )
+
+
+def pull_request_for(
+    work_item: WorkItem,
+    state: PullRequestState,
+    *,
+    head_sha: str = "d" * 40,
+) -> PullRequest:
+    return PullRequest(
+        7,
+        f"https://github.com/{work_item.repository}/pull/7",
+        work_item.task_branch,
+        "Codex work",
+        state is PullRequestState.OPEN,
+        work_item.base_branch,
+        state,
+        False,
+        head_sha,
     )
 
 
@@ -182,6 +221,70 @@ class SshRecoveryTests(unittest.TestCase):
                 self.store.close()
                 self.temp_dir.cleanup()
                 self.setUp()
+
+    def test_merged_bound_pr_plans_completion_only_for_the_exact_head(self) -> None:
+        work_item = review_item()
+        self.store.create_work_item(work_item)
+        self.tracker.tasks["42"] = task_in(TaskState.REVIEW)
+        self.tracker.pull_requests[(work_item.repository, work_item.task_branch)] = (
+            pull_request_for(work_item, PullRequestState.OPEN)
+        )
+
+        open_plan = plan_ssh_recovery(self.config, self.store, self.tracker)
+
+        self.assertEqual(SshRecoveryAction.IDLE, open_plan.action)
+        self.tracker.pull_requests[(work_item.repository, work_item.task_branch)] = (
+            pull_request_for(work_item, PullRequestState.MERGED)
+        )
+        merged = plan_ssh_recovery(self.config, self.store, self.tracker)
+
+        self.assertEqual(SshRecoveryAction.COMPLETE_MERGED_WORK_ITEM, merged.action)
+        self.assertEqual(work_item.work_item_id, merged.work_item.work_item_id)
+        self.assertEqual(7, merged.pull_request.number)
+
+        self.tracker.pull_requests[(work_item.repository, work_item.task_branch)] = (
+            pull_request_for(
+                work_item,
+                PullRequestState.MERGED,
+                head_sha="e" * 40,
+            )
+        )
+        conflict = plan_ssh_recovery(self.config, self.store, self.tracker)
+        self.assertEqual(SshRecoveryAction.BLOCK, conflict.action)
+        self.assertEqual("persisted_pull_request_head_conflict", conflict.reason)
+
+    def test_completed_local_item_retries_only_issue_projection(self) -> None:
+        work_item = review_item()
+        work_item = work_item.transition_to(WorkItemState.COMPLETED)
+        self.store.create_work_item(work_item)
+        self.tracker.tasks["42"] = task_in(TaskState.REVIEW)
+        self.tracker.pull_requests[(work_item.repository, work_item.task_branch)] = (
+            pull_request_for(work_item, PullRequestState.MERGED)
+        )
+
+        plan = plan_ssh_recovery(self.config, self.store, self.tracker)
+
+        self.assertEqual(SshRecoveryAction.SYNC_TRACKER_STATE, plan.action)
+        self.assertEqual(TaskState.COMPLETED, plan.desired_task_state)
+        self.assertEqual(7, plan.pull_request.number)
+
+    def test_closed_unmerged_or_premature_completed_issue_blocks(self) -> None:
+        work_item = review_item()
+        self.store.create_work_item(work_item)
+        self.tracker.tasks["42"] = task_in(TaskState.REVIEW)
+        self.tracker.pull_requests[(work_item.repository, work_item.task_branch)] = (
+            pull_request_for(work_item, PullRequestState.CLOSED)
+        )
+
+        closed = plan_ssh_recovery(self.config, self.store, self.tracker)
+        self.assertEqual("review_pull_request_closed_without_merge", closed.reason)
+
+        self.tracker.tasks["42"] = task_in(TaskState.COMPLETED)
+        self.tracker.pull_requests[(work_item.repository, work_item.task_branch)] = (
+            pull_request_for(work_item, PullRequestState.OPEN)
+        )
+        premature = plan_ssh_recovery(self.config, self.store, self.tracker)
+        self.assertEqual("completed_issue_pull_request_not_merged", premature.reason)
 
 
 if __name__ == "__main__":

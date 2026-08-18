@@ -9,6 +9,11 @@ from codex_dispatcher.github_delivery import (
     GitHubDeliveryCoordinator,
     GitHubDeliveryRejected,
 )
+from codex_dispatcher.slack_reporting import (
+    SlackDeliveryReceipt,
+    SlackReportKind,
+    build_slack_report,
+)
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.testing.fakes import FakeTracker
 from codex_dispatcher.trackers.base import PullRequest, PullRequestState, TaskState
@@ -241,6 +246,97 @@ class GitHubDeliveryCoordinatorTests(unittest.TestCase):
                         for call in tracker.calls
                     )
                 )
+
+    def test_completed_projection_requires_exact_merged_bound_head(self) -> None:
+        bound = self.store.bind_draft_pr(self.item.work_item_id, 9)
+        completed = self.store.update_work_item_state(
+            bound.work_item_id,
+            WorkItemState.COMPLETED,
+        )
+        task = replace(
+            self.task,
+            state=TaskState.REVIEW,
+            labels=("agent:review", "exec:ssh-cli", "priority:p1"),
+        )
+        merged = PullRequest(
+            number=9,
+            url="https://github.com/owner/repo/pull/9",
+            branch_name=completed.task_branch,
+            title="Codex work",
+            is_draft=False,
+            base_branch=completed.base_branch,
+            state=PullRequestState.MERGED,
+            head_sha=HEAD_SHA,
+        )
+        tracker = FakeTracker()
+        coordinator = GitHubDeliveryCoordinator(store=self.store, tracker=tracker)
+
+        result = coordinator.reconcile_completed(
+            task,
+            work_item=completed,
+            pull_request=merged,
+        )
+
+        self.assertEqual(WorkItemState.COMPLETED, result.work_item.state)
+        self.assertEqual(["upsert_run_comment"], [call.method for call in tracker.calls])
+        self.assertIn("agent:completed", tracker.calls[0].args[-1])
+        with self.assertRaisesRegex(GitHubDeliveryRejected, "merged pull request"):
+            coordinator.reconcile_completed(
+                task,
+                work_item=completed,
+                pull_request=replace(merged, head_sha="c" * 40),
+            )
+
+    def test_completed_projection_preserves_durable_slack_permalink(self) -> None:
+        report = build_slack_report(
+            work_item_id=self.item.work_item_id,
+            kind=SlackReportKind.ROOT,
+            channel_id="C0BR2D0MS8Y",
+            text="Fixture root",
+        )
+        self.store.prepare_slack_delivery(report)
+        permalink = (
+            "https://fixture.slack.com/archives/C0BR2D0MS8Y/"
+            "p1700000000000001"
+        )
+        self.store.complete_slack_delivery(
+            report.deduplication_key,
+            SlackDeliveryReceipt(
+                report.deduplication_key,
+                "C0BR2D0MS8Y",
+                "1700000000.000001",
+                "1700000000.000001",
+                permalink,
+            ),
+        )
+        bound = self.store.bind_draft_pr(self.item.work_item_id, 9)
+        completed = self.store.update_work_item_state(
+            bound.work_item_id,
+            WorkItemState.COMPLETED,
+        )
+        task = replace(
+            self.task,
+            state=TaskState.REVIEW,
+            labels=("agent:review", "exec:ssh-cli", "priority:p1"),
+        )
+        merged = PullRequest(
+            number=9,
+            url="https://github.com/owner/repo/pull/9",
+            branch_name=completed.task_branch,
+            title="Codex work",
+            is_draft=False,
+            base_branch=completed.base_branch,
+            state=PullRequestState.MERGED,
+            head_sha=HEAD_SHA,
+        )
+        tracker = FakeTracker()
+
+        GitHubDeliveryCoordinator(
+            store=self.store,
+            tracker=tracker,
+        ).reconcile_completed(task, work_item=completed, pull_request=merged)
+
+        self.assertIn(permalink, tracker.calls[0].args[-1])
 
 
 if __name__ == "__main__":

@@ -37,6 +37,8 @@ from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.testing.fakes import FakeTracker
 from codex_dispatcher.trackers.base import (
     DraftPullRequestRequest,
+    PullRequest,
+    PullRequestState,
     TaskState,
     TrackerTask,
 )
@@ -239,6 +241,63 @@ class FixtureFaultTests(unittest.TestCase):
             )
 
         self.assertEqual([], delegate.calls)
+
+    def test_fixture_fault_allows_completion_reads_but_rejects_before_local_write(self) -> None:
+        delegate = FakeTracker()
+        other_task = replace(
+            _task(TaskState.REVIEW),
+            task_id=str(ISSUE + 1),
+            issue_number=ISSUE + 1,
+            issue_node_id="I_fixture_fault_8",
+        )
+        delegate.tasks[other_task.task_id] = other_task
+        injection = FixtureFaultInjection(FixtureFaultPoint.START_RECEIPT, ISSUE)
+        tracker = injection.wrap_tracker(delegate)
+
+        self.assertEqual(
+            other_task,
+            tracker.get_task(FIXTURE_REPOSITORY, other_task.task_id),
+        )
+        work_item = WorkItem.new(
+            repository=FIXTURE_REPOSITORY,
+            issue_number=ISSUE + 1,
+            issue_node_id=other_task.issue_node_id,
+            base_branch="main",
+            base_sha=BASE_SHA,
+            at="2026-08-19T00:00:00Z",
+        )
+        for state in (
+            WorkItemState.PREPARING,
+            WorkItemState.READY,
+            WorkItemState.RUNNING,
+            WorkItemState.REVIEW,
+        ):
+            work_item = work_item.transition_to(
+                state,
+                at="2026-08-19T00:00:00Z",
+            )
+        work_item = replace(
+            work_item,
+            pr_number=9,
+            last_published_sha=HEAD_SHA,
+        )
+        pull_request = PullRequest(
+            9,
+            f"https://github.com/{FIXTURE_REPOSITORY}/pull/9",
+            work_item.task_branch,
+            "Other completed Fixture",
+            False,
+            "main",
+            PullRequestState.MERGED,
+            False,
+            HEAD_SHA,
+        )
+        with self.assertRaisesRegex(FixtureFaultRejected, "cannot complete"):
+            injection.before_completion_candidate(
+                other_task,
+                work_item,
+                pull_request,
+            )
 
     def test_publication_recorded_hook_and_recovery_io_guards_are_exact(self) -> None:
         recorded = replace(_running_item(), last_published_sha=HEAD_SHA)

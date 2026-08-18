@@ -13,7 +13,7 @@ from codex_dispatcher.ssh_recovery import (
     plan_ssh_recovery,
 )
 from codex_dispatcher.state_store import StateStore
-from codex_dispatcher.trackers.base import Tracker, TrackerTask
+from codex_dispatcher.trackers.base import PullRequest, Tracker, TrackerTask
 from codex_dispatcher.work_items import Turn, WorkItem
 
 
@@ -33,6 +33,7 @@ class SshPreflightPlan:
     task: TrackerTask | None = None
     work_item: WorkItem | None = None
     turn: Turn | None = None
+    pull_request: PullRequest | None = None
     reason: str | None = None
     rejected: tuple[Rejection, ...] = ()
 
@@ -78,6 +79,7 @@ def _from_recovery(
         task=recovery.task,
         work_item=recovery.work_item,
         turn=recovery.turn,
+        pull_request=recovery.pull_request,
         reason=recovery.reason,
     )
 

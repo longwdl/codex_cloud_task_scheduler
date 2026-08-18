@@ -53,6 +53,7 @@ def pull_request(
         "number": number,
         "url": f"https://github.com/{REPOSITORY}/pull/{number}",
         "headRefName": branch,
+        "headRefOid": "a" * 40,
         "baseRefName": "main",
         "title": "Codex work for Issue #12",
         "isDraft": True,
@@ -386,6 +387,7 @@ class GitHubCliTrackerTests(unittest.TestCase):
         self.assertEqual(7, observed.number)
         self.assertEqual("main", observed.base_branch)
         self.assertIs(PullRequestState.OPEN, observed.state)
+        self.assertEqual("a" * 40, observed.head_sha)
         argv = runner.call_args.args[0]
         self.assertEqual((GH, "pr", "list"), argv[:3])
         self.assertIn("all", argv)

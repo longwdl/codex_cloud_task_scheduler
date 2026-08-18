@@ -8,7 +8,13 @@ from enum import StrEnum
 from codex_dispatcher.config import Config
 from codex_dispatcher.scheduler import SSH_CLI_EXECUTOR_LABEL
 from codex_dispatcher.state_store import StateStore
-from codex_dispatcher.trackers.base import TaskState, Tracker, TrackerTask
+from codex_dispatcher.trackers.base import (
+    PullRequest,
+    PullRequestState,
+    TaskState,
+    Tracker,
+    TrackerTask,
+)
 from codex_dispatcher.work_items import Turn, TurnState, WorkItem, WorkItemState
 
 
@@ -20,6 +26,7 @@ class SshRecoveryAction(StrEnum):
     START_CLAIMED_TURN = "start_claimed_turn"
     RECOVER_ORPHAN_CLAIM = "recover_orphan_claim"
     SYNC_TRACKER_STATE = "sync_tracker_state"
+    COMPLETE_MERGED_WORK_ITEM = "complete_merged_work_item"
     BLOCK = "block"
 
 
@@ -31,6 +38,7 @@ class SshRecoveryPlan:
     turn: Turn | None = None
     desired_task_state: TaskState | None = None
     reason: str | None = None
+    pull_request: PullRequest | None = None
 
 
 def plan_ssh_recovery(
@@ -107,6 +115,10 @@ def plan_ssh_recovery(
         )
         return SshRecoveryPlan(action, task, work_item)
 
+    completion = _plan_merged_completion(store, tracker, configured)
+    if completion is not None:
+        return completion
+
     remote_claims: list[TrackerTask] = []
     for repository in config.repositories:
         for state in (TaskState.DISPATCHING, TaskState.RUNNING):
@@ -153,6 +165,125 @@ def plan_ssh_recovery(
     return SshRecoveryPlan(SshRecoveryAction.RECOVER_ORPHAN_CLAIM, task=task)
 
 
+def _plan_merged_completion(
+    store: StateStore,
+    tracker: Tracker,
+    configured: dict[str, object],
+) -> SshRecoveryPlan | None:
+    for work_item in store.list_work_items():
+        if work_item.state not in {WorkItemState.REVIEW, WorkItemState.COMPLETED}:
+            continue
+        task = tracker.get_task(work_item.repository, str(work_item.issue_number))
+        error = _binding_error(task, work_item, configured)
+        if error is not None:
+            return _blocked(error, task=task, work_item=work_item)
+        assert task is not None
+        if work_item.state is WorkItemState.COMPLETED and task.state not in {
+            TaskState.REVIEW,
+            TaskState.COMPLETED,
+        }:
+            return _blocked(
+                "completed_work_item_tracker_state_conflict",
+                task=task,
+                work_item=work_item,
+            )
+        if task.state in {TaskState.DISPATCHING, TaskState.RUNNING}:
+            continue
+        if task.state not in {
+            TaskState.READY,
+            TaskState.REVIEW,
+            TaskState.COMPLETED,
+        }:
+            return _blocked(
+                "review_work_item_tracker_state_conflict",
+                task=task,
+                work_item=work_item,
+            )
+        if work_item.last_published_sha is None or work_item.pr_number is None:
+            if task.state is TaskState.COMPLETED or work_item.state is WorkItemState.COMPLETED:
+                return _blocked(
+                    "completed_work_item_has_no_published_pr",
+                    task=task,
+                    work_item=work_item,
+                )
+            continue
+        pull_request = tracker.find_pr_by_branch(
+            work_item.repository,
+            work_item.task_branch,
+        )
+        pr_error = _completion_pull_request_error(pull_request, work_item)
+        if pr_error is not None:
+            return _blocked(
+                pr_error,
+                task=task,
+                work_item=work_item,
+                pull_request=pull_request,
+            )
+        assert pull_request is not None
+        if pull_request.state is PullRequestState.OPEN:
+            if task.state is TaskState.COMPLETED:
+                return _blocked(
+                    "completed_issue_pull_request_not_merged",
+                    task=task,
+                    work_item=work_item,
+                    pull_request=pull_request,
+                )
+            continue
+        if pull_request.state is PullRequestState.CLOSED:
+            return _blocked(
+                "review_pull_request_closed_without_merge",
+                task=task,
+                work_item=work_item,
+                pull_request=pull_request,
+            )
+        if task.state is TaskState.READY:
+            return _blocked(
+                "merged_work_item_cannot_be_reactivated",
+                task=task,
+                work_item=work_item,
+                pull_request=pull_request,
+            )
+        if work_item.state is WorkItemState.COMPLETED:
+            if task.state is TaskState.REVIEW:
+                return SshRecoveryPlan(
+                    SshRecoveryAction.SYNC_TRACKER_STATE,
+                    task=task,
+                    work_item=work_item,
+                    desired_task_state=TaskState.COMPLETED,
+                    pull_request=pull_request,
+                )
+            continue
+        return SshRecoveryPlan(
+            SshRecoveryAction.COMPLETE_MERGED_WORK_ITEM,
+            task=task,
+            work_item=work_item,
+            pull_request=pull_request,
+        )
+    return None
+
+
+def _completion_pull_request_error(
+    pull_request: PullRequest | None,
+    work_item: WorkItem,
+) -> str | None:
+    if pull_request is None:
+        return "persisted_pull_request_missing"
+    if (
+        pull_request.number != work_item.pr_number
+        or pull_request.url
+        != f"https://github.com/{work_item.repository}/pull/{work_item.pr_number}"
+        or pull_request.branch_name != work_item.task_branch
+        or pull_request.base_branch != work_item.base_branch
+        or pull_request.is_cross_repository
+    ):
+        return "persisted_pull_request_identity_conflict"
+    if pull_request.head_sha != work_item.last_published_sha:
+        return "persisted_pull_request_head_conflict"
+    if pull_request.state is PullRequestState.MERGED and pull_request.is_draft:
+        return "merged_pull_request_is_still_draft"
+    return None
+
+
 def _binding_error(
     task: TrackerTask | None,
     work_item: WorkItem,
@@ -194,6 +325,7 @@ def _blocked(
     task: TrackerTask | None = None,
     work_item: WorkItem | None = None,
     turn: Turn | None = None,
+    pull_request: PullRequest | None = None,
 ) -> SshRecoveryPlan:
     return SshRecoveryPlan(
         SshRecoveryAction.BLOCK,
@@ -201,4 +333,5 @@ def _blocked(
         work_item=work_item,
         turn=turn,
         reason=reason,
+        pull_request=pull_request,
     )

@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from codex_dispatcher.slack_reporting import validate_slack_permalink
+from codex_dispatcher.slack_reporting import (
+    SlackDeliveryState,
+    SlackReportKind,
+    slack_deduplication_key,
+    validate_slack_permalink,
+)
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.trackers.base import (
     DraftPullRequestRequest,
@@ -92,6 +97,89 @@ class GitHubDeliveryCoordinator:
                 slack_permalink,
             ),
         )
+
+    def reconcile_completed(
+        self,
+        task: TrackerTask,
+        *,
+        work_item: WorkItem,
+        pull_request: PullRequest,
+    ) -> GitHubDeliveryResult:
+        """Project one already-merged, durably completed WorkItem to its Issue."""
+        if (
+            not isinstance(task, TrackerTask)
+            or not isinstance(work_item, WorkItem)
+            or not isinstance(pull_request, PullRequest)
+        ):
+            raise TypeError("completion inputs must use dispatcher DTOs")
+        if (
+            task.repository != work_item.repository
+            or task.issue_number != work_item.issue_number
+            or task.task_id != str(work_item.issue_number)
+            or task.issue_node_id != work_item.issue_node_id
+            or task.state not in {TaskState.REVIEW, TaskState.COMPLETED}
+            or work_item.state is not WorkItemState.COMPLETED
+            or work_item.last_published_sha is None
+            or work_item.pr_number is None
+        ):
+            raise GitHubDeliveryRejected(
+                "Issue completion conflicts with the durable WorkItem"
+            )
+        expected_url = (
+            f"https://github.com/{work_item.repository}/pull/{work_item.pr_number}"
+        )
+        if (
+            pull_request.number != work_item.pr_number
+            or pull_request.url != expected_url
+            or pull_request.branch_name != work_item.task_branch
+            or pull_request.base_branch != work_item.base_branch
+            or pull_request.state is not PullRequestState.MERGED
+            or pull_request.is_draft
+            or pull_request.is_cross_repository
+            or pull_request.head_sha != work_item.last_published_sha
+        ):
+            raise GitHubDeliveryRejected(
+                "merged pull request conflicts with the completed WorkItem"
+            )
+        self._tracker.upsert_run_comment(
+            work_item.repository,
+            str(work_item.issue_number),
+            f"work-item:{work_item.work_item_id}:status",
+            self._render_comment(
+                work_item,
+                pull_request,
+                TaskState.COMPLETED,
+                self._completed_slack_permalink(work_item),
+            ),
+        )
+        return GitHubDeliveryResult(work_item, pull_request)
+
+    def _completed_slack_permalink(self, work_item: WorkItem) -> str | None:
+        if work_item.slack_channel_id is None and work_item.slack_thread_ts is None:
+            return None
+        if work_item.slack_channel_id is None or work_item.slack_thread_ts is None:
+            raise GitHubDeliveryRejected(
+                "completed WorkItem has an incomplete Slack thread binding"
+            )
+        key = slack_deduplication_key(
+            work_item.work_item_id,
+            kind=SlackReportKind.ROOT,
+            turn_id=None,
+        )
+        delivery = self._store.get_slack_delivery(key)
+        if (
+            delivery is None
+            or delivery.state is not SlackDeliveryState.DELIVERED
+            or delivery.work_item_id != work_item.work_item_id
+            or delivery.kind is not SlackReportKind.ROOT
+            or delivery.channel_id != work_item.slack_channel_id
+            or delivery.message_ts != work_item.slack_thread_ts
+            or delivery.permalink is None
+        ):
+            raise GitHubDeliveryRejected(
+                "completed WorkItem Slack projection is not durably bound"
+            )
+        return delivery.permalink
 
     def _ensure_pull_request(
         self,

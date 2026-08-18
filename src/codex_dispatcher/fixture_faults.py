@@ -170,9 +170,36 @@ class FixtureFaultInjection:
             return self.after_claim_acquired
         return None
 
-    def require_target(self, repository: str, task_id: str | None = None) -> None:
+    @property
+    def completion_candidate_hook(
+        self,
+    ) -> Callable[[TrackerTask, WorkItem, PullRequest], None]:
+        return self.before_completion_candidate
+
+    def before_completion_candidate(
+        self,
+        task: TrackerTask,
+        work_item: WorkItem,
+        pull_request: PullRequest,
+    ) -> None:
+        self.require_repository(task.repository)
+        if (
+            task.issue_number != work_item.issue_number
+            or pull_request.number != work_item.pr_number
+        ):
+            raise FixtureFaultRejected("Fixture completion candidate identity is invalid")
+        raise FixtureFaultRejected(
+            "Fixture fault stage cannot complete an unrelated WorkItem"
+        )
+
+    def require_repository(self, repository: str) -> None:
         if repository != self.repository:
-            raise FixtureFaultRejected("tracker operation escaped the fixed Fixture repository")
+            raise FixtureFaultRejected(
+                "tracker operation escaped the fixed Fixture repository"
+            )
+
+    def require_target(self, repository: str, task_id: str | None = None) -> None:
+        self.require_repository(repository)
         if task_id is not None and task_id != str(self.issue_number):
             raise FixtureFaultRejected("tracker operation escaped the fixed Fixture Issue")
 
@@ -401,7 +428,7 @@ class _FixtureFaultTracker:
         return self._delegate.list_open_tasks(repository, state)
 
     def get_task(self, repository: str, task_id: str) -> TrackerTask | None:
-        self._injection.require_target(repository, task_id)
+        self._injection.require_repository(repository)
         return self._delegate.get_task(repository, task_id)
 
     def list_comments(
@@ -484,10 +511,7 @@ class _FixtureFaultTracker:
     def find_pr_by_branch(
         self, repository: str, branch_name: str
     ) -> PullRequest | None:
-        self._injection.require_target(repository)
-        expected_prefix = f"codex/issue-{self._injection.issue_number}-"
-        if not branch_name.startswith(expected_prefix):
-            raise FixtureFaultRejected("PR lookup escaped the fixed Fixture branch")
+        self._injection.require_repository(repository)
         return self._delegate.find_pr_by_branch(repository, branch_name)
 
     def create_draft_pr(self, request: DraftPullRequestRequest) -> PullRequest:

@@ -79,6 +79,7 @@ class PullRequest:
     base_branch: str | None = None
     state: PullRequestState = PullRequestState.OPEN
     is_cross_repository: bool = False
+    head_sha: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

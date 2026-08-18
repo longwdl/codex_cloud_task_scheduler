@@ -36,7 +36,13 @@ from codex_dispatcher.testing.fake_runner import (
     FakeTurnFixture,
 )
 from codex_dispatcher.testing.fakes import FakeTracker
-from codex_dispatcher.trackers.base import TaskState, TrackerComment, TrackerTask
+from codex_dispatcher.trackers.base import (
+    PullRequest,
+    PullRequestState,
+    TaskState,
+    TrackerComment,
+    TrackerTask,
+)
 from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator
 from codex_dispatcher.work_items import TurnState, WorkItemState
 from tests.test_scheduler import make_config
@@ -286,6 +292,7 @@ class SshControlSweepTests(unittest.TestCase):
         publisher: _RecordingPublisher | None = None,
         delivery: GitHubDeliveryCoordinator | None = None,
         slack_delivery: SlackDeliveryCoordinator | None = None,
+        completion_candidate_hook=None,
     ) -> SshControlSweep:
         return SshControlSweep(
             config=make_config(global_max_active=4),
@@ -297,6 +304,7 @@ class SshControlSweepTests(unittest.TestCase):
             publisher=publisher,
             delivery=delivery,
             slack_delivery=slack_delivery,
+            completion_candidate_hook=completion_candidate_hook,
         )
 
     def _register_checkpoint(
@@ -534,10 +542,155 @@ class SshControlSweepTests(unittest.TestCase):
         result = self._sweep(tracker, source).run_once()
 
         self.assertEqual(ControlSweepStatus.BLOCKED, result.status)
-        self.assertEqual("completed_work_item_cannot_be_reactivated", result.reason)
+        self.assertEqual("completed_work_item_tracker_state_conflict", result.reason)
         self.assertFalse(any(call.method == "claim" for call in tracker.calls))
         self.assertEqual([], source.calls)
         self.assertEqual([], self.transport.calls)
+
+    def test_merged_pr_completes_local_tombstone_before_issue_projection(self) -> None:
+        tracker = FakeTracker()
+        task = replace(
+            claimed_task(),
+            state=TaskState.REVIEW,
+            labels=("agent:review", "exec:ssh-cli", "priority:p1"),
+        )
+        tracker.tasks[task.task_id] = task
+        source = _RecordingSource()
+        item = self.dispatch.resolve_and_prepare(
+            claimed_task(),
+            base_sha=BASE_SHA,
+            source_bundle=_bundle(),
+        )
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.RUNNING)
+        head_sha = "d" * 40
+        self.store.record_published_sha(
+            item.work_item_id,
+            previous_sha=BASE_SHA,
+            head_sha=head_sha,
+        )
+        item = self.store.update_work_item_state(
+            item.work_item_id,
+            WorkItemState.REVIEW,
+        )
+        item = self.store.bind_draft_pr(item.work_item_id, 7)
+        tracker.pull_requests[(item.repository, item.task_branch)] = PullRequest(
+            number=7,
+            url="https://github.com/owner/repo/pull/7",
+            branch_name=item.task_branch,
+            title="Codex work",
+            is_draft=False,
+            base_branch=item.base_branch,
+            state=PullRequestState.MERGED,
+            head_sha=head_sha,
+        )
+        self.transport.calls.clear()
+        delivery = GitHubDeliveryCoordinator(store=self.store, tracker=tracker)
+
+        class ExpectedStop(RuntimeError):
+            pass
+
+        def stop_before_completion(*args) -> None:
+            raise ExpectedStop
+
+        guarded = self._sweep(
+            tracker,
+            source,
+            delivery=delivery,
+            completion_candidate_hook=stop_before_completion,
+        )
+        with self.assertRaises(ExpectedStop):
+            guarded.run_once()
+        before_completion = self.store.get_work_item(item.work_item_id)
+        assert before_completion is not None
+        self.assertEqual(WorkItemState.REVIEW, before_completion.state)
+
+        sweep = self._sweep(tracker, source, delivery=delivery)
+
+        completed = sweep.run_once()
+
+        self.assertEqual(ControlSweepStatus.COMPLETED, completed.status)
+        persisted = self.store.get_work_item(item.work_item_id)
+        assert persisted is not None
+        self.assertEqual(WorkItemState.COMPLETED, persisted.state)
+        self.assertEqual(TaskState.COMPLETED, tracker.tasks[task.task_id].state)
+        writes = [
+            call.method
+            for call in tracker.calls
+            if call.method in {"upsert_run_comment", "set_state"}
+        ]
+        self.assertEqual(["upsert_run_comment", "set_state"], writes)
+        self.assertEqual([], source.calls)
+        self.assertEqual([], self.transport.calls)
+
+        tracker.calls.clear()
+        idle = sweep.run_once()
+        self.assertEqual(ControlSweepStatus.IDLE, idle.status)
+        self.assertFalse(
+            any(call.method in {"upsert_run_comment", "set_state"} for call in tracker.calls)
+        )
+
+    def test_lost_completion_comment_receipt_retries_projection_only(self) -> None:
+        tracker = _InterruptingDeliveryTracker(interrupt_comment_once=True)
+        task = replace(
+            claimed_task(),
+            state=TaskState.REVIEW,
+            labels=("agent:review", "exec:ssh-cli", "priority:p1"),
+        )
+        tracker.tasks[task.task_id] = task
+        source = _RecordingSource()
+        item = self.dispatch.resolve_and_prepare(
+            claimed_task(),
+            base_sha=BASE_SHA,
+            source_bundle=_bundle(),
+        )
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.RUNNING)
+        head_sha = "d" * 40
+        self.store.record_published_sha(
+            item.work_item_id,
+            previous_sha=BASE_SHA,
+            head_sha=head_sha,
+        )
+        item = self.store.update_work_item_state(
+            item.work_item_id,
+            WorkItemState.REVIEW,
+        )
+        item = self.store.bind_draft_pr(item.work_item_id, 7)
+        tracker.pull_requests[(item.repository, item.task_branch)] = PullRequest(
+            number=7,
+            url="https://github.com/owner/repo/pull/7",
+            branch_name=item.task_branch,
+            title="Codex work",
+            is_draft=False,
+            base_branch=item.base_branch,
+            state=PullRequestState.MERGED,
+            head_sha=head_sha,
+        )
+        self.transport.calls.clear()
+        delivery = GitHubDeliveryCoordinator(store=self.store, tracker=tracker)
+        sweep = self._sweep(tracker, source, delivery=delivery)
+
+        with self.assertRaisesRegex(RuntimeError, "lost Issue comment receipt"):
+            sweep.run_once()
+
+        interrupted = self.store.get_work_item(item.work_item_id)
+        assert interrupted is not None
+        self.assertEqual(WorkItemState.COMPLETED, interrupted.state)
+        self.assertEqual(TaskState.REVIEW, tracker.tasks[task.task_id].state)
+
+        recovered = sweep.run_once()
+
+        self.assertEqual(ControlSweepStatus.STATE_SYNCHRONIZED, recovered.status)
+        self.assertEqual(TaskState.COMPLETED, tracker.tasks[task.task_id].state)
+        self.assertEqual([], source.calls)
+        self.assertEqual([], self.transport.calls)
+        self.assertEqual(
+            2,
+            sum(call.method == "upsert_run_comment" for call in tracker.calls),
+        )
+        self.assertEqual(
+            0,
+            sum(call.method == "create_draft_pr" for call in tracker.calls),
+        )
 
     def test_interrupted_prepare_retries_exact_persisted_source(self) -> None:
         tracker = FakeTracker()
