@@ -30,6 +30,26 @@ maintainers = ["duke"]
 required_checks = ["tests"]
 '''
 
+SSH_RUNTIME = '''
+
+[ssh_runtime]
+git_path = "/usr/bin/git"
+gh_path = "/usr/bin/gh"
+ssh_path = "/usr/bin/ssh"
+host = "runner.internal"
+user = "codex"
+port = 22
+known_hosts_path = "/etc/codex-dispatcher/runner_known_hosts"
+identity_file = "/etc/codex-dispatcher/runner_ed25519"
+lock_path = "/run/codex-dispatcher/dispatcher.lock"
+mirror_root = "/var/lib/codex-dispatcher/mirrors"
+source_temporary_root = "/var/lib/codex-dispatcher/source-temporary"
+quarantine_root = "/var/lib/codex-dispatcher/quarantine"
+runner_root = "/srv/codex-runner/work-items"
+connect_timeout_seconds = 10
+operation_timeout_seconds = 3900
+'''
+
 
 class ConfigTests(unittest.TestCase):
     def _load(self, content: str):
@@ -75,6 +95,36 @@ class ConfigTests(unittest.TestCase):
                     'allowed_paths = [".github/workflows"]',
                 )
             )
+
+    def test_optional_ssh_runtime_is_strict_and_secret_free(self) -> None:
+        configured = VALID.replace(
+            'codex_version = "0.1.0"',
+            'codex_version = "0.1.0"\nssh_version = "9.6"',
+        )
+        runtime = self._load(configured + SSH_RUNTIME).ssh_runtime
+        self.assertIsNotNone(runtime)
+        assert runtime is not None
+        self.assertEqual(Path("/usr/bin/ssh"), runtime.ssh_path)
+        self.assertEqual("/srv/codex-runner/work-items", runtime.runner_root)
+        self.assertIsNone(runtime.assh_proxy_path)
+
+        with self.assertRaisesRegex(ValueError, "configured together"):
+            self._load(
+                configured
+                + SSH_RUNTIME
+                + 'assh_proxy_path = "/opt/homebrew/bin/assh"\n'
+            )
+        with self.assertRaisesRegex(ValueError, "unknown field"):
+            self._load(configured + SSH_RUNTIME + 'github_token = "secret"\n')
+        with self.assertRaisesRegex(ValueError, "normalized absolute"):
+            self._load(
+                (configured + SSH_RUNTIME).replace(
+                    'identity_file = "/etc/codex-dispatcher/runner_ed25519"',
+                    'identity_file = "../runner_ed25519"',
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "ssh_version"):
+            self._load(VALID + SSH_RUNTIME)
 
 
 if __name__ == "__main__":

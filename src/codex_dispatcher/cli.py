@@ -23,7 +23,7 @@ from codex_dispatcher.trackers.base import Tracker
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codex-dispatcher",
-        description="Fail-closed GitHub to Codex Cloud task dispatcher.",
+        description="Fail-closed GitHub to persistent Codex CLI task dispatcher.",
     )
     parser.add_argument("--version", action="version", version=__version__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -54,6 +54,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Required safety flag; only tracker reads are allowed.",
     )
     run_once.add_argument("--json", action="store_true", help="Emit machine-readable output.")
+
+    ssh_run_once = subparsers.add_parser(
+        "ssh-run-once",
+        help="Execute one recovery-first SSH sweep with external writes enabled.",
+    )
+    ssh_run_once.add_argument("--config", required=True, type=Path)
+    ssh_run_once.add_argument(
+        "--apply",
+        action="store_true",
+        required=True,
+        help="Required explicit acknowledgement that GitHub and SSH writes are enabled.",
+    )
+    ssh_run_once.add_argument(
+        "--json", action="store_true", help="Emit machine-readable output."
+    )
     return parser
 
 
@@ -234,6 +249,54 @@ def _github_token() -> str | None:
     return None
 
 
+def _ssh_run_once(config_path: Path) -> tuple[int, dict[str, object]]:
+    if os.environ.get("CODEX_DISPATCHER_ENABLE_SSH_WRITES") != "1":
+        return 1, {
+            "ok": False,
+            "error": "CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 is required",
+        }
+    token = _github_token()
+    if token is None:
+        return 1, {"ok": False, "error": "a recognized explicit GitHub token is required"}
+    try:
+        from codex_dispatcher.redaction import redact_text
+        from codex_dispatcher.ssh_runtime import (
+            load_protected_ssh_config,
+            run_ssh_control_sweep,
+            validate_runtime_state_path,
+        )
+
+        config = load_protected_ssh_config(config_path)
+        validate_runtime_state_path(config.scheduler.database_path)
+        with StateStore(config.scheduler.database_path) as store:
+            store.migrate()
+            if store.integrity_check() != "ok":
+                return 1, {
+                    "ok": False,
+                    "error": "state database integrity check failed",
+                }
+            result = run_ssh_control_sweep(
+                config=config,
+                store=store,
+                github_token=token,
+            )
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        return 1, {
+            "ok": False,
+            "error": redact_text(str(exc), (token,)),
+        }
+    return 0, {
+        "ok": True,
+        "ssh_run": True,
+        "status": result.status.value,
+        "repository": result.repository,
+        "issue_number": result.issue_number,
+        "work_item_id": result.work_item_id,
+        "turn_id": result.turn_id,
+        "reason": result.reason,
+    }
+
+
 def _emit(payload: dict[str, object], as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
@@ -252,6 +315,11 @@ def _emit(payload: dict[str, object], as_json: bool) -> None:
     if payload.get("dry_run") is True:
         print(f"selected: {len(payload.get('selected', []))}")
         print(f"rejected: {len(payload.get('rejected', []))}")
+    if payload.get("ssh_run") is True:
+        print(f"status: {payload.get('status')}")
+        if payload.get("repository") is not None:
+            print(f"repository: {payload.get('repository')}")
+            print(f"issue_number: {payload.get('issue_number')}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -266,6 +334,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return code
     if args.command == "run-once":
         code, payload = _run_once(args.config)
+        _emit(payload, args.json)
+        return code
+    if args.command == "ssh-run-once":
+        code, payload = _ssh_run_once(args.config)
         _emit(payload, args.json)
         return code
     raise AssertionError(f"unhandled command: {args.command}")

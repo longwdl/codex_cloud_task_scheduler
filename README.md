@@ -29,6 +29,7 @@ executor. The environment-independent implementation now includes:
 - fixed OpenSSH framing and an absolute-path `codex-runner-v1` forced-command service;
 - persistent Runner workspaces and idempotent first/resume Turn execution;
 - a recovery-first, process-locked offline Control Host sweep with stable Issue/comment snapshots;
+- a double-opt-in `ssh-run-once` entry point that assembles only fixed GitHub, mirror, and SSH ports;
 - outbound-only Slack projection models and offline integration tests.
 
 The Runner path has now been exercised against the private Fixture through the real pinned SSH
@@ -37,12 +38,12 @@ created one persistent session, and resumed that exact session on the same branc
 the read-only task produced no diff or publication checkpoint. The first-phase Runner release is
 installed on `s3`, but remains user-owned because the Fixture account has no passwordless sudo.
 
-The sweep currently stops at a verified local state or Publisher checkpoint and is tested only with
-injected tracker/source/Runner fakes. The trusted-mirror adapter is implemented but tested with a
-mocked Git command boundary; live GitHub scheduling wiring, Publisher push, Slack delivery,
-automatic draft PR creation, merge, and production deployment are still absent. Existing Codex
-Cloud adapter code is retained only during migration; Cloud writes remain disabled and are not part
-of the target architecture.
+The sweep currently stops at a verified local state or Publisher checkpoint. Its live dependency
+assembly is implemented, but the write-enabled entry point has not yet been exercised against the
+Fixture. The trusted-mirror fetch is also not live-tested. Publisher push, Slack delivery, automatic
+draft PR creation, merge, and production deployment are still absent. Existing Codex Cloud adapter
+code is retained only during migration; Cloud writes remain disabled and are not part of the target
+architecture.
 
 Candidate planning is exposed through a dependency-injected Python entry point and a read-only
 GitHub CLI dry-run command. The command performs tracker reads but does not claim issues, mutate
@@ -71,6 +72,10 @@ PYTHONPATH=src python3 -m codex_dispatcher doctor \
 PYTHONPATH=src python3 -m codex_dispatcher run-once \
   --dry-run --config config/dispatcher.example.toml --json
 ```
+
+The write-enabled SSH command is intentionally not part of routine offline verification. It requires
+both `--apply` and the exact environment opt-in `CODEX_DISPATCHER_ENABLE_SSH_WRITES=1`, plus an
+explicit recognized GitHub token. Do not run it merely to validate configuration.
 
 A build backend and wheel packaging are intentionally deferred until that tooling choice is
 approved; they are not needed for the offline core.

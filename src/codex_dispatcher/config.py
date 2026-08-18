@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from codex_dispatcher.task_spec import TaskSpecError, is_hard_denied_path, normalize_repo_path
@@ -23,6 +23,7 @@ class ToolPins:
     git_version: str
     gh_version: str
     codex_version: str
+    ssh_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,10 +39,32 @@ class RepositoryConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SshRuntimeConfig:
+    git_path: Path
+    gh_path: Path
+    ssh_path: Path
+    host: str
+    user: str
+    port: int
+    known_hosts_path: Path
+    identity_file: Path
+    lock_path: Path
+    mirror_root: Path
+    source_temporary_root: Path
+    quarantine_root: Path
+    runner_root: str
+    connect_timeout_seconds: int
+    operation_timeout_seconds: int
+    assh_proxy_path: Path | None = None
+    assh_home: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     scheduler: SchedulerConfig
     tools: ToolPins
     repositories: tuple[RepositoryConfig, ...]
+    ssh_runtime: SshRuntimeConfig | None = None
 
 
 def _expect_table(value: Any, path: str) -> dict[str, Any]:
@@ -69,6 +92,19 @@ def _positive_int(value: Any, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{path} must be a positive integer")
     return value
+
+
+def _absolute_path(value: Any, path: str) -> Path:
+    raw = _string(value, path)
+    candidate = Path(raw)
+    if (
+        not candidate.is_absolute()
+        or str(candidate) != raw
+        or ".." in candidate.parts
+        or "\x00" in raw
+    ):
+        raise ValueError(f"{path} must be a normalized absolute path")
+    return candidate
 
 
 def _string_list(value: Any, path: str, *, allow_empty: bool = False) -> tuple[str, ...]:
@@ -102,7 +138,13 @@ def load_config(path: Path) -> Config:
     except tomllib.TOMLDecodeError as exc:
         raise ValueError(f"invalid TOML in {path}: {exc}") from exc
 
-    _check_keys(raw, frozenset({"scheduler", "tools", "repositories"}), "root")
+    required_root = frozenset({"scheduler", "tools", "repositories"})
+    unknown_root = set(raw) - required_root - {"ssh_runtime"}
+    missing_root = required_root - set(raw)
+    if unknown_root:
+        raise ValueError(f"root has unknown field(s): {', '.join(sorted(unknown_root))}")
+    if missing_root:
+        raise ValueError(f"root is missing required field(s): {', '.join(sorted(missing_root))}")
     scheduler = _expect_table(raw["scheduler"], "scheduler")
     _check_keys(
         scheduler,
@@ -112,7 +154,13 @@ def load_config(path: Path) -> Config:
         "scheduler",
     )
     tools = _expect_table(raw["tools"], "tools")
-    _check_keys(tools, frozenset({"git_version", "gh_version", "codex_version"}), "tools")
+    required_tools = frozenset({"git_version", "gh_version", "codex_version"})
+    unknown_tools = set(tools) - required_tools - {"ssh_version"}
+    missing_tools = required_tools - set(tools)
+    if unknown_tools:
+        raise ValueError(f"tools has unknown field(s): {', '.join(sorted(unknown_tools))}")
+    if missing_tools:
+        raise ValueError(f"tools is missing required field(s): {', '.join(sorted(missing_tools))}")
     repositories = raw["repositories"]
     if not isinstance(repositories, list) or not repositories:
         raise ValueError("repositories must be a non-empty array of tables")
@@ -164,6 +212,13 @@ def load_config(path: Path) -> Config:
     slugs = [repository.slug for repository in parsed_repositories]
     if len(set(slugs)) != len(slugs):
         raise ValueError("repositories contains duplicate slug values")
+    ssh_runtime = (
+        None
+        if "ssh_runtime" not in raw
+        else _parse_ssh_runtime(raw["ssh_runtime"])
+    )
+    if ssh_runtime is not None and "ssh_version" not in tools:
+        raise ValueError("tools.ssh_version is required when ssh_runtime is configured")
     return Config(
         scheduler=SchedulerConfig(
             database_path=Path(
@@ -183,6 +238,103 @@ def load_config(path: Path) -> Config:
             git_version=_string(tools["git_version"], "tools.git_version"),
             gh_version=_string(tools["gh_version"], "tools.gh_version"),
             codex_version=_string(tools["codex_version"], "tools.codex_version"),
+            ssh_version=(
+                _string(tools["ssh_version"], "tools.ssh_version")
+                if "ssh_version" in tools
+                else None
+            ),
         ),
         repositories=tuple(parsed_repositories),
+        ssh_runtime=ssh_runtime,
+    )
+
+
+def _parse_ssh_runtime(value: Any) -> SshRuntimeConfig:
+    table = _expect_table(value, "ssh_runtime")
+    required = frozenset(
+        {
+            "git_path",
+            "gh_path",
+            "ssh_path",
+            "host",
+            "user",
+            "port",
+            "known_hosts_path",
+            "identity_file",
+            "lock_path",
+            "mirror_root",
+            "source_temporary_root",
+            "quarantine_root",
+            "runner_root",
+            "connect_timeout_seconds",
+            "operation_timeout_seconds",
+        }
+    )
+    optional = frozenset({"assh_proxy_path", "assh_home"})
+    unknown = set(table) - required - optional
+    missing = required - set(table)
+    if unknown:
+        raise ValueError(
+            f"ssh_runtime has unknown field(s): {', '.join(sorted(unknown))}"
+        )
+    if missing:
+        raise ValueError(
+            f"ssh_runtime is missing required field(s): {', '.join(sorted(missing))}"
+        )
+    proxy_present = "assh_proxy_path" in table
+    home_present = "assh_home" in table
+    if proxy_present != home_present:
+        raise ValueError(
+            "ssh_runtime.assh_proxy_path and ssh_runtime.assh_home must be configured together"
+        )
+    runner_root = _string(table["runner_root"], "ssh_runtime.runner_root")
+    runner_path = PurePosixPath(runner_root)
+    if (
+        not runner_path.is_absolute()
+        or str(runner_path) != runner_root
+        or ".." in runner_path.parts
+        or "\\" in runner_root
+        or "\x00" in runner_root
+    ):
+        raise ValueError("ssh_runtime.runner_root must be a normalized absolute POSIX path")
+    return SshRuntimeConfig(
+        git_path=_absolute_path(table["git_path"], "ssh_runtime.git_path"),
+        gh_path=_absolute_path(table["gh_path"], "ssh_runtime.gh_path"),
+        ssh_path=_absolute_path(table["ssh_path"], "ssh_runtime.ssh_path"),
+        host=_string(table["host"], "ssh_runtime.host"),
+        user=_string(table["user"], "ssh_runtime.user"),
+        port=_positive_int(table["port"], "ssh_runtime.port"),
+        known_hosts_path=_absolute_path(
+            table["known_hosts_path"], "ssh_runtime.known_hosts_path"
+        ),
+        identity_file=_absolute_path(
+            table["identity_file"], "ssh_runtime.identity_file"
+        ),
+        lock_path=_absolute_path(table["lock_path"], "ssh_runtime.lock_path"),
+        mirror_root=_absolute_path(table["mirror_root"], "ssh_runtime.mirror_root"),
+        source_temporary_root=_absolute_path(
+            table["source_temporary_root"], "ssh_runtime.source_temporary_root"
+        ),
+        quarantine_root=_absolute_path(
+            table["quarantine_root"], "ssh_runtime.quarantine_root"
+        ),
+        runner_root=runner_root,
+        connect_timeout_seconds=_positive_int(
+            table["connect_timeout_seconds"],
+            "ssh_runtime.connect_timeout_seconds",
+        ),
+        operation_timeout_seconds=_positive_int(
+            table["operation_timeout_seconds"],
+            "ssh_runtime.operation_timeout_seconds",
+        ),
+        assh_proxy_path=(
+            _absolute_path(table["assh_proxy_path"], "ssh_runtime.assh_proxy_path")
+            if proxy_present
+            else None
+        ),
+        assh_home=(
+            _absolute_path(table["assh_home"], "ssh_runtime.assh_home")
+            if home_present
+            else None
+        ),
     )

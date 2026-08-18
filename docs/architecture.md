@@ -91,6 +91,15 @@ lock enforce this; SQLite leases are not used to enable concurrent submitters. `
 active state: an ambiguous SSH interruption retains the global slot until a read-only `status`
 request proves the remote outcome. The original Prompt is never replayed during reconciliation.
 
+The live Control Host entry point is a one-sweep command, not an interactive shell. It requires both
+the `--apply` argument and `CODEX_DISPATCHER_ENABLE_SSH_WRITES=1`; without either, configuration and
+adapters are not loaded. Runtime TOML contains only fixed paths, host identity, timeouts, and storage
+locations. GitHub credentials remain environment-only and are never passed to SSH.
+The live command accepts only an absolute config path whose parent and file are owned by root or the
+Dispatcher user, non-symlink, and non-group/world-writable.
+The SQLite parent, database, WAL, and SHM files are checked against the same ownership/write boundary
+before SQLite opens them.
+
 ## Input and output channels
 
 GitHub is the only human-input channel. The scheduler accepts a change only after an allowed

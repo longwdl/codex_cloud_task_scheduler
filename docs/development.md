@@ -2,8 +2,10 @@
 
 ## Current implementation boundary
 
-The current phase is environment-independent. It must run without Linux-only isolation, network
-access, GitHub/Slack/OpenAI credentials, a running SSH server, or third-party Python packages.
+The core and its complete test suite remain environment-independent. Tests must run without
+Linux-only isolation, network access, GitHub/Slack/OpenAI credentials, a running SSH server, or
+third-party Python packages. A write-enabled live entry point now exists, but it is never invoked by
+the test suite.
 
 The existing repository already contains:
 
@@ -51,18 +53,22 @@ The environment-independent core now additionally contains:
   Publisher checkpoint;
 - a protected GitHub mirror refresher that fetches one configured base branch into a fixed internal
   ref, keeps credentials out of argv and persistent Git config, and composes with the exact-source
-  bundle builder.
+  bundle builder;
+- strict, secret-free SSH runtime configuration and a dependency assembly boundary for GitHub,
+  mirror, quarantine, fixed SSH transport, process lock, and the single sweep;
+- a double-opt-in `ssh-run-once` CLI whose Git/gh/OpenSSH version checks and local SQLite integrity check
+  complete before the sweep can claim an Issue.
 
 The fixed OpenSSH argv/byte-stream adapter is covered by isolated unit tests, and the installed
 Runner protocol has also completed the disposable SSH/real-Codex fixture recorded in
-`docs/live-test-evidence.md`. The offline Control Host sweep is now covered through injected fakes,
-and the trusted-mirror command boundary is covered without network access. The next phase is runtime
-wiring for live GitHub claim/reconciliation, followed by explicit Publisher/Slack delivery. The
-Runner must not receive GitHub write or production credentials.
+`docs/live-test-evidence.md`. The offline Control Host sweep and runtime assembly are covered through
+injected fakes, and the trusted-mirror command boundary is covered without network access. The next
+phase is a bounded live GitHub claim/Runner fixture, followed by explicit Publisher/Slack delivery.
+The Runner must not receive GitHub write or production credentials.
 
 Explicitly deferred:
 
-- an unattended Control Host scheduling entry point;
+- systemd/timer activation of the one-sweep entry point;
 - live GitHub claim/reconciliation in the SSH workflow;
 - live GitHub Publisher writes and Draft PR creation;
 - Slack API calls;

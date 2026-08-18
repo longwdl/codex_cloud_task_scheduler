@@ -1,6 +1,6 @@
 [scheduler]
 poll_interval_seconds = 120
-global_max_active = 2
+global_max_active = 1
 database_path = "/var/lib/codex-dispatcher/state.db"
 workspace_root = "/var/lib/codex-dispatcher/repos"
 
@@ -8,6 +8,24 @@ workspace_root = "/var/lib/codex-dispatcher/repos"
 git_version = "2.55.0"
 gh_version = "2.97.0"
 codex_version = "0.147.0"
+ssh_version = "9.6"
+
+[ssh_runtime]
+git_path = "/usr/bin/git"
+gh_path = "/usr/bin/gh"
+ssh_path = "/usr/bin/ssh"
+host = "runner.internal"
+user = "codex"
+port = 22
+known_hosts_path = "/etc/codex-dispatcher/runner_known_hosts"
+identity_file = "/etc/codex-dispatcher/runner_ed25519"
+lock_path = "/run/codex-dispatcher/dispatcher.lock"
+mirror_root = "/var/lib/codex-dispatcher/mirrors"
+source_temporary_root = "/var/lib/codex-dispatcher/source-temporary"
+quarantine_root = "/var/lib/codex-dispatcher/quarantine"
+runner_root = "/srv/codex-runner/work-items"
+connect_timeout_seconds = 10
+operation_timeout_seconds = 3900
 
 [[repositories]]
 slug = "longwdl/codex-dispatcher-fixture"

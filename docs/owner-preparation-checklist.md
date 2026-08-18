@@ -27,6 +27,18 @@ Prepare a non-production Linux host or VM with:
 
 Do not install Publisher credentials until its fixed-parameter contract and offline tests pass.
 
+The write-enabled Control Host command now requires a strict `[ssh_runtime]` table. Store only
+absolute executable/file/directory paths, fixed Runner host/user/port, timeouts, and the Runner
+work-item root there. Do not place token or private-key contents in TOML. Production leaves the
+optional `assh_proxy_path`/`assh_home` pair absent; the current Mac Fixture must configure both
+together. The command additionally requires the explicit process environment gates
+`CODEX_DISPATCHER_ENABLE_SSH_WRITES=1` and a recognized `GH_TOKEN` or `GITHUB_TOKEN`.
+The `[tools]` table must pin the Control Host Git, gh, and OpenSSH versions; OpenSSH is read from
+`ssh -V` and must match before the sweep can acquire or mutate external work.
+Pass the live config by absolute path. Its parent and file may be owned by root or the Dispatcher
+user. The SQLite directory and any existing DB/WAL/SHM files must be owned by the Dispatcher user.
+All of them must be non-symlink and not group/world writable.
+
 ### 2. Dedicated Linux Runner
 
 Prepare a rebuildable Linux host with:

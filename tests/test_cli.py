@@ -5,12 +5,14 @@ import io
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from codex_dispatcher.cli import main, run_once_dry_run
 from codex_dispatcher.contract import ContractCheck
+from codex_dispatcher.control_sweep import ControlSweepResult, ControlSweepStatus
 from codex_dispatcher.domain import Run
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.testing.fakes import FakeTracker
@@ -100,6 +102,136 @@ class CliTests(unittest.TestCase):
     def test_run_once_requires_explicit_dry_run(self) -> None:
         with self.assertRaises(SystemExit):
             main(["run-once", "--config", "config.toml"])
+
+    def test_ssh_run_once_requires_cli_and_environment_opt_in(self) -> None:
+        with self.assertRaises(SystemExit):
+            main(["ssh-run-once", "--config", "config.toml"])
+
+        stdout = io.StringIO()
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch("codex_dispatcher.ssh_runtime.load_protected_ssh_config") as load,
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = main(
+                [
+                    "ssh-run-once",
+                    "--apply",
+                    "--config",
+                    "config.toml",
+                    "--json",
+                ]
+            )
+        self.assertEqual(1, exit_code)
+        self.assertIn("ENABLE_SSH_WRITES", json.loads(stdout.getvalue())["error"])
+        load.assert_not_called()
+
+    def test_ssh_run_once_requires_recognized_explicit_token(self) -> None:
+        stdout = io.StringIO()
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CODEX_DISPATCHER_ENABLE_SSH_WRITES": "1",
+                    "GITHUB_TOKEN": "unknown-token",
+                },
+                clear=True,
+            ),
+            patch("codex_dispatcher.ssh_runtime.load_protected_ssh_config") as load,
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = main(
+                [
+                    "ssh-run-once",
+                    "--apply",
+                    "--config",
+                    "config.toml",
+                    "--json",
+                ]
+            )
+        self.assertEqual(1, exit_code)
+        self.assertIn("token", json.loads(stdout.getvalue())["error"])
+        load.assert_not_called()
+
+    def test_ssh_run_once_migrates_state_and_redacts_failures(self) -> None:
+        token = "github_pat_ssh_runtime_fixture"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = make_config(global_max_active=1)
+            config = replace(
+                base,
+                scheduler=replace(
+                    base.scheduler,
+                    database_path=Path(temp_dir) / "state.db",
+                ),
+            )
+            stdout = io.StringIO()
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "CODEX_DISPATCHER_ENABLE_SSH_WRITES": "1",
+                        "GITHUB_TOKEN": token,
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "codex_dispatcher.ssh_runtime.load_protected_ssh_config",
+                    return_value=config,
+                ),
+                patch(
+                    "codex_dispatcher.ssh_runtime.run_ssh_control_sweep",
+                    return_value=ControlSweepResult(ControlSweepStatus.IDLE),
+                ) as run_sweep,
+                contextlib.redirect_stdout(stdout),
+            ):
+                exit_code = main(
+                    [
+                        "ssh-run-once",
+                        "--apply",
+                        "--config",
+                        "config.toml",
+                        "--json",
+                    ]
+                )
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(0, exit_code)
+            self.assertEqual("idle", payload["status"])
+            self.assertTrue((Path(temp_dir) / "state.db").is_file())
+            self.assertEqual(token, run_sweep.call_args.kwargs["github_token"])
+            self.assertNotIn(token, stdout.getvalue())
+
+            stdout = io.StringIO()
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "CODEX_DISPATCHER_ENABLE_SSH_WRITES": "1",
+                        "GITHUB_TOKEN": token,
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "codex_dispatcher.ssh_runtime.load_protected_ssh_config",
+                    return_value=config,
+                ),
+                patch(
+                    "codex_dispatcher.ssh_runtime.run_ssh_control_sweep",
+                    side_effect=RuntimeError(f"fixture failure {token}"),
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                exit_code = main(
+                    [
+                        "ssh-run-once",
+                        "--apply",
+                        "--config",
+                        "config.toml",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(1, exit_code)
+            self.assertNotIn(token, stdout.getvalue())
+            self.assertIn("[REDACTED]", stdout.getvalue())
 
     def test_run_once_reports_missing_gh_without_external_write(self) -> None:
         stdout = io.StringIO()

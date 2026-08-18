@@ -504,8 +504,8 @@ Slack 中人工消息对系统行为没有任何影响。
 - 全部 Fake 和故障路径单测。
 
 状态：离线实现完成，包括恢复优先的单次 Control Host sweep；该 sweep 使用注入端口和 fake
-覆盖 GitHub claim/state、source snapshot 与 SSH Runner，尚未暴露无人值守入口或接真实外部
-服务。
+覆盖 GitHub claim/state、source snapshot 与 SSH Runner。双重显式启用的 `ssh-run-once` 入口和
+严格、无 secret 的 runtime 配置已经实现，但尚未对 Fixture 执行 live claim。
 
 ### Phase B：本地 Git bundle/quarantine
 
@@ -678,6 +678,10 @@ git diff --check
 | AC-039 | mirror 远端/引用注入 | URL 只能从配置 slug 派生，只 fetch 配置 base 到固定内部 ref |
 | AC-040 | mirror 凭据隔离 | token 不进入 argv、持久 Git config、异常或命令输出；只注入受控 Git 子进程环境 |
 | AC-041 | PREPARE 恢复时主干已前进 | 不 fetch 当前 base，exact bundle 仍使用持久化旧 base SHA |
+| AC-042 | SSH live 入口误触 | 缺少 `--apply` 或 `CODEX_DISPATCHER_ENABLE_SSH_WRITES=1` 时不加载配置、不写 SQLite、不访问外部服务 |
+| AC-043 | SSH runtime 配置含 secret | 严格字段解析直接拒绝 token/key 内容字段；凭据只能来自显式环境注入 |
+| AC-044 | Control Host 工具版本漂移 | Git/gh/OpenSSH 精确版本检查失败时不进入 sweep，不 claim Issue |
+| AC-045 | runtime TOML/SQLite 路径替换 | 配置父目录及单链接普通文件、DB 目录及已有 DB/WAL/SHM 必须同用户拥有、非 symlink 且不可被 group/world 写 |
 
 ### 12.3 Live Fixture 顺序
 
