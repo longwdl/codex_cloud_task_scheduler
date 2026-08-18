@@ -197,12 +197,19 @@ def _assemble_ssh_control_sweep(
         connect_timeout_seconds=runtime.connect_timeout_seconds,
         operation_timeout_seconds=runtime.operation_timeout_seconds,
     )
+    if fixture_fault_injection is not None:
+        transport = fixture_fault_injection.wrap_transport(transport)
     orchestrator = OfflineTurnOrchestrator(
         store=store,
         transport=transport,
         bundle_verifier=GitBundleQuarantineVerifier(
             git_path=git_path,
             quarantine_root=runtime.quarantine_root,
+        ),
+        publication_recorded_hook=(
+            None
+            if fixture_fault_injection is None
+            else fixture_fault_injection.publication_recorded_hook
         ),
     )
     dispatch = OfflineSshDispatchService(

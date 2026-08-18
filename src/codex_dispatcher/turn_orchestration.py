@@ -76,6 +76,12 @@ class TaskBranchPublisher(Protocol):
     ) -> PublicationReceiptLike: ...
 
 
+class PublicationRecordedHook(Protocol):
+    """Fixture-only boundary after the publication anchor is durably recorded."""
+
+    def __call__(self, work_item: WorkItem, turn: Turn) -> None: ...
+
+
 class OfflineTurnOrchestrator:
     """Drive the fixed Runner port without network- or provider-specific behavior."""
 
@@ -85,10 +91,12 @@ class OfflineTurnOrchestrator:
         store: StateStore,
         transport: RunnerTransport,
         bundle_verifier: BundleVerifier,
+        publication_recorded_hook: PublicationRecordedHook | None = None,
     ) -> None:
         self._store = store
         self._transport = transport
         self._bundle_verifier = bundle_verifier
+        self._publication_recorded_hook = publication_recorded_hook
 
     def prepare_work_item(self, work_item_id: str, *, source_bundle: bytes) -> WorkItem:
         if not isinstance(source_bundle, bytes) or not source_bundle:
@@ -395,6 +403,8 @@ class OfflineTurnOrchestrator:
                     previous_sha=previous_sha,
                     head_sha=plan.source_sha,
                 )
+                if self._publication_recorded_hook is not None:
+                    self._publication_recorded_hook(work_item, turn)
             turn = self._store.update_turn_state(turn.turn_id, TurnState.PUBLISHED)
         return self._finalize_recorded_result(turn.turn_id)
 

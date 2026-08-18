@@ -16,6 +16,7 @@ from codex_dispatcher.fixture_faults import (
     FixtureFaultInjection,
     FixtureFaultPoint,
     FixtureFaultRejected,
+    FixtureProcessInterrupted,
     FixtureReceiptLost,
     validate_fixture_config,
     validate_fixture_preflight,
@@ -124,24 +125,77 @@ def _run(
         )
         backup_path = _create_backup(config.scheduler.database_path, fault)
         injection = FixtureFaultInjection(fault=fault, issue_number=issue_number)
-        try:
-            with StateStore(config.scheduler.database_path) as store:
-                store.migrate()
-                if store.integrity_check() != "ok":
-                    raise SshRuntimeError("state database integrity check failed")
-                sweep = build_ssh_fixture_fault_sweep(
-                    config=config,
-                    store=store,
-                    github_token=token,
-                    injection=injection,
-                )
+        result = None
+        interruption: str | None = None
+        observed_work_item = None
+        observed_turn = None
+        with StateStore(config.scheduler.database_path) as store:
+            store.migrate()
+            if store.integrity_check() != "ok":
+                raise SshRuntimeError("state database integrity check failed")
+            sweep = build_ssh_fixture_fault_sweep(
+                config=config,
+                store=store,
+                github_token=token,
+                injection=injection,
+            )
+            try:
                 result = sweep.run_once()
-        except FixtureReceiptLost:
-            result = None
+            except FixtureReceiptLost:
+                interruption = "receipt_lost"
+            except FixtureProcessInterrupted:
+                interruption = "process_interrupted"
+            observed_work_item = store.get_work_item_by_issue(
+                FIXTURE_REPOSITORY,
+                issue_number,
+            )
+            observed_turn = store.get_active_turn()
+
+        if fault is FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY:
+            if injection.triggered or interruption is not None:
+                raise FixtureFaultRejected(
+                    "recorded publication recovery unexpectedly triggered a fault"
+                )
+            if result is None or result.status.value != "review":
+                raise FixtureFaultRejected(
+                    "recorded publication recovery did not finish in review"
+                )
+            return 0, {
+                "ok": True,
+                "fixture_fault": True,
+                "fault": fault.value,
+                "fault_triggered": False,
+                "recovery_guarded": True,
+                "recovery_required": False,
+                "repository": FIXTURE_REPOSITORY,
+                "issue_number": issue_number,
+                "work_item_id": result.work_item_id,
+                "turn_id": result.turn_id,
+                "status": result.status.value,
+                "backup_path": str(backup_path),
+            }
 
         if not injection.triggered:
             raise FixtureFaultRejected("requested Fixture fault point was not reached")
-        if fault is FixtureFaultPoint.PUBLISHER_RECEIPT:
+        if fault is FixtureFaultPoint.PUBLICATION_RECORDED:
+            if (
+                interruption != "process_interrupted"
+                or observed_work_item is None
+                or observed_work_item.state.value != "running"
+                or observed_work_item.last_published_sha is None
+                or observed_turn is None
+                or observed_turn.work_item_id != observed_work_item.work_item_id
+                or observed_turn.state.value != "checkpointing"
+                or observed_turn.output_head_sha
+                != observed_work_item.last_published_sha
+            ):
+                raise FixtureFaultRejected(
+                    "publication-recorded fault did not preserve the exact recovery state"
+                )
+            status = interruption
+            work_item_id = observed_work_item.work_item_id
+            turn_id = observed_turn.turn_id
+        elif fault is FixtureFaultPoint.PUBLISHER_RECEIPT:
             if result is None or result.status.value != "awaiting_publication":
                 raise FixtureFaultRejected(
                     "Publisher receipt fault did not enter publication recovery"
@@ -150,7 +204,7 @@ def _run(
             work_item_id = result.work_item_id
             turn_id = result.turn_id
         else:
-            if result is not None:
+            if result is not None or interruption != "receipt_lost":
                 raise FixtureFaultRejected("Fixture receipt loss unexpectedly returned a sweep result")
             status = "receipt_lost"
             work_item_id = inspection.plan.work_item.work_item_id

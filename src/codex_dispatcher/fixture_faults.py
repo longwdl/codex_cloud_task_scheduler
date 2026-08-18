@@ -16,6 +16,7 @@ from codex_dispatcher.git_publisher import (
     PublicationReceipt,
 )
 from codex_dispatcher.publisher import PublicationPlan
+from codex_dispatcher.runner_transport import RunnerTransport
 from codex_dispatcher.ssh_preflight import SshPreflightPlan, SshPreflightStatus
 from codex_dispatcher.ssh_recovery import SshRecoveryAction
 from codex_dispatcher.trackers.base import (
@@ -27,8 +28,11 @@ from codex_dispatcher.trackers.base import (
     TrackerComment,
     TrackerTask,
 )
-from codex_dispatcher.turn_orchestration import TaskBranchPublisher
-from codex_dispatcher.work_items import WorkItem, WorkItemState
+from codex_dispatcher.turn_orchestration import (
+    PublicationRecordedHook,
+    TaskBranchPublisher,
+)
+from codex_dispatcher.work_items import Turn, TurnState, WorkItem, WorkItemState
 
 
 FIXTURE_REPOSITORY = "longwdl/codex-dispatcher-fixture"
@@ -38,6 +42,8 @@ class FixtureFaultPoint(StrEnum):
     PUBLISHER_RECEIPT = "publisher-receipt"
     DRAFT_PR_RECEIPT = "draft-pr-receipt"
     ISSUE_COMMENT_RECEIPT = "issue-comment-receipt"
+    PUBLICATION_RECORDED = "publication-recorded"
+    RECORDED_PUBLICATION_RECOVERY = "recorded-publication-recovery"
 
 
 class FixtureFaultRejected(RuntimeError):
@@ -46,6 +52,10 @@ class FixtureFaultRejected(RuntimeError):
 
 class FixtureReceiptLost(RuntimeError):
     """Expected interruption after a proven Fixture write."""
+
+
+class FixtureProcessInterrupted(RuntimeError):
+    """Expected Fixture stop after one durable local state transition."""
 
 
 def validate_fixture_config(config: Config) -> None:
@@ -93,6 +103,15 @@ class FixtureFaultInjection:
     def wrap_publisher(self, publisher: TaskBranchPublisher) -> TaskBranchPublisher:
         return _FixtureFaultPublisher(self, publisher)
 
+    def wrap_transport(self, transport: RunnerTransport) -> RunnerTransport:
+        return _FixtureFaultTransport(self, transport)
+
+    @property
+    def publication_recorded_hook(self) -> PublicationRecordedHook | None:
+        if self.fault is FixtureFaultPoint.PUBLICATION_RECORDED:
+            return self.after_publication_recorded
+        return None
+
     def require_target(self, repository: str, task_id: str | None = None) -> None:
         if repository != self.repository:
             raise FixtureFaultRejected("tracker operation escaped the fixed Fixture repository")
@@ -106,6 +125,45 @@ class FixtureFaultInjection:
             raise FixtureFaultRejected("live Fixture fault was triggered more than once")
         self.triggered = True
         raise FixtureReceiptLost(f"Fixture intentionally discarded {operation.value}")
+
+    def after_publication_recorded(self, work_item: WorkItem, turn: Turn) -> None:
+        """Stop only after the exact checkpoint anchor is durable in SQLite."""
+        self.require_target(work_item.repository)
+        if (
+            self.fault is not FixtureFaultPoint.PUBLICATION_RECORDED
+            or work_item.issue_number != self.issue_number
+            or turn.work_item_id != work_item.work_item_id
+            or turn.state is not TurnState.CHECKPOINTING
+            or turn.output_head_sha is None
+            or work_item.last_published_sha != turn.output_head_sha
+        ):
+            raise FixtureFaultRejected(
+                "publication-recorded hook escaped its exact Fixture checkpoint"
+            )
+        if self.triggered:
+            raise FixtureFaultRejected("live Fixture fault was triggered more than once")
+        self.triggered = True
+        raise FixtureProcessInterrupted(
+            "Fixture intentionally stopped after recording the publication"
+        )
+
+
+class _FixtureFaultTransport:
+    def __init__(
+        self,
+        injection: FixtureFaultInjection,
+        delegate: RunnerTransport,
+    ) -> None:
+        self._injection = injection
+        self._delegate = delegate
+
+    def invoke(self, request, **kwargs):
+        self._injection.require_target(self._injection.repository)
+        if self._injection.fault is FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY:
+            raise FixtureFaultRejected(
+                "recorded publication recovery attempted to invoke the Runner"
+            )
+        return self._delegate.invoke(request, **kwargs)
 
 
 class _FixtureFaultPublisher:
@@ -132,6 +190,13 @@ class _FixtureFaultPublisher:
             or plan.target_ref != f"refs/heads/{work_item.task_branch}"
         ):
             raise FixtureFaultRejected("Publisher operation escaped the fixed Fixture identity")
+        if (
+            self._injection.fault
+            is FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY
+        ):
+            raise FixtureFaultRejected(
+                "recorded publication recovery attempted to invoke the Publisher"
+            )
         receipt = self._delegate.publish(
             artifact,
             plan=plan,
@@ -185,8 +250,11 @@ class _FixtureFaultTracker:
         approved_by: tuple[str, ...] | None = None,
     ) -> ClaimResult:
         self._injection.require_target(repository, task_id)
-        if self._injection.fault is not FixtureFaultPoint.PUBLISHER_RECEIPT:
-            raise FixtureFaultRejected("only the Publisher stage may claim a Fixture Issue")
+        if self._injection.fault not in {
+            FixtureFaultPoint.PUBLISHER_RECEIPT,
+            FixtureFaultPoint.PUBLICATION_RECORDED,
+        }:
+            raise FixtureFaultRejected("this Fixture fault stage cannot claim an Issue")
         return self._delegate.claim(
             repository,
             task_id,
@@ -202,6 +270,11 @@ class _FixtureFaultTracker:
             FixtureFaultPoint.PUBLISHER_RECEIPT: {TaskState.RUNNING},
             FixtureFaultPoint.DRAFT_PR_RECEIPT: {TaskState.RUNNING},
             FixtureFaultPoint.ISSUE_COMMENT_RECEIPT: set(),
+            FixtureFaultPoint.PUBLICATION_RECORDED: set(),
+            FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY: {
+                TaskState.RUNNING,
+                TaskState.REVIEW,
+            },
         }[self._injection.fault]
         if state not in allowed:
             raise FixtureFaultRejected("Fixture fault stage attempted an unexpected state write")
@@ -215,11 +288,15 @@ class _FixtureFaultTracker:
         body: str,
     ) -> None:
         self._injection.require_target(repository, task_id)
+        if not marker.startswith("work-item:") or not marker.endswith(":status"):
+            raise FixtureFaultRejected("Fixture reached an unexpected Issue comment write")
         if (
-            self._injection.fault is not FixtureFaultPoint.ISSUE_COMMENT_RECEIPT
-            or not marker.startswith("work-item:")
-            or not marker.endswith(":status")
+            self._injection.fault
+            is FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY
         ):
+            self._delegate.upsert_run_comment(repository, task_id, marker, body)
+            return
+        if self._injection.fault is not FixtureFaultPoint.ISSUE_COMMENT_RECEIPT:
             raise FixtureFaultRejected("Fixture reached an unexpected Issue comment write")
         self._delegate.upsert_run_comment(repository, task_id, marker, body)
         self._injection.discard_receipt(FixtureFaultPoint.ISSUE_COMMENT_RECEIPT)
@@ -237,10 +314,16 @@ class _FixtureFaultTracker:
         self._injection.require_target(request.repository)
         expected_prefix = f"codex/issue-{self._injection.issue_number}-"
         if (
-            self._injection.fault is not FixtureFaultPoint.DRAFT_PR_RECEIPT
-            or not request.branch_name.startswith(expected_prefix)
+            not request.branch_name.startswith(expected_prefix)
             or request.title != f"Codex work for Issue #{self._injection.issue_number}"
         ):
+            raise FixtureFaultRejected("Fixture reached an unexpected Draft PR write")
+        if (
+            self._injection.fault
+            is FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY
+        ):
+            return self._delegate.create_draft_pr(request)
+        if self._injection.fault is not FixtureFaultPoint.DRAFT_PR_RECEIPT:
             raise FixtureFaultRejected("Fixture reached an unexpected Draft PR write")
         pull_request = self._delegate.create_draft_pr(request)
         self._injection.discard_receipt(FixtureFaultPoint.DRAFT_PR_RECEIPT)
@@ -270,14 +353,40 @@ def validate_fixture_preflight(
         raise FixtureFaultRejected("preflight did not resolve the exact Fixture Issue")
 
     work_item = plan.work_item
-    if fault is FixtureFaultPoint.PUBLISHER_RECEIPT:
+    if fault in {
+        FixtureFaultPoint.PUBLISHER_RECEIPT,
+        FixtureFaultPoint.PUBLICATION_RECORDED,
+    }:
         if (
             plan.status is not SshPreflightStatus.READY_CANDIDATE
             or plan.recovery_action is not SshRecoveryAction.IDLE
             or work_item is not None
             or task.state is not TaskState.READY
         ):
-            raise FixtureFaultRejected("Publisher fault requires one new ready Fixture candidate")
+            raise FixtureFaultRejected("initial fault requires one new ready Fixture candidate")
+        return
+
+    if fault is FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY:
+        turn = plan.turn
+        if (
+            plan.status is not SshPreflightStatus.READY_RECOVERY
+            or plan.recovery_action is not SshRecoveryAction.RESUME_PUBLICATION
+            or work_item is None
+            or work_item.repository != FIXTURE_REPOSITORY
+            or work_item.issue_number != issue_number
+            or task.issue_node_id != work_item.issue_node_id
+            or task.state not in {TaskState.DISPATCHING, TaskState.RUNNING}
+            or work_item.state is not WorkItemState.RUNNING
+            or work_item.last_published_sha is None
+            or work_item.pr_number is not None
+            or turn is None
+            or turn.work_item_id != work_item.work_item_id
+            or turn.state is not TurnState.CHECKPOINTING
+            or turn.output_head_sha != work_item.last_published_sha
+        ):
+            raise FixtureFaultRejected(
+                "recorded publication recovery requires one exact durable checkpoint"
+            )
         return
 
     if work_item is None or (

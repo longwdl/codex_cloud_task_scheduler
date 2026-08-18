@@ -13,6 +13,7 @@ from codex_dispatcher.fixture_faults import (
     FixtureFaultInjection,
     FixtureFaultPoint,
     FixtureFaultRejected,
+    FixtureProcessInterrupted,
     FixtureReceiptLost,
     validate_fixture_preflight,
 )
@@ -32,7 +33,7 @@ from codex_dispatcher.trackers.base import (
     TaskState,
     TrackerTask,
 )
-from codex_dispatcher.work_items import WorkItem, WorkItemState
+from codex_dispatcher.work_items import Turn, TurnState, WorkItem, WorkItemState
 from tests.test_scheduler import make_config
 
 
@@ -84,6 +85,29 @@ def _plan(item: WorkItem) -> PublicationPlan:
         expected_remote_sha=None,
         bundle_sha256="c" * 64,
         changed_paths=("README.md",),
+    )
+
+
+def _checkpoint_turn(item: WorkItem) -> Turn:
+    turn = Turn.new(
+        work_item_id=item.work_item_id,
+        turn_number=1,
+        issue_revision="revision-1",
+        prompt_sha256="d" * 64,
+        input_head_sha=BASE_SHA,
+        issue_allowed_paths=("README.md",),
+        turn_id="turn_" + "1" * 32,
+        at="2026-08-19T00:00:00Z",
+    )
+    return replace(
+        turn,
+        state=TurnState.CHECKPOINTING,
+        output_sha256="e" * 64,
+        output_head_sha=HEAD_SHA,
+        result_status="completed",
+        result_summary="Fixture checkpoint",
+        started_at="2026-08-19T00:00:01Z",
+        updated_at="2026-08-19T00:00:02Z",
     )
 
 
@@ -190,7 +214,45 @@ class FixtureFaultTests(unittest.TestCase):
 
         self.assertEqual([], delegate.calls)
 
-    def test_preflight_requires_the_exact_three_stage_sequence(self) -> None:
+    def test_publication_recorded_hook_and_recovery_io_guards_are_exact(self) -> None:
+        recorded = replace(_running_item(), last_published_sha=HEAD_SHA)
+        turn = _checkpoint_turn(recorded)
+        injection = FixtureFaultInjection(
+            FixtureFaultPoint.PUBLICATION_RECORDED,
+            ISSUE,
+        )
+
+        with self.assertRaisesRegex(FixtureProcessInterrupted, "recording"):
+            injection.after_publication_recorded(recorded, turn)
+
+        self.assertTrue(injection.triggered)
+        recovery = FixtureFaultInjection(
+            FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY,
+            ISSUE,
+        )
+        guarded_transport = recovery.wrap_transport(
+            SimpleNamespace(invoke=lambda *args, **kwargs: None)
+        )
+        with self.assertRaisesRegex(FixtureFaultRejected, "Runner"):
+            guarded_transport.invoke(SimpleNamespace())
+
+        receipt = PublicationReceipt(
+            recorded.work_item_id,
+            _plan(recorded).target_ref,
+            HEAD_SHA,
+            True,
+        )
+        guarded_publisher = recovery.wrap_publisher(
+            SimpleNamespace(publish=lambda *args, **kwargs: receipt)
+        )
+        with self.assertRaisesRegex(FixtureFaultRejected, "Publisher"):
+            guarded_publisher.publish(
+                b"bundle",
+                plan=_plan(recorded),
+                work_item=recorded,
+            )
+
+    def test_preflight_requires_the_exact_fault_sequences(self) -> None:
         ready = SshPreflightPlan(
             SshPreflightStatus.READY_CANDIDATE,
             SshRecoveryAction.IDLE,
@@ -199,6 +261,11 @@ class FixtureFaultTests(unittest.TestCase):
         validate_fixture_preflight(
             ready,
             fault=FixtureFaultPoint.PUBLISHER_RECEIPT,
+            issue_number=ISSUE,
+        )
+        validate_fixture_preflight(
+            ready,
+            fault=FixtureFaultPoint.PUBLICATION_RECORDED,
             issue_number=ISSUE,
         )
 
@@ -214,6 +281,26 @@ class FixtureFaultTests(unittest.TestCase):
             fault=FixtureFaultPoint.DRAFT_PR_RECEIPT,
             issue_number=ISSUE,
         )
+
+        recorded = replace(running, last_published_sha=HEAD_SHA)
+        recorded_recovery = SshPreflightPlan(
+            SshPreflightStatus.READY_RECOVERY,
+            SshRecoveryAction.RESUME_PUBLICATION,
+            task=_task(TaskState.DISPATCHING),
+            work_item=recorded,
+            turn=_checkpoint_turn(recorded),
+        )
+        validate_fixture_preflight(
+            recorded_recovery,
+            fault=FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY,
+            issue_number=ISSUE,
+        )
+        with self.assertRaisesRegex(FixtureFaultRejected, "durable checkpoint"):
+            validate_fixture_preflight(
+                replace(recorded_recovery, turn=None),
+                fault=FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY,
+                issue_number=ISSUE,
+            )
 
         review = replace(
             running.transition_to(
@@ -347,6 +434,86 @@ class FixtureFaultTests(unittest.TestCase):
         self.assertTrue(payload["fault_triggered"])
         self.assertTrue(payload["recovery_required"])
         self.assertEqual("awaiting_publication", payload["status"])
+
+    def test_cli_reports_guarded_recorded_publication_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            database = Path(root) / "state.db"
+            with StateStore(database) as store:
+                store.migrate()
+            config = make_config(global_max_active=1, repository_max_active=1)
+            config = replace(
+                config,
+                scheduler=replace(config.scheduler, database_path=database),
+                repositories=(
+                    replace(
+                        config.repositories[0],
+                        slug=FIXTURE_REPOSITORY,
+                        allowed_paths=("README.md",),
+                        denied_paths=(),
+                        maintainers=("longwdl",),
+                        required_checks=("fixture",),
+                    ),
+                ),
+            )
+            recorded = replace(_running_item(), last_published_sha=HEAD_SHA)
+            plan = SshPreflightPlan(
+                SshPreflightStatus.READY_RECOVERY,
+                SshRecoveryAction.RESUME_PUBLICATION,
+                task=_task(TaskState.DISPATCHING),
+                work_item=recorded,
+                turn=_checkpoint_turn(recorded),
+            )
+
+            def build_fixture_sweep(**kwargs):
+                def run_once():
+                    return ControlSweepResult(
+                        ControlSweepStatus.REVIEW,
+                        FIXTURE_REPOSITORY,
+                        ISSUE,
+                        recorded.work_item_id,
+                        plan.turn.turn_id,
+                    )
+
+                return SimpleNamespace(run_once=run_once)
+
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "CODEX_DISPATCHER_ENABLE_SSH_WRITES": "1",
+                        "CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS": FIXTURE_REPOSITORY,
+                        "GITHUB_TOKEN": "github_pat_fixture_test",
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.load_protected_ssh_config",
+                    return_value=config,
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.validate_runtime_state_path"
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.run_ssh_preflight",
+                    return_value=SshPreflightInspection(plan, (), True),
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.build_ssh_fixture_fault_sweep",
+                    side_effect=build_fixture_sweep,
+                ),
+            ):
+                code, payload = _run(
+                    Path(root) / "config.toml",
+                    issue_number=ISSUE,
+                    fault=FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY,
+                )
+
+        self.assertEqual(0, code)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["fault_triggered"])
+        self.assertTrue(payload["recovery_guarded"])
+        self.assertFalse(payload["recovery_required"])
+        self.assertEqual("review", payload["status"])
 
     def test_backup_is_private_complete_and_readable(self) -> None:
         with tempfile.TemporaryDirectory() as root:

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from codex_dispatcher.prompt_builder import PromptSnapshot
@@ -196,6 +197,97 @@ class TurnOrchestrationTests(unittest.TestCase):
         self.assertEqual(1, operations.count(RunnerOperation.START))
         self.assertEqual(1, operations.count(RunnerOperation.RESUME))
         self.assertTrue(all(not hasattr(call, "stdin") for call in self.transport.calls))
+
+    def test_recorded_publication_hook_recovers_without_runner_or_publisher(self) -> None:
+        item = work_item()
+        self.store.create_work_item(item)
+        hook_calls: list[tuple[WorkItem, object]] = []
+
+        def interrupt_after_record(work_item: WorkItem, turn) -> None:
+            hook_calls.append((work_item, turn))
+            raise RuntimeError("fixture stopped after publication record")
+
+        service = OfflineTurnOrchestrator(
+            store=self.store,
+            transport=self.transport,
+            bundle_verifier=self.verifier,
+            publication_recorded_hook=interrupt_after_record,
+        )
+        service.prepare_work_item(item.work_item_id, source_bundle=b"fixture-base-bundle")
+        artifact = b"fixture-recorded-publication"
+        head_sha = "b" * 40
+        self.verifier.register(
+            VerifiedBundle(
+                bundle_sha256=sha256(artifact).hexdigest(),
+                head_sha=head_sha,
+                parent_anchor_sha="a" * 40,
+                changed_paths=("src/recorded.py",),
+                commit_count=1,
+                size_bytes=len(artifact),
+            )
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(
+                SESSION,
+                head_sha,
+                result(
+                    "completed",
+                    path="src/recorded.py",
+                    summary="Recorded checkpoint",
+                ),
+                artifact,
+            ),
+        )
+        progress = service.run_turn(
+            item.work_item_id,
+            issue_revision="revision-recorded",
+            prompt=prompt("record one checkpoint\n"),
+            issue_allowed_paths=("src",),
+            turn_id="turn_" + "9" * 32,
+        )
+        publisher_calls: list[object] = []
+
+        def publish(artifact, *, plan, work_item):
+            publisher_calls.append(plan)
+            return SimpleNamespace(observed_remote_sha=plan.source_sha)
+
+        with self.assertRaisesRegex(RuntimeError, "after publication record"):
+            service.publish_checkpoint(
+                progress.turn.turn_id,
+                publisher=SimpleNamespace(publish=publish),
+                repository_allowed_paths=("src",),
+            )
+
+        recorded_item = self.store.get_work_item(item.work_item_id)
+        recorded_turn = self.store.get_turn(progress.turn.turn_id)
+        assert recorded_item is not None and recorded_turn is not None
+        self.assertEqual(head_sha, recorded_item.last_published_sha)
+        self.assertEqual(WorkItemState.RUNNING, recorded_item.state)
+        self.assertEqual(TurnState.CHECKPOINTING, recorded_turn.state)
+        self.assertEqual(1, len(hook_calls))
+        self.assertEqual(1, len(publisher_calls))
+        runner_calls = tuple(self.transport.calls)
+
+        recovery = OfflineTurnOrchestrator(
+            store=self.store,
+            transport=self.transport,
+            bundle_verifier=self.verifier,
+        )
+
+        def reject_publish(*args, **kwargs):
+            raise AssertionError("recorded recovery must not invoke Publisher")
+
+        completed = recovery.publish_checkpoint(
+            progress.turn.turn_id,
+            publisher=SimpleNamespace(publish=reject_publish),
+            repository_allowed_paths=("src",),
+        )
+
+        self.assertEqual(TurnState.FINISHED, completed.turn.state)
+        self.assertEqual(WorkItemState.REVIEW, completed.work_item.state)
+        self.assertEqual(runner_calls, tuple(self.transport.calls))
+        self.assertEqual(1, len(publisher_calls))
 
     def test_interrupted_start_is_reconciled_without_resending_prompt(self) -> None:
         item = work_item(43)

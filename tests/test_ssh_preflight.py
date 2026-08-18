@@ -12,7 +12,7 @@ from codex_dispatcher.ssh_recovery import SshRecoveryAction
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.testing.fakes import FakeTracker
 from codex_dispatcher.trackers.base import TaskState
-from codex_dispatcher.work_items import WorkItem, WorkItemState
+from codex_dispatcher.work_items import TurnState, WorkItem, WorkItemState
 from tests.test_scheduler import make_config, make_task
 from tests.test_ssh_dispatch_planning import BASE_SHA, claimed_task
 
@@ -72,7 +72,45 @@ class SshPreflightPlanTests(unittest.TestCase):
         self.assertIs(SshPreflightStatus.READY_RECOVERY, plan.status)
         self.assertIs(SshRecoveryAction.RESUME_PREPARATION, plan.recovery_action)
         self.assertEqual(item, plan.work_item)
+        self.assertIsNone(plan.turn)
         self.assertFalse(any(call.method == "list_ready_tasks" for call in tracker.calls))
+
+    def test_active_publication_recovery_preserves_the_exact_turn(self) -> None:
+        tracker = FakeTracker()
+        task = claimed_task()
+        tracker.tasks[task.task_id] = task
+        item = WorkItem.new(
+            repository=task.repository,
+            issue_number=task.issue_number,
+            issue_node_id=task.issue_node_id or "missing",
+            base_branch="main",
+            base_sha=BASE_SHA,
+        )
+        self.store.create_work_item(item)
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.PREPARING)
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.READY)
+        _, turn = self.store.begin_turn(
+            item.work_item_id,
+            issue_revision="revision-1",
+            prompt_sha256="b" * 64,
+            input_head_sha=BASE_SHA,
+            issue_allowed_paths=("src",),
+        )
+        self.store.update_turn_state(turn.turn_id, TurnState.STARTING)
+        turn = self.store.record_turn_result(
+            turn.turn_id,
+            output_sha256="c" * 64,
+            output_head_sha="d" * 40,
+            result_status="completed",
+            result_summary="Fixture checkpoint",
+        )
+        turn = self.store.update_turn_state(turn.turn_id, TurnState.CHECKPOINTING)
+
+        plan = build_ssh_preflight_plan(self.config, self.store, tracker)
+
+        self.assertIs(SshPreflightStatus.READY_RECOVERY, plan.status)
+        self.assertIs(SshRecoveryAction.RESUME_PUBLICATION, plan.recovery_action)
+        self.assertEqual(turn, plan.turn)
 
     def test_ambiguous_remote_claims_fail_closed(self) -> None:
         tracker = FakeTracker()
