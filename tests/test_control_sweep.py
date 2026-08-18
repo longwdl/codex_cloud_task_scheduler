@@ -87,6 +87,21 @@ def _completed_result():
     )
 
 
+def _needs_input_result():
+    return parse_agent_result(
+        json.dumps(
+            {
+                "status": "needs_input",
+                "summary": "Fixture requires one reviewed maintainer decision",
+                "needs_input": ["Which reviewed marker value should be used?"],
+                "tests": [{"name": "fixture", "status": "passed"}],
+                "changed_paths": [],
+                "next_step": "Resume after a maintainer adds /codex-context",
+            }
+        )
+    )
+
+
 def _ready_task(issue_number: int = 42) -> TrackerTask:
     return replace(
         claimed_task(issue_number),
@@ -339,6 +354,99 @@ class SshControlSweepTests(unittest.TestCase):
         self.assertEqual(WorkItemState.BLOCKED, persisted.state)
         turns = self.store.list_turns(persisted.work_item_id)
         self.assertEqual(("IC_fixture",), turns[0].included_comment_ids)
+
+    def test_needs_input_followup_reuses_issue_session_branch_and_pr(self) -> None:
+        tracker = FakeTracker()
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        source = _RecordingSource()
+        work_item_id = self._expected_work_item_id(task)
+        first_turn_id = "turn_" + "1" * 32
+        second_turn_id = "turn_" + "2" * 32
+        self.transport.queue_turn(
+            work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, _needs_input_result()),
+        )
+        artifact = b"fixture-followup-result"
+        head_sha = "b" * 40
+        self._register_checkpoint(artifact, head_sha)
+        self.transport.queue_turn(
+            work_item_id,
+            FakeTurnFixture(SESSION, head_sha, _completed_result(), artifact),
+        )
+        publisher = _RecordingPublisher()
+        delivery = GitHubDeliveryCoordinator(store=self.store, tracker=tracker)
+        sweep = self._sweep(
+            tracker,
+            source,
+            publisher=publisher,
+            delivery=delivery,
+        )
+
+        needs_input = sweep.run_once(turn_id=first_turn_id)
+
+        self.assertEqual(ControlSweepStatus.NEEDS_INPUT, needs_input.status)
+        first_item = self.store.get_work_item(work_item_id)
+        assert first_item is not None
+        self.assertEqual(WorkItemState.WAITING_INPUT, first_item.state)
+        self.assertEqual(SESSION, first_item.codex_session_id)
+        self.assertIsNone(first_item.last_published_sha)
+        self.assertIsNone(first_item.pr_number)
+
+        followup = replace(
+            tracker.tasks[task.task_id],
+            state=TaskState.READY,
+            labels=("agent:ready", "exec:ssh-cli", "priority:p1"),
+            ready_approved_by="alice",
+            updated_at="2026-08-13T02:00:00Z",
+        )
+        tracker.ready_tasks = (followup,)
+        tracker.tasks[task.task_id] = followup
+        tracker.comments[task.task_id] = (
+            TrackerComment(
+                "IC_followup",
+                "alice",
+                "/codex-context\nUse the reviewed marker value v2",
+                "2026-08-13T01:30:00Z",
+                "2026-08-13T01:30:00Z",
+            ),
+        )
+
+        completed = sweep.run_once(turn_id=second_turn_id)
+
+        self.assertEqual(ControlSweepStatus.REVIEW, completed.status)
+        persisted = self.store.get_work_item(work_item_id)
+        assert persisted is not None
+        self.assertEqual(WorkItemState.REVIEW, persisted.state)
+        self.assertEqual(first_item.work_item_id, persisted.work_item_id)
+        self.assertEqual(first_item.task_branch, persisted.task_branch)
+        self.assertEqual(first_item.runner_directory, persisted.runner_directory)
+        self.assertEqual(SESSION, persisted.codex_session_id)
+        self.assertEqual(head_sha, persisted.last_published_sha)
+        self.assertEqual(1, persisted.pr_number)
+        turns = self.store.list_turns(work_item_id)
+        self.assertEqual((1, 2), tuple(turn.turn_number for turn in turns))
+        self.assertEqual(
+            (TurnState.NEEDS_INPUT, TurnState.FINISHED),
+            tuple(turn.state for turn in turns),
+        )
+        self.assertEqual(("IC_followup",), turns[1].included_comment_ids)
+        self.assertEqual(
+            [
+                RunnerOperation.PREPARE,
+                RunnerOperation.START,
+                RunnerOperation.RESUME,
+                RunnerOperation.EXPORT,
+            ],
+            [call.operation for call in self.transport.calls],
+        )
+        self.assertEqual([("current", "owner/repo", "main")], source.calls)
+        self.assertEqual(1, len(publisher.calls))
+        self.assertEqual(
+            1,
+            sum(call.method == "create_draft_pr" for call in tracker.calls),
+        )
 
     def test_source_failure_happens_before_claim_or_persistence(self) -> None:
         tracker = FakeTracker()
