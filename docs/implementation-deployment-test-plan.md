@@ -642,7 +642,11 @@ directory 与 session 完成发布；唯一 Draft PR `#15` 的 checkpoint
 `fb2fb166a74984298a56811f3e3e52c4676df82c` 对应 Actions run `32213983342` 成功，`main` 保持
 `7fe0a9a5d51f4438423744ffb199563a0bcd4d9a`。最终 SQLite/Runner/GitHub/Actions 独立读回一致，
 两次普通 write-enabled sweep 和最终 preflight 均 idle。该测试没有修改 sshd、防火墙、路由或
-其他连接，也没有按名称查找或批量终止进程。
+其他连接，也没有按名称查找或批量终止进程。随后经显式人工审核、标记 ready 并 merge PR
+`#15`，只读 preflight 精确选择 `complete_merged_work_item`；普通 sweep 先落本地 completed
+tombstone，再于 `06:32:21Z` 更新固定评论，最后于 `06:32:24Z` 写入 `agent:completed`。Issue
+保持 open、任务分支保留，`main` 前进到 merge commit
+`790c3e0b361f727863e3e6d86ee6e2dce16b4faf`，重复 sweep 与最终 preflight 均 idle。
 
 同日 Fixture Issue `#6` 完成了真实 GitHub 生命周期的两次 Turn：首次因故意缺少精确值进入
 `agent:needs_input`，没有 commit、task ref 或 PR；维护者添加唯一 `/codex-context` 并重新批准

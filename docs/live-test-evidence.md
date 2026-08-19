@@ -165,9 +165,23 @@ completed successfully at that exact SHA.
 
 Final SQLite contained exactly one WorkItem and one finished/completed Turn; direct Runner STATUS
 returned the same Turn, session fingerprint, checkpoint, and completed result. The task branch,
-SQLite publication record, PR head, and Actions head all matched. `main` did not move. Two ordinary
-write-enabled sweeps and the final read-only preflight all returned idle, so no second Turn, session,
-branch, PR, comment, or workflow run was created.
+SQLite publication record, PR head, and Actions head all matched. Before human merge, `main` did not
+move. Two ordinary write-enabled sweeps and the read-only preflight all returned idle, so no second
+Turn, session, branch, PR, comment, or workflow run was created.
+
+### Human merge and completed projection
+
+After explicit review confirmed the README-only diff, exact head SHA, and successful Actions run,
+PR `#15` was marked ready and merged without deleting its task branch. GitHub created merge commit
+`790c3e0b361f727863e3e6d86ee6e2dce16b4faf`; the PR closed as merged while the task branch remained
+at checkpoint `fb2fb166a74984298a56811f3e3e52c4676df82c`.
+
+Read-only preflight then selected `complete_merged_work_item` for the exact Issue, WorkItem, and PR.
+One normal double-opt-in sweep first committed the local `completed` tombstone, updated the single
+fixed status comment at `2026-08-19T06:32:21Z`, and applied `agent:completed` at
+`2026-08-19T06:32:24Z`. The Issue stayed open. SQLite retained the original single finished Turn,
+session, PR, and published SHA; no Runner or Publisher work was introduced. A subsequent normal
+write-enabled sweep and read-only preflight were idle.
 
 ## SSH CLI same-Issue needs-input resume fixture — 2026-08-19
 

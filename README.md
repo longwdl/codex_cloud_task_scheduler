@@ -98,9 +98,12 @@ connection to prove the Runner's durable executing record, freshly revalidated t
 process's immutable argv and PID/PGID/SID identity, and sent `SIGKILL` only to that process group.
 The same Turn remained `reconciling`; guarded recovery used only `STATUS` then `EXPORT`, reusing the
 same WorkItem, Turn, branch, Runner directory, and Codex session. Draft PR `#15` and its single
-Fixture Actions run passed at the exact published SHA, `main` did not move, and two ordinary
-write-enabled sweeps returned idle. No SSH daemon, firewall, route, or unrelated connection was
-modified.
+Fixture Actions run passed at the exact published SHA; before human merge, `main` did not move and
+two ordinary write-enabled sweeps returned idle. After explicit review and merge, the normal
+completion path advanced `main` to merge commit `790c3e0b361f727863e3e6d86ee6e2dce16b4faf`, committed
+the local tombstone, updated the fixed comment, and only then applied `agent:completed`; the Issue
+stayed open, the task branch remained, and a repeated sweep was idle. No SSH daemon, firewall,
+route, or unrelated connection was modified.
 
 Merged-PR completion is implemented and live-verified: after the maintainer reviewed, marked ready,
 and merged Fixture PR `#13`, the dispatcher required the bound PR at the exact persisted head SHA,

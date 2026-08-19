@@ -96,9 +96,11 @@ repeated sweep returned idle. Fixture Issue `#14` subsequently proved a real Ope
 `SIGKILL`: the hook required the durable local WorkItem/Turn and a separate STATUS proof before
 fresh argv/PID/PGID/SID validation and exact process-group termination. The original Turn stayed
 `reconciling`, recovery used only `STATUS, EXPORT`, and one WorkItem/Turn/session/branch/PR/Actions
-run survived two idle sweeps. Slack root/result receipt loss and outbox recovery remain covered only
-through an idempotent fake publisher; proof of the real Slack publisher contract is the next
-external integration phase.
+run survived two idle sweeps. After explicit review and merge of PR `#15`, the normal completion
+path also projected Issue `#14` to `agent:completed` after the local tombstone and fixed comment;
+the task branch remained and a repeated sweep was idle. Slack root/result receipt loss and outbox
+recovery remain covered only through an idempotent fake publisher; proof of the real Slack publisher
+contract is the next external integration phase.
 The Runner must not receive GitHub write or production credentials.
 
 Explicitly deferred:
