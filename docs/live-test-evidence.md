@@ -3,6 +3,36 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## SSH CLI human-merge completion projection fixture — 2026-08-19
+
+This fixture completes the lifecycle of Fixture Issue
+[`#12`](https://github.com/longwdl/codex-dispatcher-fixture/issues/12) after its START-receipt
+recovery. The dispatcher did not merge the pull request. The maintainer independently reviewed the
+README-only diff, confirmed Actions run
+[`32169064603`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32169064603) was
+successful at exact checkpoint `41e67598b506dcbfeac00e5871a812e6e9874078`, marked Draft PR
+[`#13`](https://github.com/longwdl/codex-dispatcher-fixture/pull/13) ready, and explicitly merged it.
+
+Before the completion sweep, read-only preflight selected `complete_merged_work_item` for the exact
+Issue, WorkItem `wi_594a1305a087ff78a0ab32f8`, and PR `#13`. The normal double-opt-in sweep then:
+
+- required repository `longwdl/codex-dispatcher-fixture`, base `main`, task branch
+  `codex/issue-12-594a1305a087`, and PR head SHA to match the persisted binding;
+- committed the irreversible local WorkItem state `completed` before projecting GitHub state;
+- updated the one fixed status comment to `agent:completed` at `2026-08-19T01:47:34Z`;
+- applied the `agent:completed` label at `2026-08-19T01:47:37Z`, after the comment update;
+- left the Issue open and retained the task branch.
+
+Independent read-back found exactly one WorkItem and one finished/completed Turn. SQLite retained
+PR `#13` and the exact checkpoint. The task branch still resolved to that checkpoint, while `main`
+resolved to merge commit `7fe0a9a5d51f4438423744ffb199563a0bcd4d9a`. No second workflow run,
+Turn, session, branch, or PR appeared. A subsequent read-only preflight and a repeated write-enabled
+sweep both returned idle.
+
+This proves the normal AC-055 completion path and ordered projection. It does not prove lost-receipt
+recovery for the completion comment or label, automatic merging, Issue closing, branch deletion, or
+deployment; those actions remain forbidden or separately covered only by offline fault tests.
+
 ## SSH CLI exact Dispatcher process-kill recovery fixture — 2026-08-19
 
 This fixture covers the post-claim/pre-persistence operating-system boundary with a real

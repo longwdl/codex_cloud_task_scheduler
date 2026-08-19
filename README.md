@@ -91,10 +91,11 @@ The second stage rejected PREPARE/START/RESUME before delegation and completed t
 repeated sweep returned idle. This proves the protocol recovery path, not a physical network-cable
 or SSH-daemon failure.
 
-Merged-PR completion is implemented and covered offline: the dispatcher requires the bound PR to
-be merged at the exact persisted head SHA, writes the irreversible local `completed` tombstone
-first, then idempotently updates the fixed Issue comment and finally `agent:completed`. A live
-completion remains intentionally pending because merge is a separate human-authorized action.
+Merged-PR completion is implemented and live-verified: after the maintainer reviewed, marked ready,
+and merged Fixture PR `#13`, the dispatcher required the bound PR at the exact persisted head SHA,
+wrote the irreversible local `completed` tombstone first, then idempotently updated the fixed Issue
+comment and finally `agent:completed`. It did not close the Issue, delete the task branch, or perform
+the merge itself; an immediate repeated sweep returned idle.
 
 Current SSH candidate and recovery planning is exposed through `ssh-preflight`. It checks Git, gh,
 and OpenSSH versions, reads GitHub, and migrates only a temporary copy of SQLite. It does not alter

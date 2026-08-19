@@ -88,9 +88,11 @@ The recovery retained one WorkItem/session/Turn/branch/PR/comment and returned p
 also exposed and fixed the ordering of terminal WorkItem recovery from a still-running Issue.
 Fixture Issue `#10` then proved exact post-claim `SIGKILL` and ordinary orphan-claim recovery, while
 Issue `#12` proved a lost START receipt followed by guarded `STATUS` then `EXPORT` without replaying
-START/RESUME. A physical SSH transport break remains unexercised. Slack root/result receipt loss and
-outbox recovery remain covered only through an idempotent fake publisher; proof of the real Slack
-publisher contract is the next external integration phase.
+START/RESUME. After the maintainer merged its exact bound PR `#13`, the normal dispatcher path also
+proved the live `completed` tombstone and ordered fixed-comment/`agent:completed` projection; a
+repeated sweep returned idle. A physical SSH transport break remains unexercised. Slack root/result
+receipt loss and outbox recovery remain covered only through an idempotent fake publisher; proof of
+the real Slack publisher contract is the next external integration phase.
 The Runner must not receive GitHub write or production credentials.
 
 Explicitly deferred:
@@ -98,10 +100,9 @@ Explicitly deferred:
 - systemd/timer activation of the one-sweep entry point;
 - a physical SSH-disconnect recovery injection;
 - a live Slack HTTP publisher or Slack API calls;
-- a human-authorized merge followed by live `agent:completed` projection;
 - systemd deployment;
 - Docker isolation on the Runner;
-- any merge, deployment, release, or production access.
+- any dispatcher-initiated merge, deployment, release, or production access.
 
 ## Architecture constraints for offline code
 

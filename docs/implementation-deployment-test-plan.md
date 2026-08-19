@@ -622,8 +622,14 @@ Fixture Issue `#12` 还完成 START 回执歧义：第一阶段只在收到身�
 前拒绝 PREPARE/START/RESUME，并自证 Runner 操作严格为 `STATUS, EXPORT`。同一 WorkItem
 `wi_594a1305a087ff78a0ab32f8` 和 Turn 完成，绑定 session、Draft PR `#13` 和 checkpoint
 `41e67598b506dcbfeac00e5871a812e6e9874078`；Actions run `32169064603` 成功，重复 sweep idle。
-这证明协议回执恢复，但不等同于物理 SSH 链路/daemon 故障。Slack provider 回执丢失仍尚未
-live 注入。
+随后维护者审核、将 PR 标记 ready 并显式 merge；普通 recovery-first sweep 验证 PR number、
+repository、base/task branch 及 `headRefOid` 全部与已持久化绑定一致，先将唯一 WorkItem 落为
+`completed`，再更新固定评论，最后写入 `agent:completed`。评论更新时间
+`2026-08-19T01:47:34Z` 早于 completed label 事件 `01:47:37Z`；`main` 为 merge commit
+`7fe0a9a5d51f4438423744ffb199563a0bcd4d9a`，任务分支仍保留在精确 checkpoint，Issue 保持 open，
+重复 write-enabled sweep 与之后的 preflight 均 idle。这证明协议回执恢复和 AC-055 正常 live
+路径，但不等同于物理 SSH 链路/daemon 故障，也未注入 completion comment/label 回执丢失。
+Slack provider 回执丢失仍尚未 live 注入。
 
 同日 Fixture Issue `#6` 完成了真实 GitHub 生命周期的两次 Turn：首次因故意缺少精确值进入
 `agent:needs_input`，没有 commit、task ref 或 PR；维护者添加唯一 `/codex-context` 并重新批准
@@ -788,12 +794,12 @@ git diff --check
 
 ### 12.3 Live Fixture 顺序
 
-截至 2026-08-19，步骤 1-5、7-9 已通过。Fixture Issue `#6` 已证明步骤 6 的
+截至 2026-08-19，步骤 1-5、7-9、11 已通过。Fixture Issue `#6` 已证明步骤 6 的
 WorkItem/branch/directory/session 复用和维护者 context 过滤；Slack 仍禁用，因此尚未证明同一
 Slack thread。步骤 9 已通过第二次 write-enabled sweep 和独立读回验证。步骤 10 已完成
 Publisher、Draft PR、Issue comment、Dispatcher `SIGKILL` 及 START 回执歧义恢复；物理 SSH
-链路/daemon 断开仍待执行。步骤 11 的离线实现和故障恢复已完成，但真实 merge 仍须维护者单独
-授权，因此 live completed 证据仍待执行。完整非敏感证据见
+链路/daemon 断开仍待执行。步骤 11 已由维护者显式 merge Fixture PR `#13` 后的正常完成态投影
+和重复 idle sweep 验证；completion 写回丢失仍只有离线故障覆盖。完整非敏感证据见
 `docs/live-test-evidence.md`。
 
 1. SSH 只读连接与 host key 固定。
