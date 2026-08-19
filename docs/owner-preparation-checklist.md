@@ -267,7 +267,38 @@ delegation during this recovery. Confirm the same WorkItem and Turn, one bound s
 exact checkpoint equality, successful required checks, mode-`0600` backups, unchanged `main`, and an
 idle repeated sweep.
 
-### 5.5 Human merge and completion projection
+### 5.5 Exact SSH transport process-kill fixture
+
+Use one new ready Fixture Issue whose derived branch and PR do not exist. Run the normal read-only
+preflight first and require that exact Issue as the only candidate. Do not manually select or kill a
+PID; the guarded hook owns only the SSH client process it just spawned:
+
+```bash
+CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS=longwdl/codex-dispatcher-fixture \
+PYTHONPATH=src python3 -m codex_dispatcher.fixture_fault_cli \
+  --config /absolute/path/dispatcher.toml --issue ISSUE_NUMBER \
+  --fault ssh-transport-process-kill --apply --json
+```
+
+The command may interrupt only after the exact WorkItem and starting Turn are durable locally and a
+second hook-free SSH connection proves the Runner has a durable executing or finished record.
+Require `fault_triggered=true`, `termination_signal=SIGKILL`,
+`local_work_item_persisted=true`, `status=runner_active`, and `turn_state=reconciling`. Require the
+reported PID, process-group ID, and session ID to be identical, with no rejection reason. Current
+Runner executing proof is `status_proof_state=unknown` plus
+`status_proof_error_code=turn_outcome_unresolved`; a finished proof is also acceptable. Any missing,
+conflicting, or ambiguous proof must leave the SSH process untouched and fail closed.
+
+Independently confirm the exact PID is gone, SQLite retains one running WorkItem and the same
+`reconciling` Turn without local session/checkpoint/PR, and preflight selects
+`reconcile_active_turn`. Recover only with the `start-status-recovery` command from section 5.4. It
+must report exact `runner_operations=["status","export"]`; PREPARE, START, RESUME, and Prompt replay
+are forbidden. Finally require one finished Turn, one session, one task branch, one Draft PR, one
+fixed status comment, successful checks at the exact SHA, unchanged `main`, and at least two normal
+write-enabled sweeps returning idle. Do not change sshd, firewall, routing, or another connection.
+
+### 5.6 Human merge and completion projection
 
 The dispatcher never merges. The completion reconciler treats the already-merged PR as the human
 authorization boundary; it does not separately query Actions checks. In the private

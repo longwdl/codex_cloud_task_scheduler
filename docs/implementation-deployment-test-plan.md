@@ -631,6 +631,19 @@ repository、base/task branch 及 `headRefOid` 全部与已持久化绑定一致
 路径，但不等同于物理 SSH 链路/daemon 故障，也未注入 completion comment/label 回执丢失。
 Slack provider 回执丢失仍尚未 live 注入。
 
+Fixture Issue `#14` 随后完成真实 OpenSSH 客户端进程中断。故障入口只持有本次 primary SSH
+子进程的不可变 argv/PID capability；在本地 WorkItem/Turn 已落库后，第二条无故障钩子的只读
+STATUS 连接第 2 次观察到 Runner durable executing 签名
+`unknown + turn_outcome_unresolved`。只有再次验证 primary `PID=PGID=SID=80465` 且仍存活后，
+入口才对该进程组发送 `SIGKILL`。SQLite 保留同一 `reconciling` Turn，随后受限恢复拒绝
+PREPARE/START/RESUME 并严格执行 `STATUS, EXPORT`。同一 WorkItem
+`wi_b7edba3be957aa3d4a851c56`、Turn `turn_7e8f8db322764d579c51595e4b2725ab`、branch、Runner
+directory 与 session 完成发布；唯一 Draft PR `#15` 的 checkpoint
+`fb2fb166a74984298a56811f3e3e52c4676df82c` 对应 Actions run `32213983342` 成功，`main` 保持
+`7fe0a9a5d51f4438423744ffb199563a0bcd4d9a`。最终 SQLite/Runner/GitHub/Actions 独立读回一致，
+两次普通 write-enabled sweep 和最终 preflight 均 idle。该测试没有修改 sshd、防火墙、路由或
+其他连接，也没有按名称查找或批量终止进程。
+
 同日 Fixture Issue `#6` 完成了真实 GitHub 生命周期的两次 Turn：首次因故意缺少精确值进入
 `agent:needs_input`，没有 commit、task ref 或 PR；维护者添加唯一 `/codex-context` 并重新批准
 `agent:ready` 后，第二次 sweep 使用原 WorkItem、branch、Runner directory 和 Codex session
@@ -791,16 +804,17 @@ git diff --check
 | AC-053 | Fixture 故障入口越界或误触 | 正式 CLI 不暴露该入口；缺少任一开关、仓库/README 策略/Issue/恢复阶段不精确时在目标写入前拒绝；每次接受前生成并校验私有 SQLite 在线备份 |
 | AC-054 | claim 后 Dispatcher 被 SIGKILL | 只终止精确握手子进程；无本地 WorkItem/Turn、Runner 未调用；preflight 为 `recover_orphan_claim`，普通路径恢复同一 Issue 且只创建一套 1:1:1 身份 |
 | AC-055 | 人工合并后的 completed 投影 | 仅 exact bound PR 在 persisted head SHA 合并后先落本地 completed，再写固定 comment 和 label；丢回执只重试投影，不调用 Runner/Publisher，不创建 PR；任何身份/head/merge 状态冲突均 blocked |
+| AC-056 | durable START 后真实 SSH 客户端中断 | 仅在本地 WorkItem/Turn 已持久化且第二条只读 STATUS 证明 Runner durable executing/finished 后，复核 primary SSH 的 exact argv/PID/PGID/SID 并只终止该进程组；同一 Turn 留在 reconciling，恢复只走 STATUS/EXPORT，不重发 Prompt，并最终只产生一套身份和一个 PR |
 
 ### 12.3 Live Fixture 顺序
 
 截至 2026-08-19，步骤 1-5、7-9、11 已通过。Fixture Issue `#6` 已证明步骤 6 的
 WorkItem/branch/directory/session 复用和维护者 context 过滤；Slack 仍禁用，因此尚未证明同一
 Slack thread。步骤 9 已通过第二次 write-enabled sweep 和独立读回验证。步骤 10 已完成
-Publisher、Draft PR、Issue comment、Dispatcher `SIGKILL` 及 START 回执歧义恢复；物理 SSH
-链路/daemon 断开仍待执行。步骤 11 已由维护者显式 merge Fixture PR `#13` 后的正常完成态投影
-和重复 idle sweep 验证；completion 写回丢失仍只有离线故障覆盖。完整非敏感证据见
-`docs/live-test-evidence.md`。
+Publisher、Draft PR、Issue comment、Dispatcher `SIGKILL`、START 回执歧义恢复及精确
+OpenSSH 客户端进程 `SIGKILL`；没有修改 SSH daemon 或网络设施。步骤 11 已由维护者显式 merge
+Fixture PR `#13` 后的正常完成态投影和重复 idle sweep 验证；completion 写回丢失仍只有离线
+故障覆盖。完整非敏感证据见 `docs/live-test-evidence.md`。
 
 1. SSH 只读连接与 host key 固定。
 2. 创建 Fixture WorkItem 目录和独立 repo。

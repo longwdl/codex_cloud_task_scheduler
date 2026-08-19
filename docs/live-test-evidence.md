@@ -122,6 +122,53 @@ resolved by an explicit maintainer ready-label transition; no fault write ran un
 preflight both selected the exact Issue. This proves STATUS-only protocol recovery and does not claim
 a physical network-link or SSH-daemon interruption.
 
+## SSH CLI exact transport-process interruption fixture — 2026-08-19
+
+This fixture covers AC-021 and AC-056 with a real OpenSSH client-process `SIGKILL`. It did not
+change the SSH daemon, firewall, routes, host networking, or any unrelated connection. The guarded
+entry received only the exact primary child capability; it had no process-name lookup or bulk-kill
+path.
+
+- Private Fixture Issue: [`longwdl/codex-dispatcher-fixture#14`](https://github.com/longwdl/codex-dispatcher-fixture/issues/14),
+  node ID `I_kwDOT3NfX88AAAABNUW04w`.
+- WorkItem: `wi_b7edba3be957aa3d4a851c56`.
+- Turn: `turn_7e8f8db322764d579c51595e4b2725ab`, number `1`.
+- Task branch: `codex/issue-14-b7edba3be957`.
+- Runner directory:
+  `/srv/codex-runner/work-items/longwdl__codex-dispatcher-fixture/issue-14`.
+- Pre-live implementation commit: `3221884`.
+
+Before the live write, all 286 offline tests, `compileall`, and `git diff --check` passed. Read-only
+preflight selected only Issue `#14`; SQLite had no binding for it, the derived branch and PR did not
+exist, and `main` was `7fe0a9a5d51f4438423744ffb199563a0bcd4d9a`. The independently created
+pre-live online backup and both command-created backups were mode `0600` and passed
+`integrity_check`.
+
+After the local WorkItem and Turn were durable, a separate hook-free SSH transport issued only
+STATUS. Attempt 2 observed the Runner's durable executing signature
+`state=unknown,error_code=turn_outcome_unresolved`; the local WorkItem was still running and the
+same Turn was still starting. The hook freshly verified immutable argv and exact
+`PID=PGID=SID=80465`, then sent `SIGKILL` only to that process group. Independent read-back found the
+PID gone, SQLite integrity `ok`, one running WorkItem, and the same Turn in `reconciling` with no
+local session, output SHA, publication SHA, or PR. Read-only preflight selected exactly
+`reconcile_active_turn`.
+
+The guarded recovery rejected PREPARE, START, and RESUME before delegation and reported exact
+`runner_operations=["status","export"]`. It reused the same WorkItem and Turn, bound the existing
+Runner session (local and remote SHA-256 fingerprint prefix `0926e3c0ccb6901c`), and published exact
+checkpoint `fb2fb166a74984298a56811f3e3e52c4676df82c`. Draft PR
+[`#15`](https://github.com/longwdl/codex-dispatcher-fixture/pull/15) changed only the allowed Fixture
+path. The one fixed Issue comment existed, the Issue entered `agent:review`, and the one GitHub
+Actions run
+[`32213983342`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32213983342)
+completed successfully at that exact SHA.
+
+Final SQLite contained exactly one WorkItem and one finished/completed Turn; direct Runner STATUS
+returned the same Turn, session fingerprint, checkpoint, and completed result. The task branch,
+SQLite publication record, PR head, and Actions head all matched. `main` did not move. Two ordinary
+write-enabled sweeps and the final read-only preflight all returned idle, so no second Turn, session,
+branch, PR, comment, or workflow run was created.
+
 ## SSH CLI same-Issue needs-input resume fixture — 2026-08-19
 
 This section records the first end-to-end Issue lifecycle with two Turns in one persistent Codex

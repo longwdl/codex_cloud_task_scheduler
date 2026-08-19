@@ -74,8 +74,9 @@ run also corrected the Fixture's legacy hyphenated needs-input label; canonical 
 AC-047's recorded-publication recovery has also been exercised against Fixture Issue `#8`. A
 fixture-only hook stopped after the exact published SHA was committed but before Turn
 terminalization; guarded recovery then completed without calling the Runner or Publisher again,
-created one Draft PR, and passed Fixture CI. This deterministic exception injection does not yet
-cover an operating-system process kill or a real SSH disconnect.
+created one Draft PR, and passed Fixture CI. That deterministic exception injection alone did not
+cover an operating-system process kill or a real SSH disconnect; those boundaries were exercised
+separately below.
 
 Fixture Issue `#10` subsequently covered the operating-system process boundary. A parent accepted
 an identity-bound private-pipe handshake only after the Issue claim, sent `SIGKILL` to that exact
@@ -90,6 +91,16 @@ The second stage rejected PREPARE/START/RESUME before delegation and completed t
 `STATUS` then `EXPORT`, reusing the same WorkItem and Turn. Draft PR `#13` passed Fixture CI and a
 repeated sweep returned idle. This proves the protocol recovery path, not a physical network-cable
 or SSH-daemon failure.
+
+Fixture Issue `#14` then exercised a real OpenSSH client-process interruption. The guarded hook
+waited until the exact local WorkItem and Turn were durable, used a separate hook-free SSH
+connection to prove the Runner's durable executing record, freshly revalidated the primary
+process's immutable argv and PID/PGID/SID identity, and sent `SIGKILL` only to that process group.
+The same Turn remained `reconciling`; guarded recovery used only `STATUS` then `EXPORT`, reusing the
+same WorkItem, Turn, branch, Runner directory, and Codex session. Draft PR `#15` and its single
+Fixture Actions run passed at the exact published SHA, `main` did not move, and two ordinary
+write-enabled sweeps returned idle. No SSH daemon, firewall, route, or unrelated connection was
+modified.
 
 Merged-PR completion is implemented and live-verified: after the maintainer reviewed, marked ready,
 and merged Fixture PR `#13`, the dispatcher required the bound PR at the exact persisted head SHA,
@@ -107,7 +118,10 @@ Cloud-labelled migration code.
 The fault entry is not a production command and is not exposed through the normal CLI. It accepts
 only `longwdl/codex-dispatcher-fixture`, its exact README-only repository contract, and one exact
 Issue/stage selected by read-only preflight. It requires a third repository-name environment opt-in
-and creates a private SQLite online backup before entering the normal process-locked sweep.
+and creates a private SQLite online backup before entering the normal process-locked sweep. Its SSH
+transport fault receives only the exact spawned client capability and cannot kill by name; it must
+prove durable remote acceptance through a second read-only STATUS connection before an exact
+process-group termination is authorized.
 
 ## Requirements
 

@@ -70,7 +70,9 @@ The environment-independent core now additionally contains:
   complete before the sweep can claim an Issue;
 - an isolated `codex_dispatcher.fixture_fault_cli` source-tree entry that is hard-coded to the
   private README-only Fixture and can discard exactly one successful START, Publisher, Draft PR, or
-  Issue-comment receipt after an exact recovery-stage preflight and private SQLite backup;
+  Issue-comment receipt, or terminate one exact spawned SSH client process group only after a
+  second read-only STATUS proves durable Runner acceptance, after an exact recovery-stage preflight
+  and private SQLite backup;
 - an isolated `codex_dispatcher.fixture_process_cli` parent/child entry that sends `SIGKILL` only
   after an exact post-claim private-pipe handshake and proves no WorkItem, Turn, or Runner call was
   reached.
@@ -90,15 +92,18 @@ Fixture Issue `#10` then proved exact post-claim `SIGKILL` and ordinary orphan-c
 Issue `#12` proved a lost START receipt followed by guarded `STATUS` then `EXPORT` without replaying
 START/RESUME. After the maintainer merged its exact bound PR `#13`, the normal dispatcher path also
 proved the live `completed` tombstone and ordered fixed-comment/`agent:completed` projection; a
-repeated sweep returned idle. A physical SSH transport break remains unexercised. Slack root/result
-receipt loss and outbox recovery remain covered only through an idempotent fake publisher; proof of
-the real Slack publisher contract is the next external integration phase.
+repeated sweep returned idle. Fixture Issue `#14` subsequently proved a real OpenSSH client-process
+`SIGKILL`: the hook required the durable local WorkItem/Turn and a separate STATUS proof before
+fresh argv/PID/PGID/SID validation and exact process-group termination. The original Turn stayed
+`reconciling`, recovery used only `STATUS, EXPORT`, and one WorkItem/Turn/session/branch/PR/Actions
+run survived two idle sweeps. Slack root/result receipt loss and outbox recovery remain covered only
+through an idempotent fake publisher; proof of the real Slack publisher contract is the next
+external integration phase.
 The Runner must not receive GitHub write or production credentials.
 
 Explicitly deferred:
 
 - systemd/timer activation of the one-sweep entry point;
-- a physical SSH-disconnect recovery injection;
 - a live Slack HTTP publisher or Slack API calls;
 - systemd deployment;
 - Docker isolation on the Runner;
