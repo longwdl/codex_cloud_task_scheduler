@@ -15,6 +15,7 @@ from codex_dispatcher.fixture_faults import (
     FixtureFaultRejected,
     FixtureProcessInterrupted,
     FixtureReceiptLost,
+    _is_durable_ssh_start_proof,
     validate_fixture_preflight,
 )
 from codex_dispatcher.git_publisher import (
@@ -31,6 +32,7 @@ from codex_dispatcher.runner_transport import (
 )
 from codex_dispatcher.control_sweep import ControlSweepResult, ControlSweepStatus
 from codex_dispatcher.ssh_runtime import SshPreflightInspection
+from codex_dispatcher.ssh_runner_transport import SshInvocationPlan
 from codex_dispatcher.ssh_preflight import SshPreflightPlan, SshPreflightStatus
 from codex_dispatcher.ssh_recovery import SshRecoveryAction
 from codex_dispatcher.state_store import StateStore
@@ -466,6 +468,160 @@ class FixtureFaultTests(unittest.TestCase):
             recovery.recovery_operations,
         )
 
+    def test_ssh_process_kill_requires_local_start_and_second_status_proof(self) -> None:
+        class ExactProcess:
+            argv = ("/usr/bin/ssh", "fixture")
+            pid = 321
+            process_group_id = 321
+            session_id = 321
+            termination_requested = False
+
+            def kill_exact_process_group(self, *, expected_argv, expected_pid):
+                self_test.assertEqual(self.argv, tuple(expected_argv))
+                self_test.assertEqual(self.pid, expected_pid)
+                self.termination_requested = True
+
+        self_test = self
+        with tempfile.TemporaryDirectory() as root:
+            database = Path(root) / "state.db"
+            with StateStore(database) as store:
+                store.migrate()
+                ready = WorkItem.new(
+                    repository=FIXTURE_REPOSITORY,
+                    issue_number=ISSUE,
+                    issue_node_id="I_fixture_fault_7",
+                    base_branch="main",
+                    base_sha=BASE_SHA,
+                    at="2026-08-19T00:00:00Z",
+                )
+                ready = ready.transition_to(
+                    WorkItemState.PREPARING,
+                    at="2026-08-19T00:00:00Z",
+                ).transition_to(
+                    WorkItemState.READY,
+                    at="2026-08-19T00:00:00Z",
+                )
+                store.create_work_item(ready)
+                running, turn = store.begin_turn(
+                    ready.work_item_id,
+                    issue_revision="revision-1",
+                    prompt_sha256="d" * 64,
+                    input_head_sha=BASE_SHA,
+                    issue_allowed_paths=("README.md",),
+                    turn_id="turn_" + "4" * 32,
+                )
+                turn = store.update_turn_state(turn.turn_id, TurnState.STARTING)
+                request = RunnerRequest(
+                    RunnerOperation.START,
+                    running.work_item_id,
+                    turn_id=turn.turn_id,
+                    prompt_sha256=turn.prompt_sha256,
+                    input_head_sha=turn.input_head_sha,
+                )
+                proof = RunnerTurnReply(
+                    RunnerOperation.STATUS,
+                    running.work_item_id,
+                    turn.turn_id,
+                    RunnerTurnRemoteState.UNKNOWN,
+                    error_code="turn_outcome_unresolved",
+                )
+                observed = []
+                status_transport = SimpleNamespace(
+                    invoke=lambda status, **kwargs: (
+                        observed.append((status, kwargs)),
+                        RunnerWireOutput(proof.to_json().encode("utf-8")),
+                    )[1]
+                )
+                injection = FixtureFaultInjection(
+                    FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL,
+                    ISSUE,
+                )
+                hook = injection.ssh_process_started_hook(
+                    store=store,
+                    status_transport=status_transport,
+                )
+                assert hook is not None
+                process = ExactProcess()
+                hook(
+                    request,
+                    SshInvocationPlan(process.argv, {}),
+                    process,  # type: ignore[arg-type]
+                )
+
+                missing = RunnerTurnReply(
+                    RunnerOperation.STATUS,
+                    running.work_item_id,
+                    turn.turn_id,
+                    RunnerTurnRemoteState.UNKNOWN,
+                    error_code="turn_not_found",
+                )
+                rejected_process = SimpleNamespace(
+                    argv=("/usr/bin/ssh", "fixture"),
+                    pid=322,
+                    process_group_id=322,
+                    session_id=322,
+                    termination_requested=False,
+                    kill_exact_process_group=lambda **kwargs: self.fail("must not kill"),
+                )
+                rejected = FixtureFaultInjection(
+                    FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL,
+                    ISSUE,
+                )
+                rejected_hook = rejected.ssh_process_started_hook(
+                    store=store,
+                    status_transport=SimpleNamespace(
+                        invoke=lambda *args, **kwargs: RunnerWireOutput(
+                            missing.to_json().encode("utf-8")
+                        )
+                    ),
+                )
+                assert rejected_hook is not None
+                with patch("codex_dispatcher.fixture_faults.time.sleep"):
+                    rejected_hook(
+                        request,
+                        SshInvocationPlan(rejected_process.argv, {}),
+                        rejected_process,  # type: ignore[arg-type]
+                    )
+
+        self.assertTrue(injection.triggered)
+        self.assertTrue(process.termination_requested)
+        self.assertEqual(321, injection.ssh_process_pid)
+        self.assertEqual(RunnerTurnRemoteState.UNKNOWN, injection.ssh_status_state)
+        self.assertEqual("turn_outcome_unresolved", injection.ssh_status_error_code)
+        self.assertEqual(1, injection.ssh_status_attempts)
+        self.assertEqual(1, len(observed))
+        self.assertEqual(RunnerOperation.STATUS, observed[0][0].operation)
+        self.assertEqual({}, observed[0][1])
+        self.assertFalse(rejected.triggered)
+        self.assertFalse(rejected_process.termination_requested)
+        self.assertEqual(5, rejected.ssh_status_attempts)
+        self.assertIn("could not prove", rejected.ssh_interrupt_rejection)
+        self.assertFalse(
+            _is_durable_ssh_start_proof(
+                RunnerTurnReply(
+                    RunnerOperation.STATUS,
+                    _running_item().work_item_id,
+                    _reconciling_turn(_running_item()).turn_id,
+                    RunnerTurnRemoteState.RUNNING,
+                    session_id="123e4567-e89b-12d3-a456-426614174000",
+                )
+            )
+        )
+        guarded = FixtureFaultInjection(
+            FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL,
+            ISSUE,
+        ).wrap_transport(
+            SimpleNamespace(invoke=lambda *args, **kwargs: self.fail("must not delegate"))
+        )
+        with self.assertRaisesRegex(FixtureFaultRejected, "unexpected Runner operation"):
+            guarded.invoke(
+                RunnerRequest(
+                    RunnerOperation.STATUS,
+                    _running_item().work_item_id,
+                    turn_id=_reconciling_turn(_running_item()).turn_id,
+                )
+            )
+
     def test_preflight_requires_the_exact_fault_sequences(self) -> None:
         ready = SshPreflightPlan(
             SshPreflightStatus.READY_CANDIDATE,
@@ -490,6 +646,11 @@ class FixtureFaultTests(unittest.TestCase):
         validate_fixture_preflight(
             ready,
             fault=FixtureFaultPoint.START_RECEIPT,
+            issue_number=ISSUE,
+        )
+        validate_fixture_preflight(
+            ready,
+            fault=FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL,
             issue_number=ISSUE,
         )
 
@@ -917,6 +1078,121 @@ class FixtureFaultTests(unittest.TestCase):
         self.assertTrue(recovered["recovery_guarded"])
         self.assertEqual(["status", "export"], recovered["runner_operations"])
         self.assertEqual("review", recovered["status"])
+
+    def test_cli_reports_exact_ssh_process_group_and_reconciling_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            database = Path(root) / "state.db"
+            with StateStore(database) as store:
+                store.migrate()
+            config = make_config(global_max_active=1, repository_max_active=1)
+            config = replace(
+                config,
+                scheduler=replace(config.scheduler, database_path=database),
+                repositories=(
+                    replace(
+                        config.repositories[0],
+                        slug=FIXTURE_REPOSITORY,
+                        allowed_paths=("README.md",),
+                        denied_paths=(),
+                        maintainers=("longwdl",),
+                        required_checks=("fixture",),
+                    ),
+                ),
+            )
+            ready_plan = SshPreflightPlan(
+                SshPreflightStatus.READY_CANDIDATE,
+                SshRecoveryAction.IDLE,
+                task=_task(TaskState.READY),
+            )
+
+            def build_sweep(**kwargs):
+                injection = kwargs["injection"]
+                store = kwargs["store"]
+
+                def run_once():
+                    ready = WorkItem.new(
+                        repository=FIXTURE_REPOSITORY,
+                        issue_number=ISSUE,
+                        issue_node_id="I_fixture_fault_7",
+                        base_branch="main",
+                        base_sha=BASE_SHA,
+                        at="2026-08-19T00:00:00Z",
+                    )
+                    ready = ready.transition_to(
+                        WorkItemState.PREPARING,
+                        at="2026-08-19T00:00:00Z",
+                    ).transition_to(
+                        WorkItemState.READY,
+                        at="2026-08-19T00:00:00Z",
+                    )
+                    store.create_work_item(ready)
+                    running, turn = store.begin_turn(
+                        ready.work_item_id,
+                        issue_revision="revision-1",
+                        prompt_sha256="d" * 64,
+                        input_head_sha=BASE_SHA,
+                        issue_allowed_paths=("README.md",),
+                        turn_id="turn_" + "5" * 32,
+                    )
+                    turn = store.update_turn_state(turn.turn_id, TurnState.STARTING)
+                    turn = store.update_turn_state(turn.turn_id, TurnState.RECONCILING)
+                    injection.ssh_process_pid = 900
+                    injection.ssh_process_group_id = 900
+                    injection.ssh_session_id = 900
+                    injection.ssh_status_state = RunnerTurnRemoteState.UNKNOWN
+                    injection.ssh_status_error_code = "turn_outcome_unresolved"
+                    injection.ssh_status_attempts = 1
+                    injection.triggered = True
+                    return ControlSweepResult(
+                        ControlSweepStatus.RUNNER_ACTIVE,
+                        FIXTURE_REPOSITORY,
+                        ISSUE,
+                        running.work_item_id,
+                        turn.turn_id,
+                    )
+
+                return SimpleNamespace(run_once=run_once)
+
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "CODEX_DISPATCHER_ENABLE_SSH_WRITES": "1",
+                        "CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS": FIXTURE_REPOSITORY,
+                        "GITHUB_TOKEN": "github_pat_fixture_test",
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.load_protected_ssh_config",
+                    return_value=config,
+                ),
+                patch("codex_dispatcher.fixture_fault_cli.validate_runtime_state_path"),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.run_ssh_preflight",
+                    return_value=SshPreflightInspection(ready_plan, (), True),
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.build_ssh_fixture_fault_sweep",
+                    side_effect=build_sweep,
+                ),
+            ):
+                code, payload = _run(
+                    Path(root) / "config.toml",
+                    issue_number=ISSUE,
+                    fault=FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL,
+                )
+
+        self.assertEqual(0, code)
+        self.assertTrue(payload["fault_triggered"])
+        self.assertEqual("SIGKILL", payload["termination_signal"])
+        self.assertEqual(900, payload["ssh_process_pid"])
+        self.assertEqual(900, payload["ssh_process_group_id"])
+        self.assertEqual(900, payload["ssh_session_id"])
+        self.assertEqual("unknown", payload["status_proof_state"])
+        self.assertEqual("turn_outcome_unresolved", payload["status_proof_error_code"])
+        self.assertTrue(payload["local_work_item_persisted"])
+        self.assertEqual("reconciling", payload["turn_state"])
 
     def test_backup_is_private_complete_and_readable(self) -> None:
         with tempfile.TemporaryDirectory() as root:

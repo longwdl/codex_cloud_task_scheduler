@@ -22,7 +22,12 @@ WORK_ITEM = "wi_" + "a" * 24
 SOURCE_BUNDLE = b"fixture source bundle"
 
 
-def transport(root: Path, *, assh_proxy_path: Path | None = None) -> SshRunnerTransport:
+def transport(
+    root: Path,
+    *,
+    assh_proxy_path: Path | None = None,
+    process_started_hook=None,
+) -> SshRunnerTransport:
     known_hosts = root / "known_hosts"
     known_hosts.write_text("runner.invalid ssh-ed25519 AAAAFIXTURE\n", encoding="utf-8")
     known_hosts.chmod(0o600)
@@ -42,6 +47,7 @@ def transport(root: Path, *, assh_proxy_path: Path | None = None) -> SshRunnerTr
         identity_file=identity,
         assh_proxy_path=assh_proxy_path,
         assh_home=assh_home,
+        process_started_hook=process_started_hook,
     )
 
 
@@ -115,6 +121,43 @@ class SshRunnerTransportTests(unittest.TestCase):
         kwargs = runner.call_args.kwargs
         self.assertTrue(kwargs["input_bytes"].startswith(b"CODEX-RUNNER-REQUEST/1\n"))
         self.assertNotIn(request.to_json(), runner.call_args.args[0])
+        self.assertIsNone(kwargs["started_hook"])
+
+    def test_process_hook_receives_exact_request_plan_and_command_handle(self) -> None:
+        observed = []
+        marker = object()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            adapter = transport(
+                Path(temp_dir),
+                process_started_hook=lambda request, plan, process: observed.append(
+                    (request, plan, process)
+                ),
+            )
+            request = RunnerRequest(
+                RunnerOperation.PREPARE,
+                WORK_ITEM,
+                repository="owner/repo",
+                issue_number=1,
+                task_branch="codex/issue-1-aaaaaaaaaaaa",
+                base_sha="b" * 40,
+                source_bundle_sha256=sha256(SOURCE_BUNDLE).hexdigest(),
+                source_bundle_size=len(SOURCE_BUNDLE),
+            )
+            ack = RunnerAck(RunnerOperation.PREPARE, WORK_ITEM)
+            stdout = encode_runner_output(RunnerWireOutput(ack.to_json().encode()))
+            with patch(
+                "codex_dispatcher.ssh_runner_transport.run_binary_command",
+                return_value=BinaryCommandResult(0, stdout, b""),
+            ) as runner:
+                adapter.invoke(request, source_artifact=SOURCE_BUNDLE)
+
+        started_hook = runner.call_args.kwargs["started_hook"]
+        self.assertIsNotNone(started_hook)
+        started_hook(marker)
+        self.assertEqual(1, len(observed))
+        self.assertIs(request, observed[0][0])
+        self.assertEqual(tuple(runner.call_args.args[0]), observed[0][1].argv)
+        self.assertIs(marker, observed[0][2])
 
     def test_ambiguous_and_confirmed_failures_are_distinct(self) -> None:
         request = RunnerRequest(

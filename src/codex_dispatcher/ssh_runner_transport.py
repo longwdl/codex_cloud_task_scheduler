@@ -6,12 +6,13 @@ import os
 import re
 import shlex
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
-from codex_dispatcher.command_runner import run_binary_command
+from codex_dispatcher.command_runner import RunningBinaryCommand, run_binary_command
 from codex_dispatcher.runner_protocol import RunnerProtocolError, RunnerRequest
 from codex_dispatcher.runner_transport import (
     MAX_ARTIFACT_BYTES,
@@ -37,6 +38,12 @@ class SshInvocationPlan:
     environment: Mapping[str, str]
 
 
+SshProcessStartedHook = Callable[
+    [RunnerRequest, SshInvocationPlan, RunningBinaryCommand],
+    None,
+]
+
+
 class SshRunnerTransport:
     """Invoke only the fixed forced-command Runner endpoint over pinned OpenSSH."""
 
@@ -53,6 +60,7 @@ class SshRunnerTransport:
         assh_home: Path | None = None,
         connect_timeout_seconds: int = 10,
         operation_timeout_seconds: float = 3900.0,
+        process_started_hook: SshProcessStartedHook | None = None,
     ) -> None:
         self._ssh_path = _protected_executable(ssh_path, "ssh_path")
         if not isinstance(host, str) or _HOST_RE.fullmatch(host) is None:
@@ -88,11 +96,14 @@ class SshRunnerTransport:
             raise ValueError("connect_timeout_seconds must be an integer from 1 to 60")
         if operation_timeout_seconds <= 0:
             raise ValueError("operation_timeout_seconds must be positive")
+        if process_started_hook is not None and not callable(process_started_hook):
+            raise TypeError("process_started_hook must be callable or None")
         self._host = host
         self._user = user
         self._port = port
         self._connect_timeout_seconds = connect_timeout_seconds
         self._operation_timeout_seconds = operation_timeout_seconds
+        self._process_started_hook = process_started_hook
 
     def invocation_plan(self) -> SshInvocationPlan:
         proxy_command = "none"
@@ -172,6 +183,11 @@ class SshRunnerTransport:
             max_stderr_bytes=65_536,
             env=plan.environment,
             input_bytes=frame,
+            started_hook=(
+                None
+                if self._process_started_hook is None
+                else lambda process: self._process_started_hook(request, plan, process)
+            ),
         )
         if (
             result.timed_out

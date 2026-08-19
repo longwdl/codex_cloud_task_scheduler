@@ -39,7 +39,7 @@ _WRITE_ENV = "CODEX_DISPATCHER_ENABLE_SSH_WRITES"
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m codex_dispatcher.fixture_fault_cli",
-        description="Discard one successful receipt in the fixed private Fixture.",
+        description="Inject one guarded failure in the fixed private Fixture.",
     )
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--issue", required=True, type=int)
@@ -226,7 +226,10 @@ def _run(
             status = result.status.value
             work_item_id = result.work_item_id
             turn_id = result.turn_id
-        elif fault is FixtureFaultPoint.START_RECEIPT:
+        elif fault in {
+            FixtureFaultPoint.START_RECEIPT,
+            FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL,
+        }:
             if (
                 result is None
                 or result.status.value != "runner_active"
@@ -241,6 +244,17 @@ def _run(
                 raise FixtureFaultRejected(
                     "START receipt fault did not preserve one ambiguous active Turn"
                 )
+            if fault is FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL and (
+                injection.ssh_process_pid is None
+                or injection.ssh_process_group_id != injection.ssh_process_pid
+                or injection.ssh_session_id != injection.ssh_process_pid
+                or injection.ssh_status_state is None
+                or injection.ssh_status_attempts <= 0
+                or injection.ssh_interrupt_rejection is not None
+            ):
+                raise FixtureFaultRejected(
+                    "SSH transport fault did not prove one exact terminated client"
+                )
             status = result.status.value
             work_item_id = observed_work_item.work_item_id
             turn_id = observed_turn.turn_id
@@ -250,7 +264,7 @@ def _run(
             status = "receipt_lost"
             work_item_id = inspection.plan.work_item.work_item_id
             turn_id = None
-        return 0, {
+        payload: dict[str, object] = {
             "ok": True,
             "fixture_fault": True,
             "fault": fault.value,
@@ -263,6 +277,21 @@ def _run(
             "status": status,
             "backup_path": str(backup_path),
         }
+        if fault is FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL:
+            payload.update(
+                {
+                    "termination_signal": "SIGKILL",
+                    "ssh_process_pid": injection.ssh_process_pid,
+                    "ssh_process_group_id": injection.ssh_process_group_id,
+                    "ssh_session_id": injection.ssh_session_id,
+                    "status_proof_state": injection.ssh_status_state.value,
+                    "status_proof_error_code": injection.ssh_status_error_code,
+                    "status_proof_attempts": injection.ssh_status_attempts,
+                    "local_work_item_persisted": True,
+                    "turn_state": observed_turn.state.value,
+                }
+            )
+        return 0, payload
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         return 1, {
             "ok": False,
@@ -272,6 +301,9 @@ def _run(
             "repository": FIXTURE_REPOSITORY,
             "issue_number": issue_number,
             "error": redact_text(str(exc), (token,)),
+            "ssh_interrupt_rejection": (
+                None if injection is None else injection.ssh_interrupt_rejection
+            ),
             "backup_path": None if backup_path is None else str(backup_path),
         }
 

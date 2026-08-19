@@ -10,24 +10,30 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
+import time
 from typing import Protocol
 
+from codex_dispatcher.command_runner import RunningBinaryCommand
 from codex_dispatcher.config import Config
 from codex_dispatcher.git_publisher import (
     GitPublicationInterrupted,
     PublicationReceipt,
 )
 from codex_dispatcher.publisher import PublicationPlan
-from codex_dispatcher.runner_protocol import RunnerOperation
+from codex_dispatcher.runner_protocol import RunnerOperation, RunnerRequest
 from codex_dispatcher.runner_transport import (
     RunnerTransport,
     RunnerTransportInterrupted,
+    RunnerTransportRejected,
     RunnerTurnRemoteState,
+    RunnerTurnReply,
     parse_runner_turn_reply,
 )
 from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_preflight import SshPreflightPlan, SshPreflightStatus
 from codex_dispatcher.ssh_recovery import SshRecoveryAction
+from codex_dispatcher.ssh_runner_transport import SshInvocationPlan
+from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.trackers.base import (
     ClaimResult,
     DraftPullRequestRequest,
@@ -51,6 +57,8 @@ from codex_dispatcher.work_items import (
 
 
 FIXTURE_REPOSITORY = "longwdl/codex-dispatcher-fixture"
+_SSH_STATUS_PROOF_ATTEMPTS = 5
+_SSH_STATUS_PROOF_DELAY_SECONDS = 0.25
 
 
 class _FixtureSource(Protocol):
@@ -67,6 +75,7 @@ class FixtureFaultPoint(StrEnum):
     RECORDED_PUBLICATION_RECOVERY = "recorded-publication-recovery"
     CLAIM_ACQUIRED_PROCESS_KILL = "claim-acquired-process-kill"
     START_RECEIPT = "start-receipt"
+    SSH_TRANSPORT_PROCESS_KILL = "ssh-transport-process-kill"
     START_STATUS_RECOVERY = "start-status-recovery"
 
 
@@ -115,6 +124,13 @@ class FixtureFaultInjection:
     claim_acquired_callback: Callable[[TrackerTask], None] | None = None
     pinned_base_sha: str | None = None
     recovery_operations: list[RunnerOperation] = field(default_factory=list)
+    ssh_process_pid: int | None = field(default=None, init=False)
+    ssh_process_group_id: int | None = field(default=None, init=False)
+    ssh_session_id: int | None = field(default=None, init=False)
+    ssh_status_state: RunnerTurnRemoteState | None = field(default=None, init=False)
+    ssh_status_error_code: str | None = field(default=None, init=False)
+    ssh_status_attempts: int = field(default=0, init=False)
+    ssh_interrupt_rejection: str | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.fault, FixtureFaultPoint):
@@ -157,6 +173,116 @@ class FixtureFaultInjection:
                 "process-kill Fixture requires one independently verified base SHA"
             )
         return _FixturePinnedSource(self, source)
+
+    def ssh_process_started_hook(
+        self,
+        *,
+        store: StateStore,
+        status_transport: RunnerTransport,
+    ) -> Callable[[RunnerRequest, SshInvocationPlan, RunningBinaryCommand], None] | None:
+        """Build the one guarded hook that may interrupt an exact START SSH client."""
+        if self.fault is not FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL:
+            return None
+        if not isinstance(store, StateStore):
+            raise TypeError("store must be a StateStore")
+
+        def observe_and_interrupt(
+            request: RunnerRequest,
+            plan: SshInvocationPlan,
+            process: RunningBinaryCommand,
+        ) -> None:
+            try:
+                self._observe_and_interrupt_ssh_start(
+                    request=request,
+                    plan=plan,
+                    process=process,
+                    store=store,
+                    status_transport=status_transport,
+                )
+            except FixtureFaultRejected as exc:
+                # A proof failure must leave the primary SSH client alone.  Its
+                # eventual reply is deliberately treated as ambiguous by the
+                # outer Fixture transport, preserving STATUS-only recovery.
+                self.ssh_interrupt_rejection = str(exc)
+            except Exception:
+                self.ssh_interrupt_rejection = "SSH interruption proof failed unexpectedly"
+
+        return observe_and_interrupt
+
+    def _observe_and_interrupt_ssh_start(
+        self,
+        *,
+        request: RunnerRequest,
+        plan: SshInvocationPlan,
+        process: RunningBinaryCommand,
+        store: StateStore,
+        status_transport: RunnerTransport,
+    ) -> None:
+        if self.triggered:
+            raise FixtureFaultRejected("live Fixture fault was triggered more than once")
+        if request.operation is not RunnerOperation.START or request.turn_id is None:
+            return
+        if tuple(plan.argv) != process.argv or process.termination_requested:
+            raise FixtureFaultRejected("primary SSH process identity is invalid")
+        try:
+            process_group_id = process.process_group_id
+            session_id = process.session_id
+        except (OSError, RuntimeError) as exc:
+            raise FixtureFaultRejected("primary SSH process is not observable") from exc
+        if process_group_id != process.pid or session_id != process.pid:
+            raise FixtureFaultRejected("primary SSH process is not an exact session leader")
+
+        _require_persisted_ssh_start(self, store, request)
+        status_request = RunnerRequest(
+            RunnerOperation.STATUS,
+            request.work_item_id,
+            turn_id=request.turn_id,
+        )
+        accepted_reply = None
+        for attempt in range(_SSH_STATUS_PROOF_ATTEMPTS):
+            self.ssh_status_attempts += 1
+            try:
+                output = status_transport.invoke(status_request)
+                if output.artifact is not None:
+                    raise FixtureFaultRejected(
+                        "STATUS proof returned an unexpected artifact"
+                    )
+                reply = parse_runner_turn_reply(output.payload)
+            except (RunnerTransportInterrupted, RunnerTransportRejected):
+                reply = None
+            if reply is not None:
+                if (
+                    reply.operation is not RunnerOperation.STATUS
+                    or reply.work_item_id != request.work_item_id
+                    or reply.turn_id != request.turn_id
+                ):
+                    raise FixtureFaultRejected("STATUS proof identity is invalid")
+                if _is_durable_ssh_start_proof(reply):
+                    accepted_reply = reply
+                    break
+                if not (
+                    reply.state is RunnerTurnRemoteState.UNKNOWN
+                    and reply.error_code == "turn_not_found"
+                ):
+                    raise FixtureFaultRejected("STATUS did not prove a durable remote Turn")
+            if attempt + 1 < _SSH_STATUS_PROOF_ATTEMPTS:
+                time.sleep(_SSH_STATUS_PROOF_DELAY_SECONDS)
+        if accepted_reply is None:
+            raise FixtureFaultRejected("STATUS could not prove a durable remote Turn")
+
+        _require_persisted_ssh_start(self, store, request)
+        process.kill_exact_process_group(
+            expected_argv=plan.argv,
+            expected_pid=process.pid,
+        )
+        if not process.termination_requested:
+            raise FixtureFaultRejected("primary SSH process group was not terminated")
+        self.ssh_process_pid = process.pid
+        self.ssh_process_group_id = process_group_id
+        self.ssh_session_id = session_id
+        self.ssh_status_state = accepted_reply.state
+        self.ssh_status_error_code = accepted_reply.error_code
+        self.triggered = True
 
     @property
     def publication_recorded_hook(self) -> PublicationRecordedHook | None:
@@ -274,6 +400,14 @@ class _FixtureFaultTransport:
             raise FixtureFaultRejected(
                 "recorded publication recovery attempted to invoke the Runner"
             )
+        if (
+            self._injection.fault is FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL
+            and request.operation
+            not in {RunnerOperation.PREPARE, RunnerOperation.START}
+        ):
+            raise FixtureFaultRejected(
+                "SSH transport process kill reached an unexpected Runner operation"
+            )
         if self._injection.fault is FixtureFaultPoint.START_STATUS_RECOVERY:
             if request.operation in {
                 RunnerOperation.PREPARE,
@@ -296,6 +430,12 @@ class _FixtureFaultTransport:
             self._injection.recovery_operations.append(request.operation)
             return output
         output = self._delegate.invoke(request, **kwargs)
+        if self._injection.fault is FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL:
+            if request.operation is RunnerOperation.PREPARE:
+                return output
+            raise RunnerTransportInterrupted(
+                "Fixture SSH interruption was not safely authorized"
+            )
         if (
             self._injection.fault is FixtureFaultPoint.START_RECEIPT
             and request.operation is RunnerOperation.START
@@ -386,6 +526,10 @@ class _FixtureFaultPublisher:
             raise FixtureFaultRejected(
                 "START receipt fault unexpectedly invoked the Publisher"
             )
+        if self._injection.fault is FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL:
+            raise FixtureFaultRejected(
+                "SSH transport process kill unexpectedly invoked the Publisher"
+            )
         if self._injection.fault is FixtureFaultPoint.START_STATUS_RECOVERY and (
             self._injection.recovery_operations
             != [RunnerOperation.STATUS, RunnerOperation.EXPORT]
@@ -451,6 +595,7 @@ class _FixtureFaultTracker:
             FixtureFaultPoint.PUBLICATION_RECORDED,
             FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL,
             FixtureFaultPoint.START_RECEIPT,
+            FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL,
         }:
             raise FixtureFaultRejected("this Fixture fault stage cannot claim an Issue")
         return self._delegate.claim(
@@ -475,6 +620,7 @@ class _FixtureFaultTracker:
             },
             FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL: set(),
             FixtureFaultPoint.START_RECEIPT: {TaskState.RUNNING},
+            FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL: {TaskState.RUNNING},
             FixtureFaultPoint.START_STATUS_RECOVERY: {
                 TaskState.RUNNING,
                 TaskState.REVIEW,
@@ -536,6 +682,49 @@ class _FixtureFaultTracker:
         return pull_request
 
 
+def _require_persisted_ssh_start(
+    injection: FixtureFaultInjection,
+    store: StateStore,
+    request: RunnerRequest,
+) -> None:
+    work_item = store.get_work_item_by_issue(
+        injection.repository,
+        injection.issue_number,
+    )
+    turn = store.get_active_turn()
+    if (
+        work_item is None
+        or work_item.work_item_id != request.work_item_id
+        or work_item.repository != injection.repository
+        or work_item.issue_number != injection.issue_number
+        or work_item.state is not WorkItemState.RUNNING
+        or work_item.codex_session_id is not None
+        or work_item.last_published_sha is not None
+        or work_item.pr_number is not None
+        or turn is None
+        or turn.turn_id != request.turn_id
+        or turn.work_item_id != request.work_item_id
+        or turn.state is not TurnState.STARTING
+        or turn.prompt_sha256 != request.prompt_sha256
+        or turn.input_head_sha != request.input_head_sha
+        or turn.output_head_sha is not None
+        or turn.result_status is not None
+    ):
+        raise FixtureFaultRejected(
+            "local SQLite does not contain the exact persisted START Turn"
+        )
+
+
+def _is_durable_ssh_start_proof(reply: RunnerTurnReply) -> bool:
+    if reply.state is RunnerTurnRemoteState.FINISHED:
+        return True
+    return (
+        reply.state is RunnerTurnRemoteState.UNKNOWN
+        and reply.error_code == "turn_outcome_unresolved"
+        and reply.session_id is None
+    )
+
+
 def validate_fixture_preflight(
     plan: SshPreflightPlan,
     *,
@@ -564,6 +753,7 @@ def validate_fixture_preflight(
         FixtureFaultPoint.PUBLICATION_RECORDED,
         FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL,
         FixtureFaultPoint.START_RECEIPT,
+        FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL,
     }:
         if (
             plan.status is not SshPreflightStatus.READY_CANDIDATE

@@ -103,6 +103,7 @@ class SshRuntimeTests(unittest.TestCase):
         )
 
         self.assertIsInstance(sweep, SshControlSweep)
+
         self.assertIsInstance(sweep._tracker, GitHubCliTracker)
         self.assertIsInstance(sweep._publisher, GitTaskBranchPublisher)
         self.assertFalse((self.root / "mirrors").exists())
@@ -163,6 +164,23 @@ class SshRuntimeTests(unittest.TestCase):
             )
 
         self.assertIsInstance(sweep, SshControlSweep)
+
+        ssh_injection = FixtureFaultInjection(
+            FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL,
+            7,
+        )
+        with patch(
+            "codex_dispatcher.ssh_runtime.run_control_host_contract_checks",
+            return_value=(ContractCheck("tools", True, "fixture"),),
+        ):
+            ssh_sweep = build_ssh_fixture_fault_sweep(
+                config=fixture_config,
+                store=self.store,
+                github_token=TOKEN,
+                injection=ssh_injection,
+            )
+        guarded_transport = ssh_sweep._dispatch._orchestrator._transport
+        self.assertIsNotNone(guarded_transport._delegate._process_started_hook)
 
     def test_live_config_and_sqlite_paths_must_be_owned_and_protected(self) -> None:
         config_path = self.root / "dispatcher.toml"

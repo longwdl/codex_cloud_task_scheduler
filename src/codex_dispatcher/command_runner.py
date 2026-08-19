@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import os
 import signal
@@ -34,6 +34,80 @@ class BinaryCommandResult:
     stdout_truncated: bool = False
     stderr_truncated: bool = False
     error: str | None = None
+
+
+class RunningBinaryCommand:
+    """Capability limited to one exact subprocess started by this module."""
+
+    __slots__ = ("_argv", "_process", "_termination_requested")
+
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        argv: Sequence[str],
+    ) -> None:
+        self._process = process
+        self._argv = tuple(argv)
+        self._termination_requested = False
+
+    @property
+    def argv(self) -> tuple[str, ...]:
+        return self._argv
+
+    @property
+    def pid(self) -> int:
+        return self._process.pid
+
+    @property
+    def process_group_id(self) -> int:
+        if os.name != "posix":
+            raise RuntimeError("process groups require POSIX")
+        return os.getpgid(self.pid)
+
+    @property
+    def session_id(self) -> int:
+        if os.name != "posix":
+            raise RuntimeError("process sessions require POSIX")
+        return os.getsid(self.pid)
+
+    @property
+    def termination_requested(self) -> bool:
+        return self._termination_requested
+
+    def kill_exact_process_group(
+        self,
+        *,
+        expected_argv: Sequence[str],
+        expected_pid: int,
+    ) -> None:
+        """SIGKILL only this still-live, exact argv POSIX session leader."""
+        normalized_expected = tuple(_validate_argv(expected_argv))
+        if os.name != "posix":
+            raise RuntimeError("exact process-group termination requires POSIX")
+        if type(expected_pid) is not int or expected_pid <= 0:
+            raise ValueError("expected_pid must be a positive integer")
+        process_argv = self._process.args
+        if isinstance(process_argv, str):
+            raise RuntimeError("refusing to terminate a non-argv subprocess")
+        if (
+            expected_pid != self.pid
+            or normalized_expected != self._argv
+            or tuple(process_argv) != self._argv
+            or self._process.poll() is not None
+        ):
+            raise RuntimeError("refusing to terminate a mismatched or exited subprocess")
+        try:
+            process_group_id = os.getpgid(self.pid)
+            session_id = os.getsid(self.pid)
+        except ProcessLookupError as exc:
+            raise RuntimeError("refusing to terminate an exited subprocess") from exc
+        if process_group_id != self.pid or session_id != self.pid:
+            raise RuntimeError("refusing to terminate a non-leader process group")
+        os.killpg(self.pid, signal.SIGKILL)
+        self._termination_requested = True
+
+
+BinaryCommandStartedHook = Callable[[RunningBinaryCommand], None]
 
 
 def run_command(
@@ -76,6 +150,7 @@ def run_binary_command(
     input_bytes: bytes = b"",
     secrets: Sequence[str] = (),
     cwd: str | None = None,
+    started_hook: BinaryCommandStartedHook | None = None,
 ) -> BinaryCommandResult:
     """Run fixed argv and return bounded bytes; callers must never log raw output."""
     normalized_argv = _validate_argv(argv)
@@ -85,6 +160,8 @@ def run_binary_command(
         raise ValueError("timeout and output byte limits must be positive or non-negative")
     if not isinstance(input_bytes, bytes):
         raise TypeError("input_bytes must be bytes")
+    if started_hook is not None and not callable(started_hook):
+        raise TypeError("started_hook must be callable or None")
     command_env = _command_environment(env)
     try:
         process = subprocess.Popen(
@@ -130,6 +207,18 @@ def run_binary_command(
     )
     writer.start()
 
+    hook_failed = False
+    if started_hook is not None:
+        try:
+            started_hook(RunningBinaryCommand(process, normalized_argv))
+        except Exception:
+            # A trusted observation hook must not leak its exact child or turn an
+            # unproven observation failure into an immediate process kill.  Let
+            # the bounded command finish normally, then report ambiguity.
+            hook_failed = True
+    # The hook has its own bounded proof budget.  Do not let that read-only
+    # observation time consume the primary command deadline and accidentally
+    # turn a failed proof into an unauthorized timeout kill.
     deadline = time.monotonic() + timeout_seconds
     timed_out = False
     try:
@@ -147,6 +236,11 @@ def run_binary_command(
         for thread in (*readers, writer):
             thread.join()
 
+    error = None
+    if timed_out:
+        error = "command timed out"
+    elif hook_failed:
+        error = "command start hook failed"
     return BinaryCommandResult(
         None if timed_out else process.returncode,
         bytes(stdout_buffer),
@@ -154,7 +248,7 @@ def run_binary_command(
         timed_out,
         stdout_truncated[0],
         stderr_truncated[0],
-        "command timed out" if timed_out else None,
+        error,
     )
 
 

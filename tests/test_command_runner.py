@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
+import signal
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -85,6 +88,55 @@ class CommandRunnerTests(unittest.TestCase):
         )
         self.assertEqual(b"x" * 10, truncated.stdout)
         self.assertTrue(truncated.stdout_truncated)
+
+    @unittest.skipUnless(os.name == "posix", "exact process-group kill requires POSIX")
+    def test_started_hook_can_kill_only_its_exact_session_leader(self) -> None:
+        argv = [sys.executable, "-c", "import time; time.sleep(30)"]
+        observed = {}
+
+        def interrupt(process) -> None:
+            observed["pid"] = process.pid
+            self.assertEqual(tuple(argv), process.argv)
+            self.assertEqual(process.pid, process.process_group_id)
+            self.assertEqual(process.pid, process.session_id)
+            with self.assertRaisesRegex(RuntimeError, "mismatched"):
+                process.kill_exact_process_group(
+                    expected_argv=(*argv, "unexpected"),
+                    expected_pid=process.pid,
+                )
+            self.assertFalse(process.termination_requested)
+            process.kill_exact_process_group(
+                expected_argv=argv,
+                expected_pid=process.pid,
+            )
+            self.assertTrue(process.termination_requested)
+
+        result = run_binary_command(argv, started_hook=interrupt)
+
+        self.assertEqual(-signal.SIGKILL, result.returncode)
+        self.assertFalse(result.timed_out)
+        self.assertIsNone(result.error)
+        self.assertGreater(observed["pid"], 0)
+
+    def test_started_hook_failure_is_ambiguous_without_immediate_kill(self) -> None:
+        result = run_binary_command(
+            [sys.executable, "-c", "pass"],
+            started_hook=lambda process: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        self.assertEqual(0, result.returncode)
+        self.assertFalse(result.timed_out)
+        self.assertEqual("command start hook failed", result.error)
+
+    def test_started_hook_proof_budget_does_not_consume_command_timeout(self) -> None:
+        result = run_binary_command(
+            [sys.executable, "-c", "import time; time.sleep(0.5)"],
+            timeout_seconds=0.4,
+            started_hook=lambda process: time.sleep(0.2),
+        )
+
+        self.assertEqual(0, result.returncode)
+        self.assertFalse(result.timed_out)
 
 
 if __name__ == "__main__":

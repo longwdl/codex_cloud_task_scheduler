@@ -187,17 +187,31 @@ def _assemble_ssh_control_sweep(
     )
     if fixture_fault_injection is not None:
         source = fixture_fault_injection.wrap_source(source)
+    transport_arguments = {
+        "ssh_path": ssh_path,
+        "host": runtime.host,
+        "user": runtime.user,
+        "port": runtime.port,
+        "known_hosts_path": runtime.known_hosts_path,
+        "identity_file": runtime.identity_file,
+        "assh_proxy_path": runtime.assh_proxy_path,
+        "assh_home": runtime.assh_home,
+        "connect_timeout_seconds": runtime.connect_timeout_seconds,
+    }
+    process_started_hook = None
+    if fixture_fault_injection is not None:
+        status_transport = SshRunnerTransport(
+            **transport_arguments,
+            operation_timeout_seconds=min(runtime.operation_timeout_seconds, 30.0),
+        )
+        process_started_hook = fixture_fault_injection.ssh_process_started_hook(
+            store=store,
+            status_transport=status_transport,
+        )
     transport = SshRunnerTransport(
-        ssh_path=ssh_path,
-        host=runtime.host,
-        user=runtime.user,
-        port=runtime.port,
-        known_hosts_path=runtime.known_hosts_path,
-        identity_file=runtime.identity_file,
-        assh_proxy_path=runtime.assh_proxy_path,
-        assh_home=runtime.assh_home,
-        connect_timeout_seconds=runtime.connect_timeout_seconds,
+        **transport_arguments,
         operation_timeout_seconds=runtime.operation_timeout_seconds,
+        process_started_hook=process_started_hook,
     )
     if fixture_fault_injection is not None:
         transport = fixture_fault_injection.wrap_transport(transport)
