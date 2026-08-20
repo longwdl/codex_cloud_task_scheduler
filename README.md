@@ -117,6 +117,12 @@ wrote the irreversible local `completed` tombstone first, then idempotently upda
 comment and finally `agent:completed`. It did not close the Issue, delete the task branch, or perform
 the merge itself; an immediate repeated sweep returned idle.
 
+After explicit operator authorization and exact-head merge of Fixture PR `#19`, Issue `#18` also
+completed both GitHub projection receipt-loss windows. The first fault persisted the local completed
+tombstone before discarding the successful fixed-comment response; the second retried that comment,
+read back `agent:completed`, and then discarded the label response. Final preflight and two ordinary
+sweeps were idle, with the original WorkItem, Turn, session, branch, and PR preserved.
+
 Current SSH candidate and recovery planning is exposed through `ssh-preflight`. It checks Git, gh,
 and OpenSSH versions, reads GitHub, and migrates only a temporary copy of SQLite. It does not alter
 the configured database, claim Issues, mutate labels, fetch or push Git, invoke a Runner, or create a

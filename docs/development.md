@@ -106,11 +106,12 @@ WorkItem/Turn/session/branch/Draft PR/Actions run; independent Runner STATUS was
 preflight and a repeated sweep were idle. The real Slack publisher contract was separately proven
 by an exact-retry live fixture that returned one receipt and left one visible message. An earlier
 normal task lifecycle also delivered one root/result thread with the same 1:1 identities.
-The live-only completion fixture now has offline coverage for two ordered failure points: it can
-discard the exact fixed-comment response only after the local completed tombstone is durable, then
-discard the completed-label response only after GitHub read-back. Both stages reject Source, Runner,
-Git Publisher, and Slack Publisher calls and require the exact merged PR binding. Live execution is
-pending the maintainer's explicit review and merge of the bound Fixture PR.
+The live-only completion fixture now has offline and live coverage for two ordered failure points.
+After an explicitly authorized operator merge of Fixture PR `#19`, it discarded the exact
+fixed-comment response only after the local completed tombstone was durable, then discarded the
+completed-label response only after GitHub read-back. Both stages rejected Source, Runner, Git
+Publisher, and Slack Publisher calls and required the exact merged PR binding. Final preflight and
+two ordinary sweeps were idle with the original identities preserved.
 The Runner must not receive GitHub write or production credentials.
 
 Explicitly deferred:

@@ -630,8 +630,9 @@ repository、base/task branch 及 `headRefOid` 全部与已持久化绑定一致
 重复 write-enabled sweep 与之后的 preflight 均 idle。这证明协议回执恢复和 AC-055 正常 live
 路径，但不等同于物理 SSH 链路/daemon 故障，也未注入 completion comment/label 回执丢失。
 Slack provider root/result 回执丢失后来已由 Fixture Issue `#18` live 注入；completion
-comment/label 回执丢失的受限入口和离线回归已经实现，但仍须等待维护者显式审核并 merge 绑定 PR
-后，才能按顺序完成 live 注入。
+comment/label 回执丢失随后也在同一 Issue 上完成 live 注入。经显式授权的操作者以精确 head SHA
+merge 绑定 PR `#19` 后，第一阶段先落本地 completed tombstone 再丢弃固定评论成功回执；第二阶段
+幂等复用评论、回读 completed label 后才丢弃其回执。最终 preflight 和两次普通 sweep 均 idle。
 
 Fixture Issue `#14` 随后完成真实 OpenSSH 客户端进程中断。故障入口只持有本次 primary SSH
 子进程的不可变 argv/PID capability；在本地 WorkItem/Turn 已落库后，第二条无故障钩子的只读

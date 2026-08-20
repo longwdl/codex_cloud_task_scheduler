@@ -358,6 +358,13 @@ fault. Independently verify one WorkItem, finished Turn, session, branch, merged
 completed label, successful exact-SHA Actions run, and unchanged Runner record; then repeat the
 ordinary sweep. Stop on any identity or state mismatch.
 
+Fixture Issue `#18` completed this sequence on 2026-08-20 after an explicitly authorized operator
+merge of PR `#19` at exact head `7a90afd4dbbec378dbfb7cad45bfa3c72452e8a2`. The comment stage
+left the Issue in review after the local tombstone and successful fixed-comment write; preflight
+selected `sync_tracker_state`. The label stage read back `agent:completed` before discarding its
+response. The comment timestamp preceded the completed-label event, Runner STATUS retained the
+same finished Turn/session, and final preflight plus two ordinary sweeps were idle.
+
 ### 6. Slack outbound app
 
 The existing official Codex Slack binding is not the Dispatcher integration. A custom outbound-only

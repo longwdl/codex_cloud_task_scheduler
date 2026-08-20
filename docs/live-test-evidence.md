@@ -139,6 +139,50 @@ human-confirmed provider idempotency contract proves recovery without a second d
 inspection of this private thread remains a maintainer-only cross-check. No merge, deployment,
 release, branch deletion, tag, Issue close, or production access occurred.
 
+## GitHub completion comment/label receipt-loss recovery fixture — 2026-08-20
+
+This fixture completed the lifecycle of the same private Issue
+[`#18`](https://github.com/longwdl/codex-dispatcher-fixture/issues/18). After explicit authorization
+to operate the disposable Fixture repository, the operator re-read the one-file README diff,
+confirmed Actions run
+[`32361317694`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32361317694)
+was successful for exact head `7a90afd4dbbec378dbfb7cad45bfa3c72452e8a2`, marked Draft PR
+[`#19`](https://github.com/longwdl/codex-dispatcher-fixture/pull/19) ready, and merged it using that
+SHA as an optimistic-concurrency guard. This was an authorized operator action outside the
+Dispatcher; the Dispatcher still has no merge operation. Fixture `main` advanced to merge commit
+`f5037925502905fd3d22a807df7291ba1004bab9`, while the task branch remained at the checkpoint.
+
+The live-only mechanism was committed before the writes and all 317 offline tests, `compileall`,
+`git diff --check`, and the staged sensitive-pattern check passed. Read-only preflight then selected
+`complete_merged_work_item` for only Issue `#18`, WorkItem
+`wi_887b852ac5834765ac2571a7`, and PR `#19`.
+
+The first live attempt failed closed before any target write because recovery planning legitimately
+audited an older completed WorkItem first. Its online backup was valid, but
+`fault_triggered=false` and the target stayed in review. The fixture wrapper was narrowed so
+non-target historical PR reads cannot arm a fault, while every non-target write remains rejected;
+the focused and full 317-test suites passed again and the correction was committed separately.
+
+The accepted comment stage first persisted the irreversible local `completed` tombstone, then
+updated only the exact fixed comment and discarded its successful response. It left the Issue at
+`agent:review`, with no active Turn and no Source, Runner, Git Publisher, or Slack Publisher call.
+Backup `state.pre-completion-comment-receipt-kdn_qmp5.db` was mode `0600` and passed
+`integrity_check`; preflight then selected only `sync_tracker_state`.
+
+The label stage idempotently updated the same comment, applied `agent:completed`, read the exact
+Issue back from GitHub, and only then discarded that verified response. Backup
+`state.pre-completion-label-receipt-20gig5xq.db` was also mode `0600` with successful integrity.
+The one fixed comment was updated at `2026-08-20T11:50:50Z`; the completed-label timeline event was
+later, at `11:53:25Z`. The Issue remained open with exactly one dispatcher comment and retained its
+Slack execution link.
+
+Independent final reads proved one completed WorkItem, one finished/completed Turn, the original
+session, Runner directory, branch, checkpoint, merged PR, successful Actions run, and two delivered
+Slack records. Runner `STATUS` returned `finished` for the same WorkItem, Turn, and session with no
+artifact. Final preflight and two ordinary write-enabled sweeps were all `idle`; no new Turn,
+session, Prompt, branch, PR, comment, workflow run, Slack delivery, deployment, release, tag, branch
+deletion, or Issue close occurred.
+
 ## SSH CLI human-merge completion projection fixture — 2026-08-19
 
 This fixture completes the lifecycle of Fixture Issue
