@@ -52,7 +52,8 @@ The environment-independent core now additionally contains:
   new Issue, freezes a stable post-claim snapshot, starts or resumes exactly one Turn, and publishes
   an exact verified checkpoint through the fixed Publisher port;
 - a protected GitHub mirror refresher that fetches one configured base branch into a fixed internal
-  ref, keeps credentials out of argv and persistent Git config, and composes with the exact-source
+  ref, keeps credentials out of argv and persistent Git config, retries only that read-only fetch
+  once inside the original total timeout, and composes with the exact-source
   bundle builder;
 - strict, secret-free SSH runtime configuration and a dependency assembly boundary for GitHub,
   mirror, quarantine, fixed SSH transport, process lock, and the single sweep;

@@ -554,7 +554,9 @@ repository，使用固定 Git 配置执行 `bundle verify`、`fsck`、anchor anc
 状态：source/result bundle、Runner workspace 和 Control Host quarantine 的本地 Git fixture 已
 完成；固定 GitHub URL/base ref 的可信 mirror refresher 已通过 mocked command boundary 验证，
 并已在 Fixture Issue `#2` 和 `#4` 的受控 sweep 中执行 live GitHub fetch。Issue `#4` 首次 fetch
-遇到一次写入前的暂时性失败；状态未变化，随后同一受限只读 ref 查询和安全重试成功。
+遇到一次写入前的暂时性失败；状态未变化，随后同一受限只读 ref 查询和安全重试成功。针对该
+观测，refresher 现在只对固定 `base_fetch` 增加一次自动重试，两次尝试共享原 120 秒总预算；其他
+Git 阶段、持久失败和预算耗尽仍 fail closed，且不会 claim Issue 或创建 SQLite/Runner 状态。
 
 ### Phase C：Linux SSH Runner Fixture
 

@@ -197,6 +197,7 @@ class GitHubMirrorRefresherTests(unittest.TestCase):
                         "",
                     ),
                     CommandResult(1, "", f"remote rejected {TOKEN}"),
+                    CommandResult(1, "", f"remote rejected {TOKEN}"),
                 )
             )
             refresher = GitHubMirrorRefresher(
@@ -204,9 +205,12 @@ class GitHubMirrorRefresherTests(unittest.TestCase):
                 mirror_root=root,
                 github_token=TOKEN,
             )
-            with patch(
-                "codex_dispatcher.trusted_mirror.run_command",
-                side_effect=lambda *args, **kwargs: next(results),
+            with (
+                patch(
+                    "codex_dispatcher.trusted_mirror.run_command",
+                    side_effect=lambda *args, **kwargs: next(results),
+                ) as command,
+                patch("codex_dispatcher.trusted_mirror.time.sleep"),
             ):
                 with self.assertRaises(TrustedMirrorError) as raised:
                     refresher.refresh("owner/repo", "main")
@@ -216,6 +220,111 @@ class GitHubMirrorRefresherTests(unittest.TestCase):
                 str(raised.exception),
             )
             self.assertNotIn(TOKEN, str(raised.exception))
+            self.assertEqual(
+                2,
+                sum("fetch" in tuple(item.args[0]) for item in command.call_args_list),
+            )
+
+    def test_transient_base_fetch_retries_once_within_original_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "mirrors"
+            mirror = root / "owner" / "repo.git"
+            mirror.mkdir(parents=True, mode=0o700)
+            root.chmod(0o700)
+            mirror.parent.chmod(0o700)
+            mirror.chmod(0o700)
+            fetch_attempts = 0
+            fetch_timeouts: list[float] = []
+
+            def fake_run(argv, **kwargs):
+                nonlocal fetch_attempts
+                normalized = tuple(argv)
+                if "--is-bare-repository" in normalized:
+                    return CommandResult(0, "true\n", "")
+                if "--get-regexp" in normalized:
+                    return CommandResult(
+                        0,
+                        "core.repositoryformatversion\ncore.filemode\ncore.bare\n",
+                        "",
+                    )
+                if "fetch" in normalized:
+                    fetch_attempts += 1
+                    fetch_timeouts.append(kwargs["timeout_seconds"])
+                    if fetch_attempts == 1:
+                        return CommandResult(1, "", "transient provider failure")
+                    return CommandResult(0, "", "")
+                if f"{MIRROR_BASE_REF}^{{commit}}" in normalized:
+                    return CommandResult(0, BASE_SHA + "\n", "")
+                raise AssertionError("unexpected Git command")
+
+            refresher = GitHubMirrorRefresher(
+                git_path="/usr/bin/git",
+                mirror_root=root,
+                timeout_seconds=1.0,
+            )
+            with (
+                patch(
+                    "codex_dispatcher.trusted_mirror.run_command",
+                    side_effect=fake_run,
+                ),
+                patch("codex_dispatcher.trusted_mirror.time.sleep") as sleeper,
+            ):
+                observed = refresher.refresh("owner/repo", "main")
+
+            self.assertEqual(BASE_SHA, observed)
+            self.assertEqual(2, fetch_attempts)
+            self.assertEqual(2, len(fetch_timeouts))
+            self.assertTrue(all(0 < value <= 1.0 for value in fetch_timeouts))
+            self.assertLessEqual(fetch_timeouts[1], fetch_timeouts[0])
+            sleeper.assert_called_once()
+
+    def test_base_fetch_does_not_retry_after_total_budget_is_exhausted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "mirrors"
+            mirror = root / "owner" / "repo.git"
+            mirror.mkdir(parents=True, mode=0o700)
+            root.chmod(0o700)
+            mirror.parent.chmod(0o700)
+            mirror.chmod(0o700)
+            fetch_attempts = 0
+
+            def fake_run(argv, **kwargs):
+                nonlocal fetch_attempts
+                normalized = tuple(argv)
+                if "--is-bare-repository" in normalized:
+                    return CommandResult(0, "true\n", "")
+                if "--get-regexp" in normalized:
+                    return CommandResult(
+                        0,
+                        "core.repositoryformatversion\ncore.filemode\ncore.bare\n",
+                        "",
+                    )
+                if "fetch" in normalized:
+                    fetch_attempts += 1
+                    return CommandResult(None, "", "", timed_out=True)
+                raise AssertionError("unexpected Git command")
+
+            refresher = GitHubMirrorRefresher(
+                git_path="/usr/bin/git",
+                mirror_root=root,
+                timeout_seconds=1.0,
+            )
+            with (
+                patch(
+                    "codex_dispatcher.trusted_mirror.run_command",
+                    side_effect=fake_run,
+                ),
+                patch(
+                    "codex_dispatcher.trusted_mirror.time.monotonic",
+                    side_effect=(0.0, 0.0, 1.0),
+                ),
+                patch("codex_dispatcher.trusted_mirror.time.sleep") as sleeper,
+            ):
+                with self.assertRaisesRegex(TrustedMirrorError, "base_fetch"):
+                    refresher.refresh("owner/repo", "main")
+
+            self.assertEqual(1, fetch_attempts)
+            sleeper.assert_not_called()
 
     def test_existing_remote_or_behavioral_local_config_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

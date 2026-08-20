@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import os
 import stat
+import time
 from pathlib import Path
 from typing import Protocol
 
@@ -18,6 +19,8 @@ from codex_dispatcher.work_items import (
 
 
 MIRROR_BASE_REF = "refs/codex-dispatcher/base"
+_BASE_FETCH_ATTEMPTS = 2
+_BASE_FETCH_RETRY_DELAY_SECONDS = 0.25
 _ALLOWED_LOCAL_CONFIG_KEYS = frozenset(
     {
         "core.repositoryformatversion",
@@ -123,7 +126,7 @@ class GitHubMirrorRefresher:
 
         remote_url = f"https://github.com/{repository}.git"
         source_ref = f"refs/heads/{base_branch}"
-        self._run(
+        self._fetch_base(
             mirror,
             "fetch",
             "--no-tags",
@@ -131,7 +134,6 @@ class GitHubMirrorRefresher:
             "--no-recurse-submodules",
             remote_url,
             f"+{source_ref}:{MIRROR_BASE_REF}",
-            stage="base_fetch",
         )
         base_sha = self._run(
             mirror,
@@ -144,6 +146,29 @@ class GitHubMirrorRefresher:
             return validate_git_sha(base_sha, "base_sha")
         except ValueError as exc:
             raise TrustedMirrorError("Git returned an invalid base SHA") from exc
+
+    def _fetch_base(self, repository: Path, *arguments: str) -> CommandResult:
+        """Retry one read-only fetch without extending its original deadline."""
+        deadline = time.monotonic() + self._timeout_seconds
+        for attempt in range(_BASE_FETCH_ATTEMPTS):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                return self._run(
+                    repository,
+                    *arguments,
+                    stage="base_fetch",
+                    timeout_seconds=remaining,
+                )
+            except TrustedMirrorError:
+                if attempt + 1 == _BASE_FETCH_ATTEMPTS:
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(_BASE_FETCH_RETRY_DELAY_SECONDS, remaining))
+        raise TrustedMirrorError("trusted mirror Git stage failed: base_fetch")
 
     def _mirror_path(self, repository: str) -> Path:
         owner, name = repository.split("/", 1)
@@ -202,6 +227,7 @@ class GitHubMirrorRefresher:
         repository: Path,
         *arguments: str,
         stage: str,
+        timeout_seconds: float | None = None,
     ) -> CommandResult:
         environment = {
             "GIT_CONFIG_NOSYSTEM": "1",
@@ -252,7 +278,11 @@ class GitHubMirrorRefresher:
         )
         result = run_command(
             argv,
-            timeout_seconds=self._timeout_seconds,
+            timeout_seconds=(
+                self._timeout_seconds
+                if timeout_seconds is None
+                else timeout_seconds
+            ),
             max_output_bytes=1024 * 1024,
             env=environment,
             secrets=secrets,

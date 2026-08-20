@@ -47,6 +47,13 @@ base_fetch` before claim: the Issue remained ready with no comment, and SQLite c
 backup passed `integrity_check`, and preflight again uniquely selected the same Issue. The accepted
 retry used the normal SSH and Slack write opt-ins and returned `review`.
 
+The follow-up fix retries only this fixed read-only `base_fetch` once, with both attempts sharing
+the original 120-second deadline. It does not retry mirror/config/SHA validation, does not classify
+or expose provider stderr, and leaves persistent failures generic. Offline tests prove transient
+success, exactly two persistent-failure attempts, and no second attempt after budget exhaustion;
+the existing pre-claim ordering still proves no Issue, SQLite, Runner, or Prompt write can precede
+the fetch.
+
 ### Stable identities and receipts
 
 - WorkItem: `wi_a6e9f94abfd96a11e9e70ec6`.

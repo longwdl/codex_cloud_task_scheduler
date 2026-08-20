@@ -24,7 +24,8 @@ executor. The environment-independent implementation now includes:
 - Codex JSONL session binding and resume planning;
 - deterministic task-directory and branch identity;
 - bounded source/result Git bundle transfer and quarantine verification;
-- protected trusted-mirror refresh of one fixed GitHub base ref without persisted remotes;
+- protected trusted-mirror refresh of one fixed GitHub base ref without persisted remotes, with one
+  bounded read-only fetch retry inside the original timeout budget;
 - fixed-lease task-branch publication with exact-SHA read-back recovery;
 - fixed OpenSSH framing and an absolute-path `codex-runner-v1` forced-command service;
 - persistent Runner workspaces and idempotent first/resume Turn execution;
