@@ -25,7 +25,7 @@ Install immutable inputs as root-owned and non-group/world-writable:
 /srv/codex-runner/etc/config.json         root:codex-runner     0640
 /srv/codex-runner/etc/agent-result.schema.json root:root        0644
 /etc/ssh/authorized_keys/                 root:root             0755
-/etc/ssh/authorized_keys/codex-runner     root:root             0600
+/etc/ssh/authorized_keys/codex-runner     root:codex-runner     0640
 /etc/ssh/sshd_config.d/60-codex-runner.conf root:root           0644
 ```
 
@@ -61,6 +61,8 @@ restrict,command="/srv/codex-runner/bin/codex-runner-v1" ssh-ed25519 <public-key
 
 The private key remains mode `0600` on the Control Host and is never copied to the Runner. The
 root-owned external `AuthorizedKeysFile` prevents the protocol account from authorizing another key.
+Its public-key content is group-readable by `codex-runner` so privilege-separated sshd can read it,
+but it is writable only by root.
 The key-level `restrict` and fixed command duplicate the sshd `Match User` restrictions so either
 layer independently denies an interactive shell, PTY, forwarding, tunnel, user environment, and
 user rc files. OpenSSH 9.6 does not allow `PermitUserEnvironment` inside a `Match` block; instead,

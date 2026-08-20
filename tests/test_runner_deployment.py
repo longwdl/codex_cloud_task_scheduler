@@ -61,6 +61,10 @@ class RunnerDeploymentTests(unittest.TestCase):
             documentation,
         )
         self.assertIn("root-owned external `AuthorizedKeysFile`", documentation)
+        self.assertIn(
+            "/etc/ssh/authorized_keys/codex-runner     root:codex-runner     0640",
+            documentation,
+        )
         self.assertIn("sudo /usr/sbin/sshd -t", documentation)
         self.assertIn("Reload rather than restart sshd", documentation)
         self.assertIn("wrapper discards the inherited environment", documentation)
