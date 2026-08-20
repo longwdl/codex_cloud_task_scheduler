@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from codex_dispatcher.cli import main, run_once_dry_run
+from codex_dispatcher.config import SlackRuntimeConfig
 from codex_dispatcher.contract import ContractCheck
 from codex_dispatcher.control_sweep import ControlSweepResult, ControlSweepStatus
 from codex_dispatcher.domain import Run
@@ -161,7 +162,14 @@ class CliTests(unittest.TestCase):
 
     def test_ssh_preflight_is_read_only_and_needs_no_write_opt_in(self) -> None:
         token = "github_pat_ssh_preflight_fixture"
-        config = make_config(global_max_active=1)
+        config = replace(
+            make_config(global_max_active=1),
+            slack_runtime=SlackRuntimeConfig(
+                channel_id="C0BR2D0MS8Y",
+                request_timeout_seconds=10,
+                idempotency_contract="client_msg_id-live-fixture-verified-v1",
+            ),
+        )
         inspection = SshPreflightInspection(
             SshPreflightPlan(
                 status=SshPreflightStatus.IDLE,
@@ -326,6 +334,248 @@ class CliTests(unittest.TestCase):
             self.assertEqual(1, exit_code)
             self.assertNotIn(token, stdout.getvalue())
             self.assertIn("[REDACTED]", stdout.getvalue())
+
+    def test_ssh_run_once_requires_separate_slack_opt_in_and_bot_token(self) -> None:
+        github_token = "github_pat_slack_runtime_fixture"
+        slack_token = "xoxb-1234567890-fixture"
+        base = make_config(global_max_active=1)
+        config = replace(
+            base,
+            slack_runtime=SlackRuntimeConfig(
+                channel_id="C0BR2D0MS8Y",
+                request_timeout_seconds=10,
+                idempotency_contract="client_msg_id-live-fixture-verified-v1",
+            ),
+        )
+        for environment, expected in (
+            (
+                {
+                    "CODEX_DISPATCHER_ENABLE_SSH_WRITES": "1",
+                    "GITHUB_TOKEN": github_token,
+                    "SLACK_BOT_TOKEN": slack_token,
+                },
+                "ENABLE_SLACK_WRITES",
+            ),
+            (
+                {
+                    "CODEX_DISPATCHER_ENABLE_SSH_WRITES": "1",
+                    "CODEX_DISPATCHER_ENABLE_SLACK_WRITES": "1",
+                    "GITHUB_TOKEN": github_token,
+                    "SLACK_BOT_TOKEN": "xoxp-not-a-bot-token",
+                },
+                "Slack bot token",
+            ),
+        ):
+            with self.subTest(expected=expected):
+                stdout = io.StringIO()
+                with (
+                    patch.dict("os.environ", environment, clear=True),
+                    patch(
+                        "codex_dispatcher.ssh_runtime.load_protected_ssh_config",
+                        return_value=config,
+                    ),
+                    patch(
+                        "codex_dispatcher.ssh_runtime.validate_runtime_state_path"
+                    ) as validate_state,
+                    patch(
+                        "codex_dispatcher.ssh_runtime.run_ssh_control_sweep"
+                    ) as run_sweep,
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    exit_code = main(
+                        [
+                            "ssh-run-once",
+                            "--apply",
+                            "--config",
+                            "config.toml",
+                            "--json",
+                        ]
+                    )
+                self.assertEqual(1, exit_code)
+                self.assertIn(expected, json.loads(stdout.getvalue())["error"])
+                self.assertNotIn(slack_token, stdout.getvalue())
+                validate_state.assert_not_called()
+                run_sweep.assert_not_called()
+
+    def test_ssh_run_once_passes_slack_token_without_printing_it(self) -> None:
+        github_token = "github_pat_slack_runtime_fixture"
+        slack_token = "xoxb-1234567890-fixture"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = make_config(global_max_active=1)
+            config = replace(
+                base,
+                scheduler=replace(
+                    base.scheduler,
+                    database_path=Path(temp_dir) / "state.db",
+                ),
+                slack_runtime=SlackRuntimeConfig(
+                    channel_id="C0BR2D0MS8Y",
+                    request_timeout_seconds=10,
+                    idempotency_contract="client_msg_id-live-fixture-verified-v1",
+                ),
+            )
+            stdout = io.StringIO()
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "CODEX_DISPATCHER_ENABLE_SSH_WRITES": "1",
+                        "CODEX_DISPATCHER_ENABLE_SLACK_WRITES": "1",
+                        "GITHUB_TOKEN": github_token,
+                        "SLACK_BOT_TOKEN": slack_token,
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "codex_dispatcher.ssh_runtime.load_protected_ssh_config",
+                    return_value=config,
+                ),
+                patch(
+                    "codex_dispatcher.ssh_runtime.validate_runtime_state_path"
+                ),
+                patch(
+                    "codex_dispatcher.ssh_runtime.run_ssh_control_sweep",
+                    return_value=ControlSweepResult(ControlSweepStatus.IDLE),
+                ) as run_sweep,
+                contextlib.redirect_stdout(stdout),
+            ):
+                exit_code = main(
+                    [
+                        "ssh-run-once",
+                        "--apply",
+                        "--config",
+                        "config.toml",
+                        "--json",
+                    ]
+                )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(slack_token, run_sweep.call_args.kwargs["slack_token"])
+        self.assertNotIn(slack_token, stdout.getvalue())
+
+    def test_slack_fixture_requires_apply_and_separate_environment_gate(self) -> None:
+        arguments = [
+            "slack-idempotency-fixture",
+            "--workspace-id",
+            "T0BQ60N9WH4",
+            "--channel-id",
+            "C0BR2D0MS8Y",
+            "--fixture-id",
+            "067190d4-6948-4b75-8c90-d39c964e4f0b",
+            "--json",
+        ]
+        with self.assertRaises(SystemExit):
+            main(arguments)
+
+        stdout = io.StringIO()
+        with (
+            patch.dict(
+                "os.environ",
+                {"SLACK_BOT_TOKEN": "xoxb-1234567890-fixture"},
+                clear=True,
+            ),
+            patch(
+                "codex_dispatcher.slack_live_fixture.run_slack_idempotency_fixture"
+            ) as run_fixture,
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = main(arguments[:-1] + ["--apply", "--json"])
+
+        self.assertEqual(1, exit_code)
+        self.assertIn("ENABLE_SLACK_FIXTURE_WRITES", stdout.getvalue())
+        run_fixture.assert_not_called()
+
+    def test_slack_fixture_returns_bounded_receipt_without_token(self) -> None:
+        token = "xoxb-1234567890-fixture"
+        fixture_id = "067190d4-6948-4b75-8c90-d39c964e4f0b"
+        receipt = SimpleNamespace(
+            message_ts="1700000000.000001",
+            permalink=(
+                "https://fixture.slack.com/archives/C0BR2D0MS8Y/"
+                "p1700000000000001"
+            ),
+        )
+        result = SimpleNamespace(
+            workspace_id="T0BQ60N9WH4",
+            channel_id="C0BR2D0MS8Y",
+            fixture_id=fixture_id,
+            client_msg_id="067190d4-6948-4b75-8c90-d39c964e4f0b",
+            receipt=receipt,
+        )
+        stdout = io.StringIO()
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CODEX_DISPATCHER_ENABLE_SLACK_FIXTURE_WRITES": "1",
+                    "SLACK_BOT_TOKEN": token,
+                },
+                clear=True,
+            ),
+            patch(
+                "codex_dispatcher.slack_live_fixture.run_slack_idempotency_fixture",
+                return_value=result,
+            ) as run_fixture,
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = main(
+                [
+                    "slack-idempotency-fixture",
+                    "--workspace-id",
+                    "T0BQ60N9WH4",
+                    "--channel-id",
+                    "C0BR2D0MS8Y",
+                    "--fixture-id",
+                    fixture_id,
+                    "--apply",
+                    "--json",
+                ]
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(0, exit_code)
+        self.assertTrue(payload["exact_retry_receipt_match"])
+        self.assertTrue(payload["manual_confirmation_required"])
+        self.assertFalse(payload["authorizes_runtime"])
+        self.assertEqual(1, payload["expected_visible_messages"])
+        self.assertNotIn(token, stdout.getvalue())
+        self.assertEqual(token, run_fixture.call_args.kwargs["bot_token"])
+
+    def test_slack_fixture_redacts_failure(self) -> None:
+        token = "xoxb-1234567890-fixture"
+        stdout = io.StringIO()
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CODEX_DISPATCHER_ENABLE_SLACK_FIXTURE_WRITES": "1",
+                    "SLACK_BOT_TOKEN": token,
+                },
+                clear=True,
+            ),
+            patch(
+                "codex_dispatcher.slack_live_fixture.run_slack_idempotency_fixture",
+                side_effect=RuntimeError(f"provider detail {token}"),
+            ),
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = main(
+                [
+                    "slack-idempotency-fixture",
+                    "--workspace-id",
+                    "T0BQ60N9WH4",
+                    "--channel-id",
+                    "C0BR2D0MS8Y",
+                    "--fixture-id",
+                    "067190d4-6948-4b75-8c90-d39c964e4f0b",
+                    "--apply",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(1, exit_code)
+        self.assertNotIn(token, stdout.getvalue())
+        self.assertIn("[REDACTED]", stdout.getvalue())
 
     def test_run_once_reports_missing_gh_without_external_write(self) -> None:
         stdout = io.StringIO()

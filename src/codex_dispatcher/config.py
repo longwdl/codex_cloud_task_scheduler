@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from codex_dispatcher.slack_reporting import validate_slack_channel_id
 from codex_dispatcher.task_spec import TaskSpecError, is_hard_denied_path, normalize_repo_path
+
+
+SLACK_IDEMPOTENCY_CONTRACT_V1 = "client_msg_id-live-fixture-verified-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,11 +65,19 @@ class SshRuntimeConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SlackRuntimeConfig:
+    channel_id: str
+    request_timeout_seconds: int
+    idempotency_contract: str
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     scheduler: SchedulerConfig
     tools: ToolPins
     repositories: tuple[RepositoryConfig, ...]
     ssh_runtime: SshRuntimeConfig | None = None
+    slack_runtime: SlackRuntimeConfig | None = None
 
 
 def _expect_table(value: Any, path: str) -> dict[str, Any]:
@@ -140,7 +152,7 @@ def load_config(path: Path) -> Config:
         raise ValueError(f"invalid TOML in {path}: {exc}") from exc
 
     required_root = frozenset({"scheduler", "tools", "repositories"})
-    unknown_root = set(raw) - required_root - {"ssh_runtime"}
+    unknown_root = set(raw) - required_root - {"ssh_runtime", "slack_runtime"}
     missing_root = required_root - set(raw)
     if unknown_root:
         raise ValueError(f"root has unknown field(s): {', '.join(sorted(unknown_root))}")
@@ -218,8 +230,15 @@ def load_config(path: Path) -> Config:
         if "ssh_runtime" not in raw
         else _parse_ssh_runtime(raw["ssh_runtime"])
     )
+    slack_runtime = (
+        None
+        if "slack_runtime" not in raw
+        else _parse_slack_runtime(raw["slack_runtime"])
+    )
     if ssh_runtime is not None and "ssh_version" not in tools:
         raise ValueError("tools.ssh_version is required when ssh_runtime is configured")
+    if slack_runtime is not None and ssh_runtime is None:
+        raise ValueError("slack_runtime requires ssh_runtime")
     return Config(
         scheduler=SchedulerConfig(
             database_path=Path(
@@ -247,6 +266,7 @@ def load_config(path: Path) -> Config:
         ),
         repositories=tuple(parsed_repositories),
         ssh_runtime=ssh_runtime,
+        slack_runtime=slack_runtime,
     )
 
 
@@ -343,4 +363,45 @@ def _parse_ssh_runtime(value: Any) -> SshRuntimeConfig:
             if home_present
             else None
         ),
+    )
+
+
+def _parse_slack_runtime(value: Any) -> SlackRuntimeConfig:
+    table = _expect_table(value, "slack_runtime")
+    _check_keys(
+        table,
+        frozenset(
+            {
+                "channel_id",
+                "request_timeout_seconds",
+                "idempotency_contract",
+            }
+        ),
+        "slack_runtime",
+    )
+    channel_id = _string(table["channel_id"], "slack_runtime.channel_id")
+    try:
+        validate_slack_channel_id(channel_id)
+    except ValueError as exc:
+        raise ValueError("slack_runtime.channel_id is invalid") from exc
+    timeout = _positive_int(
+        table["request_timeout_seconds"],
+        "slack_runtime.request_timeout_seconds",
+    )
+    if timeout > 60:
+        raise ValueError(
+            "slack_runtime.request_timeout_seconds must not exceed 60"
+        )
+    idempotency_contract = _string(
+        table["idempotency_contract"],
+        "slack_runtime.idempotency_contract",
+    )
+    if idempotency_contract != SLACK_IDEMPOTENCY_CONTRACT_V1:
+        raise ValueError(
+            "slack_runtime.idempotency_contract requires the exact live-fixture proof value"
+        )
+    return SlackRuntimeConfig(
+        channel_id=channel_id,
+        request_timeout_seconds=timeout,
+        idempotency_contract=idempotency_contract,
     )

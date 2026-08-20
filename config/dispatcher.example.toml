@@ -28,6 +28,14 @@ runner_root = "/srv/codex-runner/work-items"
 connect_timeout_seconds = 10
 operation_timeout_seconds = 3900
 
+# Do not uncomment this table until a controlled live fixture proves that the
+# target Slack app/workspace returns the original receipt for an exact retry.
+# The bot token belongs only in SLACK_BOT_TOKEN, never in TOML.
+# [slack_runtime]
+# channel_id = "C0BR2D0MS8Y"
+# request_timeout_seconds = 10
+# idempotency_contract = "client_msg_id-live-fixture-verified-v1"
+
 [[repositories]]
 slug = "longwdl/codex-dispatcher-fixture"
 base_branch = "main"

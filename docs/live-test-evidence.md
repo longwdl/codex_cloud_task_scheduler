@@ -3,6 +3,89 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Slack Web API exact-retry fixture — 2026-08-20
+
+This fixture proves the provider-side contract required before enabling the real outbound Slack
+publisher. It targeted only Workspace `T0BQ60N9WH4` and private channel `C0BR2D0MS8Y` with the
+installed outbound-only Slack App. Before the write, `auth.test` matched the exact Workspace and a
+bot identity, the token reported `chat:write`, the protected Dispatcher configuration parsed, and a
+read-only SSH preflight returned `idle` with `external_writes=false`.
+
+The source-tree-only `slack-idempotency-fixture` entry required `--apply`, exact Workspace/channel
+arguments, canonical UUIDv4 fixture `38667953-3dfa-4ee8-8c95-16c613ae450d`, and the ephemeral
+`CODEX_DISPATCHER_ENABLE_SLACK_FIXTURE_WRITES=1` gate. It sent the exact same root report twice with
+stable client message ID `c22ecb14-02ae-5cb0-8078-2fbba4d87a6b`, markup, mention expansion, link
+unfurling, and proxy inheritance disabled. The requests were spaced to respect the per-channel
+posting limit and had no automatic retry.
+
+Both calls returned channel `C0BR2D0MS8Y`, message timestamp `1787213067.081109`, and the same
+[permalink](https://codex-nt54555.slack.com/archives/C0BR2D0MS8Y/p1787213067081109).
+The maintainer independently inspected the private channel and confirmed that the Fixture ID was
+visible in exactly one message. The fixture write gate was absent in a new login shell afterward.
+
+Immediately before the fixture, all 308 offline tests passed; `compileall`, CLI help, and
+`git diff --check` also passed. The fixture did not open or mutate SQLite and did not access GitHub,
+the Runner, Actions, branches, pull requests, Issues, merges, releases, or deployment facilities.
+It proves the real `chat.postMessage` exact-retry receipt contract for this App/Workspace/channel;
+it does not replace a later end-to-end WorkItem/Turn/Slack-thread acceptance test.
+
+## Slack outbound normal end-to-end fixture — 2026-08-20
+
+This fixture exercised the optional real Slack publisher through the normal recovery-first
+`ssh-run-once` entry point rather than a fault hook. The maintainer created and separately moved
+private Fixture Issue
+[`#16`](https://github.com/longwdl/codex-dispatcher-fixture/issues/16) from `agent:paused` to
+`agent:ready`. Its strict task specification allowed only one existing README fixture value to
+change from `p1-ssh-transport-01` to `p1-slack-e2e-01`; Codex was forbidden to push, open a PR,
+merge, deploy, release, delete a branch, or modify another file.
+
+Before the write, SQLite passed `integrity_check`, no WorkItem or Turn was active, protected config
+with `[slack_runtime]` parsed, and read-only preflight uniquely selected Issue `#16` as
+`ready_candidate`. The first normal invocation failed closed at `trusted mirror Git stage failed:
+base_fetch` before claim: the Issue remained ready with no comment, and SQLite contained no Issue
+`#16` WorkItem or Turn. Direct GitHub connectivity then recovered, a second mode-`0600` online
+backup passed `integrity_check`, and preflight again uniquely selected the same Issue. The accepted
+retry used the normal SSH and Slack write opt-ins and returned `review`.
+
+### Stable identities and receipts
+
+- WorkItem: `wi_a6e9f94abfd96a11e9e70ec6`.
+- Turn: `turn_2dbdc421755144498012f0cf73947d01`, number `1`, finished/completed.
+- Codex session: `01a01e6d-5836-7be3-8d41-817d78370746`.
+- Runner directory:
+  `/srv/codex-runner/work-items/longwdl__codex-dispatcher-fixture/issue-16`.
+- Base SHA: `790c3e0b361f727863e3e6d86ee6e2dce16b4faf`.
+- Published/output SHA: `77504f36c59c2448a6704cdf0e80c3bd099f3345`.
+- Task branch: `codex/issue-16-a6e9f94abfd9`.
+- Slack [root](https://codex-nt54555.slack.com/archives/C0BR2D0MS8Y/p1787216871827959),
+  timestamp `1787216871.827959`.
+- Slack [result reply](https://codex-nt54555.slack.com/archives/C0BR2D0MS8Y/p1787216946860319?thread_ts=1787216871.827959&cid=C0BR2D0MS8Y),
+  timestamp `1787216946.860319`.
+- Draft PR
+  [`#17`](https://github.com/longwdl/codex-dispatcher-fixture/pull/17).
+- GitHub Actions run
+  [`32352400905`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32352400905).
+
+Independent Runner STATUS returned `finished` with the same WorkItem, Turn, session, output SHA,
+completed result, and only `README.md` in changed paths. SQLite contained exactly one WorkItem, one
+Turn, and two delivered Slack outbox records. GitHub contained one fixed Issue status comment with
+the Slack root link and one open CLEAN Draft PR. The PR had one commit and changed only `README.md`,
+one insertion and one deletion. The task branch, PR head, SQLite publication SHA, Runner head, and
+successful Actions head were identical; `main` remained at the base SHA.
+
+After the result reply existed, a fresh `chat.getPermalink` for the root appended
+`thread_ts=1787216871.827959&cid=C0BR2D0MS8Y` to the original bare root URL. The channel, path, and
+message timestamp were unchanged, the persisted bare root URL remained valid, and the result reply
+permalink remained byte-for-byte identical. The runtime intentionally preserves the original
+receipt rather than rewriting durable state for this provider presentation change.
+
+Three attempt/idle-boundary SQLite online backups were retained; each was owned by the Dispatcher
+user, mode `0600`, and passed `integrity_check`. Final preflight returned `idle`. An immediate normal
+write-enabled sweep also returned `idle`; post-checks still found one WorkItem, one Turn, two Slack
+deliveries, one comment, one Draft PR, and one successful Actions run. No second session, branch,
+message delivery, PR, or workflow run was created. No merge, default-branch write, deployment,
+release, tag, branch deletion, or production access occurred.
+
 ## SSH CLI human-merge completion projection fixture — 2026-08-19
 
 This fixture completes the lifecycle of Fixture Issue

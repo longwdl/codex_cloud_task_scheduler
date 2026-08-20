@@ -124,6 +124,13 @@ receipts, not report text. An ambiguous response is retried only through a publi
 must return the original receipt for the same key and payload; a real provider adapter stays disabled
 until that behavior is proven without granting message-history access.
 
+The provider adapter maps the durable delivery key to a stable UUID `client_msg_id`, sends only
+escaped top-level text with Slack markup, automatic mention expansion, unfurling, and thread
+broadcast disabled, and then resolves the exact message through `chat.getPermalink`. It accepts only
+bounded JSON receipts from the fixed Slack HTTPS origin and rejects redirects. Transport loss,
+malformed success responses, Slack internal errors, and a missing permalink after a confirmed post
+remain ambiguous; they are never interpreted as delivery success.
+
 ## Codex CLI session protocol
 
 The first turn runs `codex exec --json --dangerously-bypass-approvals-and-sandbox` with the prompt

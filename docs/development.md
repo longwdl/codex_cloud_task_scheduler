@@ -99,14 +99,16 @@ fresh argv/PID/PGID/SID validation and exact process-group termination. The orig
 run survived two idle sweeps. After explicit review and merge of PR `#15`, the normal completion
 path also projected Issue `#14` to `agent:completed` after the local tombstone and fixed comment;
 the task branch remained and a repeated sweep was idle. Slack root/result receipt loss and outbox
-recovery remain covered only through an idempotent fake publisher; proof of the real Slack publisher
-contract is the next external integration phase.
+recovery remain covered through an idempotent fake publisher. The real Slack publisher contract was
+separately proven by an exact-retry live fixture that returned one receipt and left one visible
+message. A later normal task lifecycle also delivered one root/result thread, preserved one
+WorkItem/Turn/session/branch/Draft PR, passed the exact-SHA Fixture workflow, and returned idle on an
+immediate repeated sweep.
 The Runner must not receive GitHub write or production credentials.
 
 Explicitly deferred:
 
 - systemd/timer activation of the one-sweep entry point;
-- a live Slack HTTP publisher or Slack API calls;
 - systemd deployment;
 - Docker isolation on the Runner;
 - any dispatcher-initiated merge, deployment, release, or production access.

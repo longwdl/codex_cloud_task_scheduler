@@ -51,6 +51,14 @@ connect_timeout_seconds = 10
 operation_timeout_seconds = 3900
 '''
 
+SLACK_RUNTIME = '''
+
+[slack_runtime]
+channel_id = "C0BR2D0MS8Y"
+request_timeout_seconds = 10
+idempotency_contract = "client_msg_id-live-fixture-verified-v1"
+'''
+
 
 class ConfigTests(unittest.TestCase):
     def _load(self, content: str):
@@ -126,6 +134,49 @@ class ConfigTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "ssh_version"):
             self._load(VALID + SSH_RUNTIME)
+
+    def test_optional_slack_runtime_requires_exact_proof_and_contains_no_secret(self) -> None:
+        configured = VALID.replace(
+            'codex_version = "0.1.0"',
+            'codex_version = "0.1.0"\nssh_version = "9.6"',
+        )
+        loaded = self._load(configured + SSH_RUNTIME + SLACK_RUNTIME)
+        runtime = loaded.slack_runtime
+        self.assertIsNotNone(runtime)
+        assert runtime is not None
+        self.assertEqual("C0BR2D0MS8Y", runtime.channel_id)
+        self.assertEqual(10, runtime.request_timeout_seconds)
+
+        with self.assertRaisesRegex(ValueError, "live-fixture proof"):
+            self._load(
+                (configured + SSH_RUNTIME + SLACK_RUNTIME).replace(
+                    "client_msg_id-live-fixture-verified-v1",
+                    "unverified",
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "must not exceed 60"):
+            self._load(
+                (configured + SSH_RUNTIME + SLACK_RUNTIME).replace(
+                    "request_timeout_seconds = 10",
+                    "request_timeout_seconds = 61",
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "channel_id"):
+            self._load(
+                (configured + SSH_RUNTIME + SLACK_RUNTIME).replace(
+                    'channel_id = "C0BR2D0MS8Y"',
+                    'channel_id = "#project"',
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "unknown field"):
+            self._load(
+                configured
+                + SSH_RUNTIME
+                + SLACK_RUNTIME
+                + 'bot_token = "xoxb-secret-must-not-be-configured"\n'
+            )
+        with self.assertRaisesRegex(ValueError, "requires ssh_runtime"):
+            self._load(configured + SLACK_RUNTIME)
 
 
 if __name__ == "__main__":

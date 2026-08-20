@@ -78,6 +78,26 @@ def _build_parser() -> argparse.ArgumentParser:
     ssh_preflight.add_argument(
         "--json", action="store_true", help="Emit machine-readable output."
     )
+
+    slack_fixture = subparsers.add_parser(
+        "slack-idempotency-fixture",
+        help="Prove one Slack client_msg_id exact-retry contract.",
+    )
+    slack_fixture.add_argument("--workspace-id", required=True)
+    slack_fixture.add_argument("--channel-id", required=True)
+    slack_fixture.add_argument("--fixture-id", required=True)
+    slack_fixture.add_argument(
+        "--request-timeout-seconds", type=float, default=10.0
+    )
+    slack_fixture.add_argument(
+        "--apply",
+        action="store_true",
+        required=True,
+        help="Required acknowledgement that exactly two Slack writes are enabled.",
+    )
+    slack_fixture.add_argument(
+        "--json", action="store_true", help="Emit machine-readable output."
+    )
     return parser
 
 
@@ -258,6 +278,19 @@ def _github_token() -> str | None:
     return None
 
 
+def _slack_bot_token() -> str | None:
+    """Return only the bot-token shape accepted by the outbound publisher."""
+    token = os.environ.get("SLACK_BOT_TOKEN")
+    if (
+        token is not None
+        and token.startswith("xoxb-")
+        and 16 <= len(token) <= 512
+        and not any(character.isspace() or ord(character) < 32 for character in token)
+    ):
+        return token
+    return None
+
+
 def _ssh_run_once(config_path: Path) -> tuple[int, dict[str, object]]:
     if os.environ.get("CODEX_DISPATCHER_ENABLE_SSH_WRITES") != "1":
         return 1, {
@@ -267,6 +300,7 @@ def _ssh_run_once(config_path: Path) -> tuple[int, dict[str, object]]:
     token = _github_token()
     if token is None:
         return 1, {"ok": False, "error": "a recognized explicit GitHub token is required"}
+    slack_token: str | None = None
     try:
         from codex_dispatcher.redaction import redact_text
         from codex_dispatcher.ssh_runtime import (
@@ -276,6 +310,16 @@ def _ssh_run_once(config_path: Path) -> tuple[int, dict[str, object]]:
         )
 
         config = load_protected_ssh_config(config_path)
+        if config.slack_runtime is not None:
+            if os.environ.get("CODEX_DISPATCHER_ENABLE_SLACK_WRITES") != "1":
+                raise RuntimeError(
+                    "CODEX_DISPATCHER_ENABLE_SLACK_WRITES=1 is required for configured Slack output"
+                )
+            slack_token = _slack_bot_token()
+            if slack_token is None:
+                raise RuntimeError(
+                    "a recognized explicit Slack bot token is required"
+                )
         validate_runtime_state_path(config.scheduler.database_path)
         with StateStore(config.scheduler.database_path) as store:
             store.migrate()
@@ -288,11 +332,13 @@ def _ssh_run_once(config_path: Path) -> tuple[int, dict[str, object]]:
                 config=config,
                 store=store,
                 github_token=token,
+                slack_token=slack_token,
             )
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        secrets = (token,) if slack_token is None else (token, slack_token)
         return 1, {
             "ok": False,
-            "error": redact_text(str(exc), (token,)),
+            "error": redact_text(str(exc), secrets),
         }
     return 0, {
         "ok": True,
@@ -368,6 +414,63 @@ def _ssh_preflight(config_path: Path) -> tuple[int, dict[str, object]]:
     }
 
 
+def _slack_idempotency_fixture(
+    *,
+    workspace_id: str,
+    channel_id: str,
+    fixture_id: str,
+    timeout_seconds: float,
+) -> tuple[int, dict[str, object]]:
+    if os.environ.get("CODEX_DISPATCHER_ENABLE_SLACK_FIXTURE_WRITES") != "1":
+        return 1, {
+            "ok": False,
+            "error": (
+                "CODEX_DISPATCHER_ENABLE_SLACK_FIXTURE_WRITES=1 is required"
+            ),
+        }
+    token = _slack_bot_token()
+    if token is None:
+        return 1, {
+            "ok": False,
+            "error": "a recognized explicit Slack bot token is required",
+        }
+    try:
+        from codex_dispatcher.redaction import redact_text
+        from codex_dispatcher.slack_live_fixture import (
+            run_slack_idempotency_fixture,
+        )
+
+        result = run_slack_idempotency_fixture(
+            bot_token=token,
+            workspace_id=workspace_id,
+            channel_id=channel_id,
+            fixture_id=fixture_id,
+            timeout_seconds=timeout_seconds,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        return 1, {
+            "ok": False,
+            "error": redact_text(str(exc), (token,)),
+            "fixture_id": fixture_id,
+            "channel_id": channel_id,
+        }
+    receipt = result.receipt
+    return 0, {
+        "ok": True,
+        "slack_idempotency_fixture": True,
+        "workspace_id": result.workspace_id,
+        "channel_id": result.channel_id,
+        "fixture_id": result.fixture_id,
+        "client_msg_id": result.client_msg_id,
+        "message_ts": receipt.message_ts,
+        "permalink": receipt.permalink,
+        "exact_retry_receipt_match": True,
+        "expected_visible_messages": 1,
+        "manual_confirmation_required": True,
+        "authorizes_runtime": False,
+    }
+
+
 def _emit(payload: dict[str, object], as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
@@ -397,6 +500,12 @@ def _emit(payload: dict[str, object], as_json: bool) -> None:
         if payload.get("repository") is not None:
             print(f"repository: {payload.get('repository')}")
             print(f"issue_number: {payload.get('issue_number')}")
+    if payload.get("slack_idempotency_fixture") is True:
+        print(f"workspace_id: {payload.get('workspace_id')}")
+        print(f"channel_id: {payload.get('channel_id')}")
+        print(f"fixture_id: {payload.get('fixture_id')}")
+        print(f"permalink: {payload.get('permalink')}")
+        print("manual_confirmation_required: true")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -419,6 +528,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return code
     if args.command == "ssh-preflight":
         code, payload = _ssh_preflight(args.config)
+        _emit(payload, args.json)
+        return code
+    if args.command == "slack-idempotency-fixture":
+        code, payload = _slack_idempotency_fixture(
+            workspace_id=args.workspace_id,
+            channel_id=args.channel_id,
+            fixture_id=args.fixture_id,
+            timeout_seconds=args.request_timeout_seconds,
+        )
         _emit(payload, args.json)
         return code
     raise AssertionError(f"unhandled command: {args.command}")

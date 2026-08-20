@@ -332,9 +332,28 @@ Slack app will eventually need:
   task-control capability.
 
 Slack documents [`chat.getPermalink`](https://docs.slack.dev/reference/methods/chat.getPermalink/)
-as requiring no additional scope. The real publisher must remain disabled until a live fixture
-proves that retrying its stable delivery key returns the original message receipt. Do not add
-conversation-history or search scopes to compensate for an ambiguous write response.
+as requiring no additional scope. On 2026-08-20, a controlled fixture against Workspace
+`T0BQ60N9WH4` and private channel `C0BR2D0MS8Y` proved that retrying one stable delivery key returned
+the original message receipt; the maintainer independently confirmed that only one message was
+visible. Do not add conversation-history or search scopes to compensate for an ambiguous write
+response.
+
+The runtime reads the bot token only from `SLACK_BOT_TOKEN`. Enabling configured Slack output also
+requires `CODEX_DISPATCHER_ENABLE_SLACK_WRITES=1` and the exact configuration assertion
+`idempotency_contract = "client_msg_id-live-fixture-verified-v1"`. That assertion records completed
+fixture evidence; it is not permission to skip the fixture. The publisher uses direct TLS to
+`slack.com`, does not inherit proxy variables or follow redirects, and never automatically retries a
+request with an ambiguous write outcome.
+
+The fixture-only CLI is not a routine health check. It requires `--apply`, a canonical UUIDv4, the
+exact Workspace/channel IDs, and the ephemeral environment gate
+`CODEX_DISPATCHER_ENABLE_SLACK_FIXTURE_WRITES=1`. Its successful API receipt still requires a human
+single-message confirmation and does not itself edit runtime configuration.
+
+A normal end-to-end run on 2026-08-20 then used the proven contract for Fixture Issue `#16`. It
+created exactly one Slack root and one result reply, persisted both receipts, projected the root
+permalink to the one fixed Issue comment, created one Draft PR, and passed the exact-SHA `fixture`
+workflow. A read-only preflight and an immediate repeated write-enabled sweep were both idle.
 
 The GitHub Issue will store a direct Slack thread link. Human task input remains in GitHub only.
 

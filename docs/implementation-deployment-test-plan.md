@@ -669,9 +669,15 @@ Issue 未被执行，错误 label 已删除并补建 `agent:completed`。这为 
 - 证明 Slack 消息不能进入调度路径。
 
 状态：消息/回执模型、payload-hash outbox、root 原子绑定、GitHub permalink 投影、Turn 终态
-消息和两类回执丢失恢复已经离线实现并接入可注入 sweep。尚未实现或启用真实 Slack HTTP
-publisher；live fixture 必须先证明相同 key/payload 的提供方重试不会创建第二条消息。若该合同
-无法证明，则保持 fail-closed，不增加 message-history/search 权限绕过。
+消息和两类回执丢失恢复已经离线实现并接入可注入 sweep。真实 Slack HTTP publisher 已用标准库
+实现并接入可选 runtime：固定 `chat.postMessage`/`chat.getPermalink`、稳定 `client_msg_id`、禁止
+redirect/markup/mention/unfurl/broadcast、限制响应大小和超时，token 只来自环境。正常入口仍要求
+精确 live-proof 配置值及独立 Slack 写开关；live fixture 必须先证明相同 key/payload 的提供方
+重试不会创建第二条消息。若该合同无法证明，则保持 fail-closed，不增加 message-history/search
+权限绕过。2026-08-20 的受控 live fixture 已对 Workspace `T0BQ60N9WH4`、频道
+`C0BR2D0MS8Y` 完成该证明：两次精确请求返回同一 receipt，维护者确认只存在一条可见消息。
+随后正常 Fixture Issue `#16` 完成一个 WorkItem/Turn/session、一个 Slack root/result thread、一个
+Draft PR 和精确 SHA Actions success；重复 preflight/sweep 均为 idle，补齐正常路径端到端验收。
 
 ### Phase F：Docker 加固
 

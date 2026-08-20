@@ -11,13 +11,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from codex_dispatcher.config import Config, SshRuntimeConfig, load_config
+from codex_dispatcher.config import (
+    SLACK_IDEMPOTENCY_CONTRACT_V1,
+    Config,
+    SshRuntimeConfig,
+    load_config,
+)
 from codex_dispatcher.contract import ContractCheck, run_control_host_contract_checks
 from codex_dispatcher.control_sweep import ControlSweepResult, SshControlSweep
 from codex_dispatcher.dispatcher_lock import DispatcherProcessLock
 from codex_dispatcher.git_bundle_verifier import GitBundleQuarantineVerifier
 from codex_dispatcher.git_publisher import GitTaskBranchPublisher
 from codex_dispatcher.github_delivery import GitHubDeliveryCoordinator
+from codex_dispatcher.slack_delivery import SlackDeliveryCoordinator
+from codex_dispatcher.slack_web_api import SlackWebApiPublisher
 from codex_dispatcher.source_bundle import GitSourceBundleBuilder
 from codex_dispatcher.ssh_dispatch_service import OfflineSshDispatchService
 from codex_dispatcher.ssh_preflight import SshPreflightPlan, build_ssh_preflight_plan
@@ -82,6 +89,7 @@ def build_ssh_control_sweep(
     config: Config,
     store: StateStore,
     github_token: str,
+    slack_token: str | None = None,
 ) -> SshControlSweep:
     """Assemble live ports without invoking GitHub, Git fetch, or SSH."""
     if not isinstance(config, Config):
@@ -101,6 +109,7 @@ def build_ssh_control_sweep(
         git_path=git_path,
         gh_path=gh_path,
         ssh_path=ssh_path,
+        slack_token=slack_token,
     )
 
 
@@ -168,6 +177,7 @@ def _assemble_ssh_control_sweep(
     git_path: Path,
     gh_path: Path,
     ssh_path: Path,
+    slack_token: str | None = None,
     fixture_fault_injection: FixtureFaultInjection | None = None,
 ) -> SshControlSweep:
     """Assemble ports using the exact executable paths that were verified."""
@@ -242,6 +252,21 @@ def _assemble_ssh_control_sweep(
     if fixture_fault_injection is not None:
         tracker = fixture_fault_injection.wrap_tracker(tracker)
         publisher = fixture_fault_injection.wrap_publisher(publisher)
+    slack_delivery = None
+    if config.slack_runtime is not None:
+        if slack_token is None:
+            raise SshRuntimeError(
+                "configured Slack runtime requires an explicit bot token"
+            )
+        slack_publisher = SlackWebApiPublisher(
+            bot_token=slack_token,
+            timeout_seconds=config.slack_runtime.request_timeout_seconds,
+        )
+        slack_delivery = SlackDeliveryCoordinator(
+            store=store,
+            publisher=slack_publisher,
+            channel_id=config.slack_runtime.channel_id,
+        )
     return SshControlSweep(
         config=config,
         store=store,
@@ -251,6 +276,7 @@ def _assemble_ssh_control_sweep(
         process_lock=DispatcherProcessLock(runtime.lock_path),
         publisher=publisher,
         delivery=GitHubDeliveryCoordinator(store=store, tracker=tracker),
+        slack_delivery=slack_delivery,
         claim_acquired_hook=(
             None
             if fixture_fault_injection is None
@@ -270,6 +296,7 @@ def run_ssh_control_sweep(
     config: Config,
     store: StateStore,
     github_token: str,
+    slack_token: str | None = None,
 ) -> ControlSweepResult:
     """Verify pinned Control Host tools, then execute exactly one locked sweep."""
     if not isinstance(config, Config):
@@ -299,6 +326,7 @@ def run_ssh_control_sweep(
         git_path=git_path,
         gh_path=gh_path,
         ssh_path=ssh_path,
+        slack_token=slack_token,
     )
     return sweep.run_once()
 
@@ -363,6 +391,14 @@ def _require_runtime(config: Config) -> SshRuntimeConfig:
         raise SshRuntimeError("SSH runtime requires global and repository max_active to equal 1")
     if config.tools.ssh_version is None:
         raise SshRuntimeError("SSH runtime requires an exact ssh_version pin")
+    if (
+        config.slack_runtime is not None
+        and config.slack_runtime.idempotency_contract
+        != SLACK_IDEMPOTENCY_CONTRACT_V1
+    ):
+        raise SshRuntimeError(
+            "Slack runtime requires the exact live-fixture idempotency proof"
+        )
     database_path = config.scheduler.database_path
     if not database_path.is_absolute() or ".." in database_path.parts:
         raise SshRuntimeError("SSH runtime database_path must be normalized and absolute")

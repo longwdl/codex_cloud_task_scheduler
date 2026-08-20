@@ -7,13 +7,21 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from codex_dispatcher.config import SshRuntimeConfig
+from codex_dispatcher.config import SlackRuntimeConfig, SshRuntimeConfig
 from codex_dispatcher.contract import ContractCheck
 from codex_dispatcher.control_sweep import (
     ControlSweepResult,
     ControlSweepStatus,
     SshControlSweep,
 )
+from codex_dispatcher.fixture_faults import (
+    FIXTURE_REPOSITORY,
+    FixtureFaultInjection,
+    FixtureFaultPoint,
+)
+from codex_dispatcher.git_publisher import GitTaskBranchPublisher
+from codex_dispatcher.slack_web_api import SlackWebApiPublisher
+from codex_dispatcher.ssh_preflight import SshPreflightStatus
 from codex_dispatcher.ssh_runtime import (
     SshRuntimeError,
     build_ssh_control_sweep,
@@ -23,13 +31,6 @@ from codex_dispatcher.ssh_runtime import (
     run_ssh_preflight,
     validate_runtime_state_path,
 )
-from codex_dispatcher.fixture_faults import (
-    FIXTURE_REPOSITORY,
-    FixtureFaultInjection,
-    FixtureFaultPoint,
-)
-from codex_dispatcher.git_publisher import GitTaskBranchPublisher
-from codex_dispatcher.ssh_preflight import SshPreflightStatus
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.testing.fakes import FakeTracker
 from codex_dispatcher.trackers.github_cli import GitHubCliTracker
@@ -110,6 +111,51 @@ class SshRuntimeTests(unittest.TestCase):
         self.assertFalse((self.root / "quarantine").exists())
         self.assertFalse((self.root / "publisher-temporary").exists())
         self.assertFalse((self.lock_dir / "dispatcher.lock").exists())
+
+    def test_configured_slack_runtime_requires_token_and_assembles_real_publisher(self) -> None:
+        config = replace(
+            self.config,
+            slack_runtime=SlackRuntimeConfig(
+                channel_id="C0BR2D0MS8Y",
+                request_timeout_seconds=10,
+                idempotency_contract="client_msg_id-live-fixture-verified-v1",
+            ),
+        )
+        with self.assertRaisesRegex(SshRuntimeError, "Slack runtime"):
+            build_ssh_control_sweep(
+                config=config,
+                store=self.store,
+                github_token=TOKEN,
+            )
+
+        sweep = build_ssh_control_sweep(
+            config=config,
+            store=self.store,
+            github_token=TOKEN,
+            slack_token="xoxb-1234567890-fixture",
+        )
+
+        self.assertIsNotNone(sweep._slack_delivery)
+        assert sweep._slack_delivery is not None
+        self.assertIsInstance(
+            sweep._slack_delivery._publisher,
+            SlackWebApiPublisher,
+        )
+        self.assertFalse((self.lock_dir / "dispatcher.lock").exists())
+
+        with self.assertRaisesRegex(SshRuntimeError, "idempotency proof"):
+            build_ssh_control_sweep(
+                config=replace(
+                    config,
+                    slack_runtime=replace(
+                        config.slack_runtime,
+                        idempotency_contract="unverified",
+                    ),
+                ),
+                store=self.store,
+                github_token=TOKEN,
+                slack_token="xoxb-1234567890-fixture",
+            )
 
     def test_fixture_fault_builder_requires_only_the_hard_coded_repository(self) -> None:
         injection = FixtureFaultInjection(

@@ -41,7 +41,10 @@ executor. The environment-independent implementation now includes:
   Publisher, Draft PR, or Issue-comment receipt, or kill one exact post-claim child process,
   without changing the normal runtime path;
 - a hashed Slack outbox, unique root/thread binding, redacted terminal reports, and offline
-  lost-receipt recovery behind an idempotent outbound publisher port.
+  lost-receipt recovery behind an idempotent outbound publisher port;
+- a standard-library Slack Web API publisher pinned to `chat.postMessage` and
+  `chat.getPermalink`, with deterministic `client_msg_id`, bounded responses, no redirects,
+  output escaping, and separate runtime/token opt-ins.
 
 The Runner path has now been exercised against the private Fixture through the real pinned SSH
 transport and Codex CLI 0.147.0 using ChatGPT login. A migrated Issue binding completed PREPARE,
@@ -58,10 +61,13 @@ remained unchanged, so it did not create another Turn, session, push, comment, P
 A second Fixture Issue has now completed controlled live Publisher, Draft PR, and Issue-comment
 receipt loss. Recovery retained one WorkItem, session, Turn, branch, Draft PR, and status comment,
 left `main` unchanged, and passed the exact-SHA Fixture workflow. That run exposed and fixed a
-recovery-order defect for a terminal local WorkItem whose Issue was still `agent:running`. The Slack
-coordination core is wired only through injected ports; a real Slack HTTP publisher remains disabled
-until its provider-side deduplication behavior is proven in a live fixture. Merge and production
-deployment remain absent.
+recovery-order defect for a terminal local WorkItem whose Issue was still `agent:running`. The real
+Slack HTTP publisher is implemented and wired behind strict optional configuration. A controlled
+live fixture against the private project channel proved that an exact `client_msg_id` retry returned
+the original receipt and left one visible message; normal runtime still requires the separate
+configuration assertion, token, and write opt-in. A subsequent normal end-to-end Fixture produced
+one WorkItem/Turn/session, one Slack root/result thread, one Draft PR, and one successful Actions run;
+an immediate repeated sweep was idle. Merge and production deployment remain absent.
 Existing Codex Cloud adapter code is retained only during migration; Cloud writes remain disabled
 and are not part of the target architecture.
 
@@ -160,7 +166,12 @@ PYTHONPATH=src python3 -m codex_dispatcher ssh-preflight \
 
 The write-enabled SSH command is intentionally not part of routine offline verification. It requires
 both `--apply` and the exact environment opt-in `CODEX_DISPATCHER_ENABLE_SSH_WRITES=1`, plus an
-explicit recognized GitHub token. Do not run it merely to validate configuration.
+explicit recognized GitHub token. If `[slack_runtime]` is configured, it additionally requires
+`CODEX_DISPATCHER_ENABLE_SLACK_WRITES=1` and an `xoxb-` token in `SLACK_BOT_TOKEN`. Do not configure
+the Slack idempotency proof value before the controlled live fixture succeeds, and do not run the
+command merely to validate configuration. The fixture-only `slack-idempotency-fixture` entry point
+requires `--apply`, a canonical UUIDv4, the exact Workspace/channel IDs, and the separate ephemeral
+`CODEX_DISPATCHER_ENABLE_SLACK_FIXTURE_WRITES=1` gate; it must not be used as a routine health check.
 
 A build backend and wheel packaging are intentionally deferred until that tooling choice is
 approved; they are not needed for the offline core.
