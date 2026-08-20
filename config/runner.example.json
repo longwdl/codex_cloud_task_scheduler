@@ -1,7 +1,7 @@
 {
   "version": 1,
   "git_path": "/usr/bin/git",
-  "codex_path": "/usr/local/bin/codex",
+  "codex_path": "/srv/codex-runner/tools/codex/0.147.0/bin/codex",
   "codex_home": "/srv/codex-runner/app",
   "output_schema": "/srv/codex-runner/etc/agent-result.schema.json",
   "work_items_root": "/srv/codex-runner/work-items",

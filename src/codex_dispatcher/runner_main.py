@@ -55,6 +55,7 @@ def load_runner_configuration(path: Path) -> RunnerConfiguration:
         raise RunnerConfigurationError(
             "Runner config must be a trusted protected regular file"
         )
+    _validate_trusted_parents(path, "Runner config")
     try:
         raw = path.read_bytes()
         payload = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
@@ -207,6 +208,7 @@ def _protected_executable(value: Any, field: str) -> Path:
         raise RunnerConfigurationError(
             f"{field} must be a trusted protected executable"
         )
+    _validate_trusted_parents(resolved, field)
     return resolved
 
 
@@ -225,6 +227,7 @@ def _protected_regular_file(value: Any, field: str) -> Path:
         raise RunnerConfigurationError(
             f"{field} must be a trusted protected regular file"
         )
+    _validate_trusted_parents(resolved, field)
     return resolved
 
 
@@ -242,7 +245,28 @@ def _protected_directory(value: Any, field: str) -> Path:
         or directory_stat.st_uid != os.geteuid()
     ):
         raise RunnerConfigurationError(f"{field} must be an owned protected directory")
+    _validate_trusted_parents(resolved, field)
     return resolved
+
+
+def _validate_trusted_parents(path: Path, field: str) -> None:
+    """Reject replacement through an ancestor controlled by another account."""
+    for parent in path.parents:
+        try:
+            parent_stat = parent.stat()
+        except OSError as exc:
+            raise RunnerConfigurationError(f"{field} parent is unavailable") from exc
+        root_sticky_directory = (
+            parent_stat.st_uid == 0 and bool(parent_stat.st_mode & stat.S_ISVTX)
+        )
+        if (
+            not stat.S_ISDIR(parent_stat.st_mode)
+            or parent_stat.st_uid not in {0, os.geteuid()}
+            or (parent_stat.st_mode & 0o022 and not root_sticky_directory)
+        ):
+            raise RunnerConfigurationError(
+                f"{field} parent directories must be trusted and protected"
+            )
 
 
 def _positive_number(value: Any, field: str) -> float:

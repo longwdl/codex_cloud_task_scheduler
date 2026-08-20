@@ -132,6 +132,22 @@ class RunnerMainTests(unittest.TestCase):
             with self.assertRaisesRegex(RunnerConfigurationError, "active_lock_path"):
                 load_runner_configuration(path)
 
+    def test_rejects_executable_below_a_replaceable_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = config(root)
+            tools = root / "mutable-tools"
+            tools.mkdir(mode=0o700)
+            codex = tools / "codex"
+            protected_file(codex, "#!/bin/sh\nexit 0\n", executable=True)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["codex_path"] = str(codex)
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            tools.chmod(0o770)
+
+            with self.assertRaisesRegex(RunnerConfigurationError, "parent directories"):
+                load_runner_configuration(path)
+
     def test_forced_command_failure_is_generic_and_emits_no_stdout(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

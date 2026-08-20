@@ -17,6 +17,8 @@ Install immutable inputs as root-owned and non-group/world-writable:
 /srv/codex-runner                         root:root             0755
 /srv/codex-runner/releases/               root:root             0755
 /srv/codex-runner/current                 root-owned symlink
+/srv/codex-runner/tools/                  root:root             0755
+/srv/codex-runner/tools/codex/0.147.0/    root:root             0755
 /srv/codex-runner/bin/                    root:root             0755
 /srv/codex-runner/bin/codex-runner-v1     root:root             0755
 /srv/codex-runner/etc/                    root:codex-runner     0750
@@ -42,8 +44,10 @@ same filesystem. Never copy, print, archive, or inspect credential contents duri
 
 The protected Runner configuration may be owned only by root or the executing account. Git, Codex,
 the output Schema, the work-item root, the active-lock parent, and an existing lock file are checked
-before the request frame is accepted. Mutable directories and lock files must be owned by the
-executing account with no group or world access.
+before the request frame is accepted. Every configured protected path also requires a complete
+root-or-Runner-owned, non-writable parent chain so an administrator account without sudo cannot
+replace a trusted executable through a writable package-manager directory. Mutable directories and
+lock files must be owned by the executing account with no group or world access.
 
 ## SSH contract
 
@@ -90,8 +94,10 @@ account shell. Do not grant sudo or add it to `docker`, `adm`, or other suppleme
 
 Stage a new root-owned release first. Atomically replace only the `current` symlink after the target
 host passes the complete offline test suite, `compileall`, JSON parsing, `sh -n`, and protected-path
-checks. Install the wrapper, configuration, Schema, external authorized key, and sshd drop-in with
-their exact owners and modes. Change ownership only for `app`, `run`, and `work-items`; do not move or
+checks. Copy the complete pinned Codex distribution into its versioned root-owned `tools/` path;
+do not point the protected configuration at an administrator-owned Homebrew/Linuxbrew tree. Install
+the wrapper, configuration, Schema, external authorized key, and sshd drop-in with their exact
+owners and modes. Change ownership only for `app`, `run`, and `work-items`; do not move or
 rewrite their contents.
 
 Before reloading sshd:
