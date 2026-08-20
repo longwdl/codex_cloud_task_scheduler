@@ -117,18 +117,16 @@ The Runner must not receive GitHub write or production credentials.
 
 Explicitly deferred:
 
-- installation and activation of the reviewed systemd units on a real Linux Control Host;
 - Docker isolation on the Runner;
 - any dispatcher-initiated merge, deployment, release, or production access.
 
 The repository now includes the fixed Control Host wrapper, hardened `Type=oneshot` service,
 non-overlapping timer, protected environment-file template, deployment/rollback checklist, and
 offline invariant tests. A separate credential-free command and network-isolated daily timer create
-atomic integrity-checked SQLite Online Backups without automatic retention deletion. These artifacts
-do not install or activate themselves. A separate `systemd --user` variant supports the private
-Fixture Control Host when `sudo` is unavailable, but explicitly lacks the dedicated account and
-root-owned code/configuration boundary of the system service. It requires administrator-enabled
-linger before activation and is not a production deployment profile.
+atomic integrity-checked SQLite Online Backups without automatic retention deletion. The reviewed
+system units are active on the dedicated `s2` Control Host; repository artifacts still do not install
+or activate themselves. A separate `systemd --user` variant remains only a fallback when `sudo` is
+unavailable and is not the production deployment profile.
 
 ## Architecture constraints for offline code
 

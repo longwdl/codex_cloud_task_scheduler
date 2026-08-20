@@ -749,20 +749,25 @@ Dispatcher 运行时也可创建一致快照。它先检查源库，再检查完
 ```text
 /srv/codex-runner/releases/<commit>/src/
 /srv/codex-runner/current -> releases/<commit>
+/srv/codex-runner/tools/codex/<version>/
 /srv/codex-runner/bin/codex-runner-v1
 /srv/codex-runner/etc/config.json
 /srv/codex-runner/etc/agent-result.schema.json
 /srv/codex-runner/app/                # protected shared CODEX_HOME
 /srv/codex-runner/work-items/
 /srv/codex-runner/run/active.lock
+/var/lib/codex-runner/home/
+/etc/ssh/authorized_keys/codex-runner
+/etc/ssh/sshd_config.d/60-codex-runner.conf
 ```
 
 Runner 的 SSH host key 固定在 Control Host。禁止 `StrictHostKeyChecking=no`、agent forwarding、
 port forwarding 和 X11 forwarding。
 
-当前 `s3` Fixture 因 `ecs-user` 无免密 sudo，上述 release、wrapper 和配置暂由同一用户管理；
-这不是进程隔离，也不能阻止不受限 Codex 进程破坏 Runner 本身。正式部署必须将 release、
-wrapper 和 `etc` 改为 root-owned，Runner 用户只保留 `run`、`work-items` 与必要认证状态的写权限。
+`s3` Fixture 已迁移到锁定、无 sudo、无附加组的 `codex-runner` 协议账户。release、versioned
+Codex tools、wrapper、Schema、配置和 SSH 授权由 root 管理；协议账户只写 `app`、`run`、
+`work-items` 和独立 HOME。这仍不是进程隔离，也不能阻止直接运行的 Codex 破坏其他 WorkItem
+或共享认证状态；高价值仓库仍须等待后续 per-WorkItem 容器边界完成。
 
 ### 11.4 资源和保留
 

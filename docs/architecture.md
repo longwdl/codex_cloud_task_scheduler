@@ -194,6 +194,14 @@ the canonical final reply is atomically persisted before the SSH response is wri
 same `turn_id` reads the stored reply and never runs Codex again. An incomplete durable record is
 reported as `unknown`, never replayed.
 
+The production SSH endpoint runs as the locked, non-sudo `codex-runner` account. Release source,
+wrapper, Schema, versioned Codex distribution, configuration, external authorized-key file, and
+sshd Match block are root-owned; only the shared Codex state, active lock, and WorkItem tree are
+writable by the protocol account. Protected configured paths require a root-or-Runner-owned,
+non-writable parent chain so an administrator-owned package directory cannot replace a trusted
+executable. This protects the service boundary but does not isolate one direct Codex Turn from the
+other WorkItems or shared authentication state.
+
 ## Source and publication flow
 
 The runner has no GitHub write credential. For a never-seen Issue, the control host prepares the

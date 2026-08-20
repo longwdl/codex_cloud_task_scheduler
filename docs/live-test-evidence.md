@@ -82,6 +82,53 @@ after verification; no installed release, configuration, state, or backup was re
 rollback remains stopping and disabling both timers while preserving the database, backups,
 mirrors, Runner state, branches, and pull requests for reconciliation.
 
+## Runner dedicated account and root-owned SSH boundary — 2026-08-21
+
+The dedicated `s3` Runner was migrated from the interactive `ecs-user` account to the locked,
+non-sudo, no-supplementary-group `codex-runner` protocol account. Before mutation, the Control Host
+timer was disabled, the service was inactive, a new mode-`0600` SQLite Online Backup passed
+integrity validation, read-only preflight returned `idle`, no local active run or exact Runner/Codex
+process existed, and the Runner global lock was acquirable. Five Codex SQLite databases returned
+`quick_check=ok`; 10 WorkItems, 10 session files, and 13 finished remote Turn records were recorded
+without reading credential, session, Prompt, or result contents.
+
+Offline commits `219e084`, `d9f2338`, and `dcadba6` defined the ownership, fixed Docker planning, and
+trusted-parent-chain contracts. All 345 tests, `compileall`, JSON parsing, wrapper syntax, and diff
+checks passed locally and again on Ubuntu with the production `umask 077`. Runtime release
+`dcadba6dd8d7b44c28a684901bf2b2bc4568c3a5` was installed root-owned. The complete Codex 0.147.0
+distribution was copied from the administrator-owned Linuxbrew tree into the versioned root-owned
+`/srv/codex-runner/tools/` tree with an identical binary SHA-256 and version result. This prevents a
+non-sudo administrator account from replacing the configured executable through a writable parent.
+
+The Runner root, releases, tools, wrapper, Schema, configuration, current symlink, and sshd drop-in
+are now root-owned. Only `app`, `run`, `work-items`, and `/var/lib/codex-runner/home` are writable by
+`codex-runner`. The protected config loads under the new account, ChatGPT login status remains valid,
+all five Codex SQLite checks still pass, and the WorkItem/session/finished-Turn counts are unchanged.
+The external authorized-key file is `root:codex-runner` mode `0640`: an initial root-only mode
+correctly failed authentication because privilege-separated sshd could not read it, so the contract
+was fixed in `28e140d` without making the public key writable or relaxing sshd. `sshd -t` and the
+effective Match configuration proved public-key-only authentication, the exact force command, and
+disabled password, keyboard-interactive, TTY, forwarding, tunnel, agent, X11, and user-rc features.
+Only `reload` was used, and a separately held `ecs-user` administrator session survived it.
+
+Before changing the Control Host username, an explicit `codex-runner` connection returned the
+existing WorkItem `wi_9eb14638cf6691e8b2a783bb` and Turn
+`turn_54ec2bff87594f53bb668ae8bf950bc1` as `finished` through STATUS with no artifact. After the
+single protected TOML field was atomically changed, a configuration-derived STATUS returned the same
+identity and state. It did not START/RESUME, resend a Prompt, create a session, or export a bundle.
+
+Two manually observed sweeps, final read-only preflight, and the first timer-triggered sweep were all
+`idle`. Control SQLite remained `integrity=ok` with no active run; its Slack table retained four
+delivered records. The private Fixture remained on default branch `main`, with six existing open PRs;
+its five most recent accessible Actions runs were all completed successfully. Runner ownership had
+no exceptions, its lock remained acquirable, and no exact Codex process remained. The Dispatcher
+timer was re-enabled, the exact temporary release staging directory was removed, and rollback copies
+of both Runner and Control Host configurations plus the old wrapper and releases were retained.
+
+This completes the account, immutable-input, and SSH authorization boundary only. Docker is still
+absent on `s3`; per-WorkItem auth/session storage, effective egress denial, and a hard aggregate disk
+limit remain mandatory gates before container activation or admission of higher-value repositories.
+
 ## Runner CODEX_HOME isolation migration — 2026-08-20
 
 The dedicated `s3` Fixture Runner moved its shared Codex-managed state from
