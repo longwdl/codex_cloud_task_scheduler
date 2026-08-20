@@ -55,7 +55,10 @@ The Runner path has now been exercised against the private Fixture through the r
 transport and Codex CLI 0.147.0 using ChatGPT login. A migrated Issue binding completed PREPARE,
 created one persistent session, and resumed that exact session on the same branch and directory;
 the read-only task produced no diff or publication checkpoint. The first-phase Runner release is
-installed on `s3`, but remains user-owned because the Fixture account has no passwordless sudo.
+installed on `s3`, but remains user-owned because the Fixture account has no passwordless sudo. A
+separate production deployment contract now defines a dedicated locked protocol account,
+root-owned immutable inputs, an external root-owned authorized-key file, and an sshd-enforced fixed
+command; it is not installed on `s3` yet and is not a substitute for the later container boundary.
 
 The write-enabled dependency assembly has now completed one bounded happy-path run against Fixture
 Issue `#2`: it claimed one SSH-labelled Issue, created one persistent Codex session, published the
@@ -196,6 +199,7 @@ approved; they are not needed for the offline core.
 - [Live fixture test evidence](docs/live-test-evidence.md)
 - [Linux Control Host system service](deploy/systemd/README.md)
 - [Rootless Fixture Control Host user service](deploy/systemd-user/README.md)
+- [Linux Runner production ownership and SSH boundary](deploy/runner/README.md)
 
 ## Security model
 

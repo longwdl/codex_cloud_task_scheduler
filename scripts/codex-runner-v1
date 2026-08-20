@@ -9,7 +9,7 @@ if [ "$#" -ne 0 ]; then
 fi
 
 exec /usr/bin/env -i \
-    HOME=/srv/codex-runner \
+    HOME=/var/lib/codex-runner/home \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     PATH=/usr/bin:/bin \

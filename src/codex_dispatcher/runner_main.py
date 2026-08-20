@@ -48,10 +48,13 @@ def load_runner_configuration(path: Path) -> RunnerConfiguration:
     if (
         not stat.S_ISREG(config_stat.st_mode)
         or path.is_symlink()
+        or config_stat.st_uid not in {0, os.geteuid()}
         or config_stat.st_mode & 0o022
         or not 0 < config_stat.st_size <= _MAX_CONFIG_BYTES
     ):
-        raise RunnerConfigurationError("Runner config must be a protected regular file")
+        raise RunnerConfigurationError(
+            "Runner config must be a trusted protected regular file"
+        )
     try:
         raw = path.read_bytes()
         payload = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
@@ -76,8 +79,25 @@ def load_runner_configuration(path: Path) -> RunnerConfiguration:
     codex_path = _protected_executable(payload["codex_path"], "codex_path")
     codex_home = _protected_directory(payload["codex_home"], "codex_home")
     output_schema = _protected_regular_file(payload["output_schema"], "output_schema")
-    work_items_root = _configured_path(payload["work_items_root"], "work_items_root")
+    work_items_root = _protected_directory(
+        payload["work_items_root"], "work_items_root"
+    )
     active_lock_path = _configured_path(payload["active_lock_path"], "active_lock_path")
+    _protected_directory(str(active_lock_path.parent), "active_lock_path parent")
+    if active_lock_path.exists():
+        try:
+            lock_stat = active_lock_path.lstat()
+        except OSError as exc:
+            raise RunnerConfigurationError("active_lock_path is unavailable") from exc
+        if (
+            not stat.S_ISREG(lock_stat.st_mode)
+            or active_lock_path.is_symlink()
+            or lock_stat.st_uid != os.geteuid()
+            or lock_stat.st_mode & 0o077
+        ):
+            raise RunnerConfigurationError(
+                "active_lock_path must be an owned protected regular file"
+            )
     git_timeout = _positive_number(payload["git_timeout_seconds"], "git_timeout_seconds")
     codex_timeout = _positive_number(
         payload["codex_timeout_seconds"], "codex_timeout_seconds"
@@ -180,10 +200,13 @@ def _protected_executable(value: Any, field: str) -> Path:
         raise RunnerConfigurationError(f"{field} is unavailable") from exc
     if (
         not stat.S_ISREG(file_stat.st_mode)
+        or file_stat.st_uid not in {0, os.geteuid()}
         or file_stat.st_mode & 0o022
         or not file_stat.st_mode & 0o111
     ):
-        raise RunnerConfigurationError(f"{field} must be a protected executable")
+        raise RunnerConfigurationError(
+            f"{field} must be a trusted protected executable"
+        )
     return resolved
 
 
@@ -194,8 +217,14 @@ def _protected_regular_file(value: Any, field: str) -> Path:
         file_stat = resolved.stat()
     except OSError as exc:
         raise RunnerConfigurationError(f"{field} is unavailable") from exc
-    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_mode & 0o022:
-        raise RunnerConfigurationError(f"{field} must be a protected regular file")
+    if (
+        not stat.S_ISREG(file_stat.st_mode)
+        or file_stat.st_uid not in {0, os.geteuid()}
+        or file_stat.st_mode & 0o022
+    ):
+        raise RunnerConfigurationError(
+            f"{field} must be a trusted protected regular file"
+        )
     return resolved
 
 

@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_dispatcher.runner_main import (
     RunnerConfigurationError,
@@ -29,6 +30,12 @@ def config(root: Path) -> Path:
     codex_home = root / "codex-home"
     codex_home.mkdir(mode=0o700, exist_ok=True)
     codex_home.chmod(0o700)
+    work_items = root / "work-items"
+    work_items.mkdir(mode=0o700, exist_ok=True)
+    work_items.chmod(0o700)
+    run = root / "run"
+    run.mkdir(mode=0o700, exist_ok=True)
+    run.chmod(0o700)
     config_path = root / "config.json"
     protected_file(
         config_path,
@@ -39,8 +46,8 @@ def config(root: Path) -> Path:
                 "codex_path": str(codex),
                 "codex_home": str(codex_home),
                 "output_schema": str(schema),
-                "work_items_root": str(root / "work-items"),
-                "active_lock_path": str(root / "active.lock"),
+                "work_items_root": str(work_items),
+                "active_lock_path": str(run / "active.lock"),
                 "git_timeout_seconds": 10,
                 "codex_timeout_seconds": 20,
             }
@@ -56,7 +63,7 @@ class RunnerMainTests(unittest.TestCase):
             loaded = load_runner_configuration(config(root))
             self.assertEqual((root / "git").resolve(), loaded.git_path)
             self.assertEqual((root / "codex-home").resolve(), loaded.codex_home)
-            self.assertEqual(root / "work-items", loaded.work_items_root)
+            self.assertEqual((root / "work-items").resolve(), loaded.work_items_root)
             self.assertEqual(20.0, loaded.codex_timeout_seconds)
             self.assertIsNotNone(build_runner_service(loaded))
 
@@ -95,6 +102,34 @@ class RunnerMainTests(unittest.TestCase):
             payload["codex_home"] = str(link)
             path.write_text(json.dumps(payload), encoding="utf-8")
             with self.assertRaisesRegex(RunnerConfigurationError, "protected directory"):
+                load_runner_configuration(path)
+
+    def test_rejects_untrusted_files_and_unprotected_mutable_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = config(root)
+            with patch(
+                "codex_dispatcher.runner_main.os.geteuid",
+                return_value=path.stat().st_uid + 1,
+            ):
+                with self.assertRaisesRegex(RunnerConfigurationError, "trusted"):
+                    load_runner_configuration(path)
+
+            path = config(root)
+            (root / "work-items").chmod(0o755)
+            with self.assertRaisesRegex(RunnerConfigurationError, "protected directory"):
+                load_runner_configuration(path)
+
+            path = config(root)
+            (root / "run").chmod(0o755)
+            with self.assertRaisesRegex(RunnerConfigurationError, "protected directory"):
+                load_runner_configuration(path)
+
+            path = config(root)
+            active_lock = root / "run" / "active.lock"
+            active_lock.write_text("", encoding="utf-8")
+            active_lock.chmod(0o644)
+            with self.assertRaisesRegex(RunnerConfigurationError, "active_lock_path"):
                 load_runner_configuration(path)
 
     def test_forced_command_failure_is_generic_and_emits_no_stdout(self) -> None:
