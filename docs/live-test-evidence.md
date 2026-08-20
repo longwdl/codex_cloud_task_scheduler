@@ -86,6 +86,59 @@ deliveries, one comment, one Draft PR, and one successful Actions run. No second
 message delivery, PR, or workflow run was created. No merge, default-branch write, deployment,
 release, tag, branch deletion, or production access occurred.
 
+## Slack root/result receipt-loss recovery fixture — 2026-08-20
+
+This fixture exercised both real Slack receipt-loss windows through the normal Dispatcher outbox,
+using only private Fixture Issue
+[`#18`](https://github.com/longwdl/codex-dispatcher-fixture/issues/18) and the already proven
+Workspace/channel contract. Before each fault, `auth.test` matched Workspace `T0BQ60N9WH4` and an
+installed bot; protected config, exact tool pins, SQLite integrity, a read-only preflight, the SSH
+write gate, the Slack write gate, and the repository-valued fault gate all passed. The source-tree
+fault path was committed separately before the live writes.
+
+The root stage accepted only a new `ready_candidate`. After the Runner had durably prepared the
+WorkItem but before any Turn existed, Slack returned root timestamp `1787223231.513909` and its
+[permalink](https://codex-nt54555.slack.com/archives/C0BR2D0MS8Y/p1787223231513909).
+The fixture discarded that complete receipt. SQLite then contained WorkItem
+`wi_887b852ac5834765ac2571a7` in `ready`, no Turn or Codex session, no branch checkpoint or PR, no
+Slack thread binding, and exactly one `prepared` root outbox record. The Issue was
+`agent:dispatching`; read-only preflight selected only `start_claimed_turn`. The verified online
+backup `state.pre-slack-root-receipt-i11tk0y3.db` was mode `0600` and passed `integrity_check`.
+
+The terminal stage was admitted only from that exact root-recovery state. The same root request
+returned the original timestamp/permalink and was atomically bound before execution. The one Turn
+then finished, the exact checkpoint was published, Draft PR
+[`#19`](https://github.com/longwdl/codex-dispatcher-fixture/pull/19) was bound, and the fixed Issue
+comment was updated. Slack returned result timestamp `1787223348.057679` and its
+[reply permalink](https://codex-nt54555.slack.com/archives/C0BR2D0MS8Y/p1787223348057679?thread_ts=1787223231.513909&cid=C0BR2D0MS8Y);
+the fixture discarded only that complete receipt. SQLite retained the WorkItem in `review`, one
+finished/completed Turn, the root as `delivered`, and only the result as `prepared`; the Issue stayed
+`agent:dispatching`. Read-only preflight selected only `sync_tracker_state`. The second verified
+online backup `state.pre-slack-terminal-receipt-3fmok59u.db` was mode `0600` and passed
+`integrity_check`.
+
+One ordinary `ssh-run-once` retried the same result outbox identity and returned
+`state_synchronized`. Its durable timestamp and permalink were byte-for-byte equal to the discarded
+receipt, and the Issue moved to `agent:review`. Final identities were:
+
+- one WorkItem `wi_887b852ac5834765ac2571a7`;
+- one Turn `turn_347bda0de02442899af7f203d5c117d2` and Codex session
+  `01a01ecf-60b4-7121-8ca4-ceeb62fb6d4e`;
+- base/main SHA `790c3e0b361f727863e3e6d86ee6e2dce16b4faf` and checkpoint
+  `7a90afd4dbbec378dbfb7cad45bfa3c72452e8a2`;
+- one branch `codex/issue-18-887b852ac583`, one Draft PR `#19`, one fixed Issue comment, and two
+  delivered Slack records in the original thread;
+- one successful exact-head Actions run
+  [`32361317694`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32361317694).
+
+Independent Runner `STATUS` returned `finished` for the same WorkItem, Turn, and session with no
+artifact. Fixture `main` remained at the base SHA. A final read-only preflight and an immediate
+write-enabled sweep both returned `idle`; counts and receipts were unchanged. The Dispatcher Slack
+App still has no history/search or inbound scope. Exact-retry equality plus the separately
+human-confirmed provider idempotency contract proves recovery without a second delivery; visual
+inspection of this private thread remains a maintainer-only cross-check. No merge, deployment,
+release, branch deletion, tag, Issue close, or production access occurred.
+
 ## SSH CLI human-merge completion projection fixture — 2026-08-19
 
 This fixture completes the lifecycle of Fixture Issue

@@ -392,6 +392,11 @@ one WorkItem, Turn, session, branch, Draft PR, Actions run, Slack root, and Slac
 preflight and sweep must be idle. Stop on any other state; do not add history/search scopes, replay
 the Prompt, create a second Issue, or edit SQLite.
 
+Fixture Issue `#18` completed this sequence on 2026-08-20. The root and result recovery calls each
+returned the exact timestamp/permalink that had been discarded, SQLite finished with two delivered
+records, and one WorkItem/Turn/session/branch/Draft PR/Actions run remained. Independent Runner
+STATUS was `finished`; Fixture `main` was unchanged and the repeated preflight/sweep were idle.
+
 The GitHub Issue will store a direct Slack thread link. Human task input remains in GitHub only.
 
 ## Keep out of scope

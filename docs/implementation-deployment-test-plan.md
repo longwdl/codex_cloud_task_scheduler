@@ -629,7 +629,8 @@ repository、base/task branch 及 `headRefOid` 全部与已持久化绑定一致
 `7fe0a9a5d51f4438423744ffb199563a0bcd4d9a`，任务分支仍保留在精确 checkpoint，Issue 保持 open，
 重复 write-enabled sweep 与之后的 preflight 均 idle。这证明协议回执恢复和 AC-055 正常 live
 路径，但不等同于物理 SSH 链路/daemon 故障，也未注入 completion comment/label 回执丢失。
-Slack provider 回执丢失仍尚未 live 注入。
+Slack provider root/result 回执丢失后来已由 Fixture Issue `#18` live 注入；completion
+comment/label 回执丢失仍未 live 注入。
 
 Fixture Issue `#14` 随后完成真实 OpenSSH 客户端进程中断。故障入口只持有本次 primary SSH
 子进程的不可变 argv/PID capability；在本地 WorkItem/Turn 已落库后，第二条无故障钩子的只读
@@ -678,10 +679,11 @@ redirect/markup/mention/unfurl/broadcast、限制响应大小和超时，token �
 `C0BR2D0MS8Y` 完成该证明：两次精确请求返回同一 receipt，维护者确认只存在一条可见消息。
 随后正常 Fixture Issue `#16` 完成一个 WorkItem/Turn/session、一个 Slack root/result thread、一个
 Draft PR 和精确 SHA Actions success；重复 preflight/sweep 均为 idle，补齐正常路径端到端验收。
-另外已有仅限固定 Fixture channel 的真实回执丢失入口：root fault 仅可从新 candidate 丢弃已验证
-receipt 并留下未启动 WorkItem，terminal fault 仅可从该 root recovery 状态继续同一 WorkItem，在
-一个完成 Turn/发布 SHA/绑定 PR 后丢弃 result receipt。两个阶段都要求 SQLite online backup、
-SSH/Slack 双写开关和普通 sweep 恢复；在实际 provider 注入完成前，不把该机制本身计作 live 证据。
+Fixture Issue `#18` 随后 live 执行真实回执丢失入口：root fault 只从新 candidate 丢弃已验证
+receipt，留下未启动 WorkItem 和 prepared root；terminal fault 只从该 root recovery 状态继续
+同一 WorkItem，在一个完成 Turn/发布 SHA/绑定 PR 后丢弃 result receipt。普通 sweep 以相同
+timestamp/permalink 恢复，最终仅有一个 WorkItem/Turn/session/branch/Draft PR/Actions run 和两个
+delivered outbox record；Runner STATUS 为 finished，重复 preflight/sweep idle。
 
 ### Phase F：Docker 加固
 
