@@ -451,6 +451,26 @@ class FixtureFaultTests(unittest.TestCase):
                     delegate,
                     store=store,
                 )
+                prior_branch = "codex/issue-14-prior"
+                prior_pull_request = replace(
+                    pull_request,
+                    number=15,
+                    url=f"https://github.com/{FIXTURE_REPOSITORY}/pull/15",
+                    branch_name=prior_branch,
+                    head_sha="c" * 40,
+                )
+                delegate.pull_requests[(FIXTURE_REPOSITORY, prior_branch)] = (
+                    prior_pull_request
+                )
+
+                self.assertEqual(
+                    prior_pull_request,
+                    comment_tracker.find_pr_by_branch(
+                        FIXTURE_REPOSITORY,
+                        prior_branch,
+                    ),
+                )
+                self.assertFalse(comment_injection.completion_identity_validated)
 
                 self.assertEqual(
                     pull_request,

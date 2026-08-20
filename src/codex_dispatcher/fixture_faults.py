@@ -977,9 +977,13 @@ class _FixtureFaultTracker:
             else WorkItemState.COMPLETED
         )
         work_item = self._completion_work_item(expected_state)
+        if branch_name != work_item.task_branch:
+            # Recovery planning audits every durable completed WorkItem before
+            # it reaches the exact live target.  Those reads are harmless and
+            # must not arm the target receipt fault.
+            return pull_request
         if (
-            branch_name != work_item.task_branch
-            or pull_request is None
+            pull_request is None
             or pull_request.number != work_item.pr_number
             or pull_request.url
             != f"https://github.com/{repository}/pull/{work_item.pr_number}"
