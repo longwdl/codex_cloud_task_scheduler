@@ -43,6 +43,14 @@ def _build_parser() -> argparse.ArgumentParser:
     status.add_argument("--database", required=True, type=Path)
     status.add_argument("--json", action="store_true", help="Emit machine-readable output.")
 
+    state_backup = subparsers.add_parser(
+        "state-backup", help="Create one protected SQLite Online Backup."
+    )
+    state_backup.add_argument("--config", required=True, type=Path)
+    state_backup.add_argument(
+        "--json", action="store_true", help="Emit machine-readable output."
+    )
+
     run_once = subparsers.add_parser(
         "run-once", help="Plan one scheduler sweep without external writes."
     )
@@ -223,6 +231,28 @@ def _status(database_path: Path) -> tuple[int, dict[str, object]]:
         "integrity": integrity,
         "active_runs": [run.run_id for run in active_runs],
         "path": str(database_path),
+    }
+
+
+def _state_backup(config_path: Path) -> tuple[int, dict[str, object]]:
+    try:
+        from codex_dispatcher.control_host_backup import create_state_backup
+        from codex_dispatcher.ssh_runtime import load_protected_ssh_config
+
+        config = load_protected_ssh_config(config_path)
+        database_path = config.scheduler.database_path
+        result = create_state_backup(
+            database_path,
+            database_path.parent / "backups",
+        )
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        return 1, {"ok": False, "error": str(exc)}
+    return 0, {
+        "ok": True,
+        "state_backup": True,
+        "path": str(result.path),
+        "size_bytes": result.size_bytes,
+        "integrity": result.integrity,
     }
 
 
@@ -506,6 +536,10 @@ def _emit(payload: dict[str, object], as_json: bool) -> None:
         print(f"fixture_id: {payload.get('fixture_id')}")
         print(f"permalink: {payload.get('permalink')}")
         print("manual_confirmation_required: true")
+    if payload.get("state_backup") is True:
+        print(f"path: {payload.get('path')}")
+        print(f"size_bytes: {payload.get('size_bytes')}")
+        print(f"integrity: {payload.get('integrity')}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -516,6 +550,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return code
     if args.command == "status":
         code, payload = _status(args.database)
+        _emit(payload, args.json)
+        return code
+    if args.command == "state-backup":
+        code, payload = _state_backup(args.config)
         _emit(payload, args.json)
         return code
     if args.command == "run-once":

@@ -20,6 +20,17 @@ until the actual Control Host is selected. The temporary directory was removed a
 was installed, no manager reload/start/enable occurred, and no Dispatcher, GitHub, Slack, Runner,
 Publisher, branch, PR, merge, deployment, or release action was invoked.
 
+The serviceization checkpoint then added a credential-free SQLite Online Backup command plus a
+network-isolated daily oneshot/timer. Six additional offline tests exercised a real migrated state
+database, source and backup integrity checks, mode-`0600` atomic publication, collision refusal,
+source-symlink and weak-directory rejection, failed-staging cleanup, CLI assembly without tokens,
+and the backup unit/timer invariants. The full suite passed at 330 tests.
+
+All four dispatcher/backup units and timers passed the same temporary Linux systemd 255 verification
+without installation. The backup service scored `2.1 OK` in the offline security audit. Its timer
+was not enabled; no real Control Host database or backup path was opened, no credential environment
+was loaded, and no existing backup was deleted.
+
 ## Runner CODEX_HOME isolation migration — 2026-08-20
 
 The dedicated `s3` Fixture Runner moved its shared Codex-managed state from

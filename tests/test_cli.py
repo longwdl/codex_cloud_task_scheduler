@@ -13,6 +13,7 @@ from unittest.mock import patch
 from codex_dispatcher.cli import main, run_once_dry_run
 from codex_dispatcher.config import SlackRuntimeConfig
 from codex_dispatcher.contract import ContractCheck
+from codex_dispatcher.control_host_backup import StateBackupResult
 from codex_dispatcher.control_sweep import ControlSweepResult, ControlSweepStatus
 from codex_dispatcher.domain import Run
 from codex_dispatcher.ssh_preflight import (
@@ -105,6 +106,41 @@ class CliTests(unittest.TestCase):
         self.assertEqual(0, exit_code)
         self.assertEqual("ok", payload["integrity"])
         self.assertEqual(["run-1"], payload["active_runs"])
+
+    def test_state_backup_uses_protected_config_without_credentials(self) -> None:
+        config = make_config()
+        database = Path("/var/lib/codex-dispatcher/state.db")
+        config = replace(
+            config,
+            scheduler=replace(config.scheduler, database_path=database),
+        )
+        result = StateBackupResult(
+            database.parent / "backups/state-20260820T123232.123456Z.db",
+            4096,
+            "ok",
+        )
+        stdout = io.StringIO()
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch(
+                "codex_dispatcher.ssh_runtime.load_protected_ssh_config",
+                return_value=config,
+            ),
+            patch(
+                "codex_dispatcher.control_host_backup.create_state_backup",
+                return_value=result,
+            ) as create,
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = main(
+                ["state-backup", "--config", "/etc/codex-dispatcher/config.toml", "--json"]
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(0, exit_code)
+        self.assertTrue(payload["state_backup"])
+        self.assertEqual("ok", payload["integrity"])
+        create.assert_called_once_with(database, database.parent / "backups")
 
     def test_run_once_requires_explicit_dry_run(self) -> None:
         with self.assertRaises(SystemExit):

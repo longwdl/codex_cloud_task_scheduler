@@ -5,6 +5,10 @@ not create a long-running web service. The timer waits two minutes after the pre
 inactive, so systemd does not intentionally overlap sweeps; the Dispatcher process lock and SQLite
 constraints remain the authoritative concurrency controls.
 
+The separate daily backup timer invokes a credential-free, network-isolated oneshot. It uses the
+SQLite Online Backup API, verifies both source and backup integrity, publishes a mode-`0600` file
+without overwriting a same-name backup, and never deletes an older backup automatically.
+
 The files are deployment artifacts, not an installer. Copying them into `/etc/systemd/system` or
 enabling the timer changes a real host and can trigger GitHub, SSH, Publisher, and optional Slack
 writes. Perform those steps only after a separately approved deployment command set.
@@ -46,7 +50,9 @@ PYTHONPATH=src python3 -m compileall -q src tests
 sh -n scripts/codex-dispatcher-v1
 systemd-analyze verify \
   deploy/systemd/codex-dispatcher.service \
-  deploy/systemd/codex-dispatcher.timer
+  deploy/systemd/codex-dispatcher.timer \
+  deploy/systemd/codex-dispatcher-backup.service \
+  deploy/systemd/codex-dispatcher-backup.timer
 ```
 
 Prepare these persistent subdirectories with owner/group `codex-dispatcher` and mode `0700`:
@@ -71,14 +77,25 @@ same protected config and GitHub credential. It must pass tool pins and SQLite i
 an expected recovery/candidate state or `idle`; its `authorizes_apply` field remains false. Starting
 `codex-dispatcher.service` is the first write-enabled action and requires separate approval.
 
+Run `codex-dispatcher-backup.service` once before enabling either timer. Its JSON receipt must name
+one file below `/var/lib/codex-dispatcher/backups`, report `integrity=ok`, and the file must be owned
+by `codex-dispatcher` with mode `0600`. The backup service receives no environment file, token, or
+network namespace. `Persistent=true` lets the daily timer catch up after downtime; the bounded
+15-minute random delay avoids synchronized disk work. Retention is deliberately manual until a
+separate deletion policy and minimum-good-backup invariant are approved.
+
 After installation, validate unit expansion and hardening before the first start:
 
 ```bash
 systemd-analyze verify /etc/systemd/system/codex-dispatcher.service \
-  /etc/systemd/system/codex-dispatcher.timer
+  /etc/systemd/system/codex-dispatcher.timer \
+  /etc/systemd/system/codex-dispatcher-backup.service \
+  /etc/systemd/system/codex-dispatcher-backup.timer
 systemd-analyze security codex-dispatcher.service
-systemctl cat codex-dispatcher.service codex-dispatcher.timer
-systemctl list-timers codex-dispatcher.timer
+systemd-analyze security codex-dispatcher-backup.service
+systemctl cat codex-dispatcher.service codex-dispatcher.timer \
+  codex-dispatcher-backup.service codex-dispatcher-backup.timer
+systemctl list-timers codex-dispatcher.timer codex-dispatcher-backup.timer
 ```
 
 Do not use `systemctl show-environment`, dump `/proc/<pid>/environ`, or enable shell tracing while
@@ -89,14 +106,16 @@ the credential file is loaded.
 The state-changing activation sequence is intentionally not automated. Once separately approved,
 the operator installs the reviewed units, runs `systemctl daemon-reload`, manually starts exactly
 one service sweep, verifies its bounded journal result and SQLite/GitHub/Runner state, and only then
-enables the timer.
+enables the dispatcher timer. It separately starts and verifies one backup before enabling the
+backup timer.
 
 Observe with `systemctl status`, `systemctl list-timers`, and bounded queries such as
-`journalctl -u codex-dispatcher.service -n 100`. A non-zero sweep remains visible as a failed
+`journalctl -u codex-dispatcher.service -n 100` and
+`journalctl -u codex-dispatcher-backup.service -n 20`. A non-zero sweep remains visible as a failed
 service activation; the timer will try another recovery-first sweep after the inactive interval.
 
-Emergency stop is `systemctl disable --now codex-dispatcher.timer` followed, if necessary, by
-`systemctl stop codex-dispatcher.service`. Preserve SQLite, WAL/SHM files, quarantine, mirrors,
-Runner directories, branches, and PRs. Roll back code by atomically restoring the previous
+Emergency stop disables both `codex-dispatcher.timer` and `codex-dispatcher-backup.timer`, followed,
+if necessary, by stopping their services. Preserve SQLite, WAL/SHM files, backups, quarantine,
+mirrors, Runner directories, branches, and PRs. Roll back code by atomically restoring the previous
 `/opt/codex-dispatcher/current` release symlink, re-running unit verification, and starting one
-manually observed recovery sweep before re-enabling the timer.
+manually observed recovery sweep and backup before re-enabling the timers.

@@ -7,8 +7,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE_PATH = ROOT / "deploy/systemd/codex-dispatcher.service"
 TIMER_PATH = ROOT / "deploy/systemd/codex-dispatcher.timer"
+BACKUP_SERVICE_PATH = ROOT / "deploy/systemd/codex-dispatcher-backup.service"
+BACKUP_TIMER_PATH = ROOT / "deploy/systemd/codex-dispatcher-backup.timer"
 ENVIRONMENT_EXAMPLE_PATH = ROOT / "deploy/systemd/dispatcher.env.example"
 WRAPPER_PATH = ROOT / "scripts/codex-dispatcher-v1"
+BACKUP_WRAPPER_PATH = ROOT / "scripts/codex-dispatcher-backup-v1"
 
 
 def _unit_sections(path: Path) -> dict[str, list[tuple[str, str]]]:
@@ -123,6 +126,40 @@ class ControlHostSystemdTests(unittest.TestCase):
         self.assertNotIn("ghp_", environment)
         self.assertNotIn("xoxb-", environment)
         self.assertNotIn("export ", environment)
+
+    def test_backup_service_is_credential_free_and_network_isolated(self) -> None:
+        sections = _unit_sections(BACKUP_SERVICE_PATH)
+        self.assertEqual(["oneshot"], _values(sections, "Service", "Type"))
+        self.assertEqual(
+            ["/opt/codex-dispatcher/current/scripts/codex-dispatcher-backup-v1"],
+            _values(sections, "Service", "ExecStart"),
+        )
+        self.assertEqual([], _values(sections, "Service", "EnvironmentFile"))
+        self.assertEqual(["yes"], _values(sections, "Service", "PrivateNetwork"))
+        self.assertEqual(
+            ["/var/lib/codex-dispatcher"],
+            _values(sections, "Service", "ReadWritePaths"),
+        )
+        self.assertEqual([""], _values(sections, "Service", "CapabilityBoundingSet"))
+
+        wrapper = BACKUP_WRAPPER_PATH.read_text(encoding="utf-8")
+        self.assertNotEqual(0, BACKUP_WRAPPER_PATH.stat().st_mode & 0o111)
+        self.assertIn('if [ "$#" -ne 0 ]; then', wrapper)
+        self.assertIn("state-backup", wrapper)
+        self.assertNotIn("ssh-run-once", wrapper)
+        self.assertNotIn("--apply", wrapper)
+
+    def test_backup_timer_is_daily_persistent_and_boundedly_randomized(self) -> None:
+        sections = _unit_sections(BACKUP_TIMER_PATH)
+        self.assertEqual(
+            ["codex-dispatcher-backup.service"],
+            _values(sections, "Timer", "Unit"),
+        )
+        self.assertEqual(["daily"], _values(sections, "Timer", "OnCalendar"))
+        self.assertEqual(
+            ["15min"], _values(sections, "Timer", "RandomizedDelaySec")
+        )
+        self.assertEqual(["true"], _values(sections, "Timer", "Persistent"))
 
 
 if __name__ == "__main__":

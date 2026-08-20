@@ -48,6 +48,8 @@ executor. The environment-independent implementation now includes:
   output escaping, and separate runtime/token opt-ins.
 - a fixed, argument-free Linux Control Host entrypoint plus a hardened systemd oneshot/timer and
   root-only environment-file template; live installation and activation remain operator actions.
+- a credential-free, network-isolated daily systemd job that atomically publishes an
+  integrity-checked SQLite Online Backup without automatic deletion.
 
 The Runner path has now been exercised against the private Fixture through the real pinned SSH
 transport and Codex CLI 0.147.0 using ChatGPT login. A migrated Issue binding completed PREPARE,

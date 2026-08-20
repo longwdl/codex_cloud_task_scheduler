@@ -111,6 +111,12 @@ removes capabilities, makes the system tree read-only, and allows writes only be
 state and runtime directories. It retains only the network families needed for GitHub, Slack, and
 the fixed SSH Runner.
 
+A separate network-isolated oneshot creates daily SQLite Online Backups while the Dispatcher may be
+active. It checks the live database before copying, validates the completed backup, and only then
+atomically publishes one mode-`0600` file in the protected backup directory. The backup path is not
+configurable from a timer invocation, receives no provider credential, and never deletes prior
+backups; retention remains an explicit operator policy.
+
 ## Input and output channels
 
 GitHub is the only human-input channel. The scheduler accepts a change only after an allowed

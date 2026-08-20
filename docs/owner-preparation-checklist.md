@@ -68,6 +68,12 @@ read-only preflight as the service user, and obtain separate approval for the ex
 installation/activation commands. See `deploy/systemd/README.md` for staging, observation, and
 rollback boundaries.
 
+Create `/var/lib/codex-dispatcher/backups` as an owned mode-`0700` directory. Before enabling either
+timer, manually run the credential-free backup service and require a mode-`0600` backup plus
+`integrity=ok`. The backup service uses no environment file or network and may use SQLite Online
+Backup concurrently with a sweep. Do not add automatic retention until deletion has a separately
+reviewed minimum-good-backup and disk-pressure policy.
+
 ### 2. Dedicated Linux Runner
 
 Prepare a rebuildable Linux host with:

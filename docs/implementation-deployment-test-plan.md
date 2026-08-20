@@ -714,10 +714,13 @@ delivered outbox record；Runner STATUS 为 finished，重复 preflight/sweep id
 /opt/codex-dispatcher/releases/<version>/
 /opt/codex-dispatcher/current
 /opt/codex-dispatcher/current/scripts/codex-dispatcher-v1
+/opt/codex-dispatcher/current/scripts/codex-dispatcher-backup-v1
 /etc/codex-dispatcher/config.toml
 /etc/codex-dispatcher/dispatcher.env
 /etc/systemd/system/codex-dispatcher.service
 /etc/systemd/system/codex-dispatcher.timer
+/etc/systemd/system/codex-dispatcher-backup.service
+/etc/systemd/system/codex-dispatcher-backup.timer
 /var/lib/codex-dispatcher/state.db
 /var/lib/codex-dispatcher/repos/
 /var/lib/codex-dispatcher/quarantine/
@@ -735,6 +738,11 @@ unit、ExecStart argv、TOML 或 release 中。service 使用稳定低权限用�
 空 capability set 和只读系统目录，仅对 `/var/lib/codex-dispatcher` 与
 `/run/codex-dispatcher` 保留写权。正式启用前必须在目标 Linux 上执行
 `systemd-analyze verify` 和只读 `ssh-preflight`。
+
+独立 backup oneshot 不读取 EnvironmentFile，禁用网络，通过 SQLite Online Backup API 在
+Dispatcher 运行时也可创建一致快照。它先检查源库，再检查完整备份，最后以
+`0600` 原子公布到受保护的 `backups/`；同名文件不覆盖。daily timer 允许主机
+停机后补跑，但不自动删除旧备份。
 
 ### 11.3 Runner 目录
 
@@ -839,6 +847,7 @@ git diff --check
 | AC-055 | 人工合并后的 completed 投影 | 仅 exact bound PR 在 persisted head SHA 合并后先落本地 completed，再写固定 comment 和 label；丢回执只重试投影，不调用 Runner/Publisher，不创建 PR；任何身份/head/merge 状态冲突均 blocked |
 | AC-056 | durable START 后真实 SSH 客户端中断 | 仅在本地 WorkItem/Turn 已持久化且第二条只读 STATUS 证明 Runner durable executing/finished 后，复核 primary SSH 的 exact argv/PID/PGID/SID 并只终止该进程组；同一 Turn 留在 reconciling，恢复只走 STATUS/EXPORT，不重发 Prompt，并最终只产生一套身份和一个 PR |
 | AC-057 | Linux Control Host systemd 服务化 | 固定无参数 wrapper 只执行一次 write-enabled recovery-first sweep；oneshot/timer 不重叠，token 只由 root-only EnvironmentFile 注入，unit 无 fixture 入口且只写受保护的 state/runtime 目录 |
+| AC-058 | Control Host SQLite 定时备份 | 无 token/无网络 oneshot 使用 Online Backup API，源库和备份均 integrity=ok 后原子发布 `0600` 文件；碰撞不覆盖，失败清理暂存，不自动删除旧备份 |
 
 ### 12.3 Live Fixture 顺序
 

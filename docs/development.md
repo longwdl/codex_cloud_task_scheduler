@@ -123,7 +123,9 @@ Explicitly deferred:
 
 The repository now includes the fixed Control Host wrapper, hardened `Type=oneshot` service,
 non-overlapping timer, protected environment-file template, deployment/rollback checklist, and
-offline invariant tests. These artifacts do not install or activate themselves.
+offline invariant tests. A separate credential-free command and network-isolated daily timer create
+atomic integrity-checked SQLite Online Backups without automatic retention deletion. These artifacts
+do not install or activate themselves.
 
 ## Architecture constraints for offline code
 
