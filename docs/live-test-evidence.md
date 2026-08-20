@@ -31,7 +31,7 @@ without installation. The backup service scored `2.1 OK` in the offline security
 was not enabled; no real Control Host database or backup path was opened, no credential environment
 was loaded, and no existing backup was deleted.
 
-## Linux Control Host staged production initialization — 2026-08-20
+## Linux Control Host production initialization and activation — 2026-08-20/21
 
 The dedicated `s2` Control Host was initialized to the reviewed production filesystem and ownership
 boundary at checkpoint `2a1be9dd127e08acc4b6460e7a781d5c47ba584c`. A root-owned CPython 3.14.7
@@ -55,14 +55,32 @@ systemd, verified the exact Git, `gh`, and OpenSSH pins, and returned `idle`,
 unchanged before and after preflight. The command did not connect to the Runner or perform a GitHub,
 Slack, branch, PR, merge, deployment, release, or tag write.
 
-Activation then failed closed at the documented host-capacity gate. The host exposed 1 vCPU,
+Initial activation failed closed at the documented host-capacity gate. The host exposed 1 vCPU,
 980,152 KiB RAM, no swap, and a 20,747,476,992-byte root filesystem with 12,606,046,208 bytes
-available, below the production minimum of 2 vCPU, 4 GiB RAM, and 50 GiB SSD. Consequently the
-write-enabled Dispatcher service was never started and both timers remain disabled and inactive.
-The root-owned installation, verified state database, and first good backup remain staged for a
-future capacity upgrade. Exact local and remote deployment staging directories, build scripts, and
-build logs were deleted after verification; no installed release, configuration, state, or backup
-was removed.
+available, below the production minimum of 2 vCPU, 4 GiB RAM, and 50 GiB SSD. The write-enabled
+service and both timers therefore remained inactive until the maintainer explicitly directed
+activation without expanding the host on 2026-08-21. This is an accepted operating exception, not
+evidence that the host meets the production baseline; memory exhaustion and disk pressure remain
+open risks.
+
+Before the exception was applied, a fresh protected backup again passed `integrity_check`, bringing
+the retained backup count to two. SQLite had no active run or Dispatcher lock, and a new read-only
+preflight again returned `idle` with an unchanged database SHA-256. One manually observed
+`codex-dispatcher.service` start then returned `status=idle` and exited successfully. Independent
+SQLite status and another read-only preflight remained idle and unchanged.
+
+Both system timers were then enabled and started. Starting the Dispatcher timer immediately caused
+one expected recovery-first sweep because its boot-relative deadline had already passed; that sweep
+also returned `idle` and exited successfully. The Dispatcher timer was active with its next
+inactive-relative sweep scheduled two minutes later, while the network-isolated backup timer was
+active with its next daily run scheduled for the following calendar day. Final SQLite integrity and
+GitHub preflight were unchanged and idle. No WorkItem, Turn, Issue, Runner, Slack, branch, PR,
+Action, merge, deployment, release, or tag write occurred during activation.
+
+Exact local and remote deployment staging directories, build scripts, and build logs were deleted
+after verification; no installed release, configuration, state, or backup was removed. Emergency
+rollback remains stopping and disabling both timers while preserving the database, backups,
+mirrors, Runner state, branches, and pull requests for reconciliation.
 
 ## Runner CODEX_HOME isolation migration — 2026-08-20
 
