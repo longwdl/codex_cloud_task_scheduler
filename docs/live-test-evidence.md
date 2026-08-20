@@ -54,6 +54,13 @@ success, exactly two persistent-failure attempts, and no second attempt after bu
 the existing pre-claim ordering still proves no Issue, SQLite, Runner, or Prompt write can precede
 the fetch.
 
+After the fix was committed, the real protected refresher fetched only
+`longwdl/codex-dispatcher-fixture` `main` and resolved exact current SHA
+`f5037925502905fd3d22a807df7291ba1004bab9`; it performed no remote write. This confirms the live
+credential, fixed argv, protected mirror, and SHA-verification path, but deliberately does not
+manufacture a network outage. The original provider-level failure subtype remains unknown because
+raw Git stderr is intentionally neither persisted nor exposed.
+
 ### Stable identities and receipts
 
 - WorkItem: `wi_a6e9f94abfd96a11e9e70ec6`.
