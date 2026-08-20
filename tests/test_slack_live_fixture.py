@@ -6,6 +6,7 @@ import unittest
 from codex_dispatcher.slack_live_fixture import (
     SlackLiveFixtureError,
     run_slack_idempotency_fixture,
+    verify_slack_workspace,
 )
 from codex_dispatcher.slack_reporting import SlackDeliveryReceipt, SlackReport
 from codex_dispatcher.slack_web_api import SlackHttpResponse
@@ -83,6 +84,26 @@ def _receipt(message_ts: str = MESSAGE_TS) -> SlackDeliveryReceipt:
 
 
 class SlackLiveFixtureTests(unittest.TestCase):
+    def test_read_only_workspace_verification_requires_exact_installed_bot(self) -> None:
+        transport = _AuthTransport()
+
+        verify_slack_workspace(
+            bot_token=TOKEN,
+            workspace_id=WORKSPACE,
+            timeout_seconds=10,
+            transport=transport,
+        )
+
+        self.assertEqual(1, len(transport.calls))
+        self.assertEqual("GET", transport.calls[0]["method"])
+        with self.assertRaisesRegex(SlackLiveFixtureError, "different workspace"):
+            verify_slack_workspace(
+                bot_token=TOKEN,
+                workspace_id=WORKSPACE,
+                timeout_seconds=10,
+                transport=_AuthTransport(workspace_id="T0000000000"),
+            )
+
     def test_exact_retry_requires_same_report_and_receipt(self) -> None:
         receipt = _receipt()
         publisher = _Publisher([receipt, receipt])

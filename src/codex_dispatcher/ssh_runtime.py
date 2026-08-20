@@ -119,13 +119,16 @@ def build_ssh_fixture_fault_sweep(
     store: StateStore,
     github_token: str,
     injection: FixtureFaultInjection,
+    slack_token: str | None = None,
 ) -> SshControlSweep:
     """Assemble the hard-coded live Fixture fault path after exact tool checks."""
     from codex_dispatcher.fixture_faults import (
         FIXTURE_REPOSITORY,
         FixtureFaultInjection,
+        FixtureFaultPoint,
         FixtureFaultRejected,
         validate_fixture_config,
+        validate_fixture_slack_config,
     )
 
     if not isinstance(config, Config):
@@ -136,6 +139,11 @@ def build_ssh_fixture_fault_sweep(
         raise TypeError("injection must be a FixtureFaultInjection")
     try:
         validate_fixture_config(config)
+        if injection.fault in {
+            FixtureFaultPoint.SLACK_ROOT_RECEIPT,
+            FixtureFaultPoint.SLACK_TERMINAL_RECEIPT,
+        }:
+            validate_fixture_slack_config(config)
     except FixtureFaultRejected as exc:
         raise SshRuntimeError(str(exc)) from exc
     if injection.repository != FIXTURE_REPOSITORY:
@@ -164,6 +172,7 @@ def build_ssh_fixture_fault_sweep(
         git_path=git_path,
         gh_path=gh_path,
         ssh_path=ssh_path,
+        slack_token=slack_token,
         fixture_fault_injection=injection,
     )
 
@@ -262,6 +271,11 @@ def _assemble_ssh_control_sweep(
             bot_token=slack_token,
             timeout_seconds=config.slack_runtime.request_timeout_seconds,
         )
+        if fixture_fault_injection is not None:
+            slack_publisher = fixture_fault_injection.wrap_slack_publisher(
+                slack_publisher,
+                store=store,
+            )
         slack_delivery = SlackDeliveryCoordinator(
             store=store,
             publisher=slack_publisher,

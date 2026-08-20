@@ -126,6 +126,36 @@ def run_slack_idempotency_fixture(
     )
 
 
+def verify_slack_workspace(
+    *,
+    bot_token: str,
+    workspace_id: str,
+    timeout_seconds: float,
+    transport: SlackHttpTransport | None = None,
+) -> None:
+    """Read only ``auth.test`` and require one exact installed bot workspace."""
+    workspace_id = _validate_workspace_id(workspace_id)
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not 0 < timeout_seconds <= 60
+    ):
+        raise ValueError("Slack fixture timeout_seconds must be between 0 and 60")
+    live_transport = transport or UrllibSlackHttpTransport()
+    # Constructing the publisher validates the token shape without sending.
+    SlackWebApiPublisher(
+        bot_token=bot_token,
+        timeout_seconds=timeout_seconds,
+        transport=live_transport,
+    )
+    _verify_workspace(
+        transport=live_transport,
+        bot_token=bot_token,
+        workspace_id=workspace_id,
+        timeout_seconds=float(timeout_seconds),
+    )
+
+
 def _verify_workspace(
     *,
     transport: SlackHttpTransport,

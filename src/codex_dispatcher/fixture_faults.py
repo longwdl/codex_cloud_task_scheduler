@@ -14,7 +14,7 @@ import time
 from typing import Protocol
 
 from codex_dispatcher.command_runner import RunningBinaryCommand
-from codex_dispatcher.config import Config
+from codex_dispatcher.config import SLACK_IDEMPOTENCY_CONTRACT_V1, Config
 from codex_dispatcher.git_publisher import (
     GitPublicationInterrupted,
     PublicationReceipt,
@@ -30,6 +30,13 @@ from codex_dispatcher.runner_transport import (
     parse_runner_turn_reply,
 )
 from codex_dispatcher.source_bundle import SourceBundle
+from codex_dispatcher.slack_reporting import (
+    SlackDeliveryReceipt,
+    SlackDeliveryState,
+    SlackPublisher,
+    SlackReport,
+    SlackReportKind,
+)
 from codex_dispatcher.ssh_preflight import SshPreflightPlan, SshPreflightStatus
 from codex_dispatcher.ssh_recovery import SshRecoveryAction
 from codex_dispatcher.ssh_runner_transport import SshInvocationPlan
@@ -57,6 +64,8 @@ from codex_dispatcher.work_items import (
 
 
 FIXTURE_REPOSITORY = "longwdl/codex-dispatcher-fixture"
+FIXTURE_SLACK_WORKSPACE_ID = "T0BQ60N9WH4"
+FIXTURE_SLACK_CHANNEL_ID = "C0BR2D0MS8Y"
 _SSH_STATUS_PROOF_ATTEMPTS = 5
 _SSH_STATUS_PROOF_DELAY_SECONDS = 0.25
 
@@ -77,6 +86,8 @@ class FixtureFaultPoint(StrEnum):
     START_RECEIPT = "start-receipt"
     SSH_TRANSPORT_PROCESS_KILL = "ssh-transport-process-kill"
     START_STATUS_RECOVERY = "start-status-recovery"
+    SLACK_ROOT_RECEIPT = "slack-root-receipt"
+    SLACK_TERMINAL_RECEIPT = "slack-terminal-receipt"
 
 
 class FixtureFaultRejected(RuntimeError):
@@ -113,6 +124,20 @@ def validate_fixture_config(config: Config) -> None:
         )
 
 
+def validate_fixture_slack_config(config: Config) -> None:
+    """Require the exact Slack channel whose idempotency contract was proven live."""
+    validate_fixture_config(config)
+    runtime = config.slack_runtime
+    if (
+        runtime is None
+        or runtime.channel_id != FIXTURE_SLACK_CHANNEL_ID
+        or runtime.idempotency_contract != SLACK_IDEMPOTENCY_CONTRACT_V1
+    ):
+        raise FixtureFaultRejected(
+            "Slack receipt fault config does not match the fixed Fixture contract"
+        )
+
+
 @dataclass(slots=True)
 class FixtureFaultInjection:
     """Wrap real ports and discard exactly one selected Fixture receipt."""
@@ -131,6 +156,7 @@ class FixtureFaultInjection:
     ssh_status_error_code: str | None = field(default=None, init=False)
     ssh_status_attempts: int = field(default=0, init=False)
     ssh_interrupt_rejection: str | None = field(default=None, init=False)
+    slack_receipt: SlackDeliveryReceipt | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.fault, FixtureFaultPoint):
@@ -164,6 +190,19 @@ class FixtureFaultInjection:
 
     def wrap_transport(self, transport: RunnerTransport) -> RunnerTransport:
         return _FixtureFaultTransport(self, transport)
+
+    def wrap_slack_publisher(
+        self,
+        publisher: SlackPublisher,
+        *,
+        store: StateStore,
+    ) -> SlackPublisher:
+        if self.fault not in {
+            FixtureFaultPoint.SLACK_ROOT_RECEIPT,
+            FixtureFaultPoint.SLACK_TERMINAL_RECEIPT,
+        }:
+            return publisher
+        return _FixtureFaultSlackPublisher(self, publisher, store=store)
 
     def wrap_source(self, source: _FixtureSource) -> _FixtureSource:
         if self.fault is not FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL:
@@ -461,6 +500,122 @@ class _FixtureFaultTransport:
         return output
 
 
+class _FixtureFaultSlackPublisher:
+    """Discard one proven Slack receipt only at an exact durable Fixture stage."""
+
+    def __init__(
+        self,
+        injection: FixtureFaultInjection,
+        delegate: SlackPublisher,
+        *,
+        store: StateStore,
+    ) -> None:
+        self._injection = injection
+        self._delegate = delegate
+        self._store = store
+
+    def publish(self, report: SlackReport) -> SlackDeliveryReceipt:
+        if not isinstance(report, SlackReport):
+            raise TypeError("report must be a SlackReport")
+        work_item = self._store.get_work_item(report.work_item_id)
+        delivery = self._store.get_slack_delivery(report.deduplication_key)
+        if (
+            work_item is None
+            or work_item.repository != self._injection.repository
+            or work_item.issue_number != self._injection.issue_number
+            or report.channel_id != FIXTURE_SLACK_CHANNEL_ID
+            or delivery is None
+            or delivery.state is not SlackDeliveryState.PREPARED
+            or delivery.work_item_id != work_item.work_item_id
+            or delivery.kind is not report.kind
+            or delivery.turn_id != report.turn_id
+            or delivery.thread_ts != report.thread_ts
+        ):
+            raise FixtureFaultRejected(
+                "Slack receipt fault escaped its exact prepared outbox identity"
+            )
+
+        if self._injection.fault is FixtureFaultPoint.SLACK_ROOT_RECEIPT:
+            self._require_unstarted_root(report, work_item)
+        elif report.kind is SlackReportKind.ROOT:
+            self._require_unstarted_root(report, work_item)
+            # The terminal fault begins from the root-receipt recovery state.  The
+            # root retry must be allowed to complete before the one terminal
+            # receipt is discarded later in the same sweep.
+            return self._delegate.publish(report)
+        else:
+            self._require_finished_result(report, work_item)
+
+        receipt = self._delegate.publish(report)
+        if (
+            not isinstance(receipt, SlackDeliveryReceipt)
+            or receipt.deduplication_key != report.deduplication_key
+            or receipt.channel_id != report.channel_id
+            or receipt.thread_ts != (report.thread_ts or receipt.message_ts)
+        ):
+            raise FixtureFaultRejected(
+                "Slack receipt fault did not receive one exact provider receipt"
+            )
+        self._injection.slack_receipt = receipt
+        self._injection.discard_receipt(self._injection.fault)
+        raise AssertionError("unreachable")
+
+    def _require_unstarted_root(
+        self,
+        report: SlackReport,
+        work_item: WorkItem,
+    ) -> None:
+        if (
+            report.kind is not SlackReportKind.ROOT
+            or report.turn_id is not None
+            or report.thread_ts is not None
+            or work_item.state is not WorkItemState.READY
+            or work_item.codex_session_id is not None
+            or work_item.last_published_sha is not None
+            or work_item.pr_number is not None
+            or work_item.slack_channel_id is not None
+            or work_item.slack_thread_ts is not None
+            or self._store.get_active_turn() is not None
+        ):
+            raise FixtureFaultRejected(
+                "Slack root receipt fault requires one exact unstarted WorkItem"
+            )
+
+    def _require_finished_result(
+        self,
+        report: SlackReport,
+        work_item: WorkItem,
+    ) -> None:
+        turn = (
+            None if report.turn_id is None else self._store.get_turn(report.turn_id)
+        )
+        root = self._store.get_slack_delivery(
+            f"slack:{work_item.work_item_id}:root"
+        )
+        if (
+            report.kind is not SlackReportKind.RESULT
+            or work_item.state is not WorkItemState.REVIEW
+            or work_item.codex_session_id is None
+            or work_item.last_published_sha is None
+            or work_item.pr_number is None
+            or work_item.slack_channel_id != FIXTURE_SLACK_CHANNEL_ID
+            or work_item.slack_thread_ts != report.thread_ts
+            or self._store.get_active_turn() is not None
+            or turn is None
+            or turn.work_item_id != work_item.work_item_id
+            or turn.state is not TurnState.FINISHED
+            or turn.result_status != "completed"
+            or turn.output_head_sha != work_item.last_published_sha
+            or root is None
+            or root.state is not SlackDeliveryState.DELIVERED
+            or root.kind is not SlackReportKind.ROOT
+            or root.message_ts != work_item.slack_thread_ts
+        ):
+            raise FixtureFaultRejected(
+                "Slack terminal receipt fault requires one exact finished Fixture Turn"
+            )
+
+
 class _FixturePinnedSource:
     def __init__(
         self,
@@ -530,6 +685,10 @@ class _FixtureFaultPublisher:
             raise FixtureFaultRejected(
                 "SSH transport process kill unexpectedly invoked the Publisher"
             )
+        if self._injection.fault is FixtureFaultPoint.SLACK_ROOT_RECEIPT:
+            raise FixtureFaultRejected(
+                "Slack root receipt fault unexpectedly invoked the Publisher"
+            )
         if self._injection.fault is FixtureFaultPoint.START_STATUS_RECOVERY and (
             self._injection.recovery_operations
             != [RunnerOperation.STATUS, RunnerOperation.EXPORT]
@@ -596,6 +755,7 @@ class _FixtureFaultTracker:
             FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL,
             FixtureFaultPoint.START_RECEIPT,
             FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL,
+            FixtureFaultPoint.SLACK_ROOT_RECEIPT,
         }:
             raise FixtureFaultRejected("this Fixture fault stage cannot claim an Issue")
         return self._delegate.claim(
@@ -625,6 +785,8 @@ class _FixtureFaultTracker:
                 TaskState.RUNNING,
                 TaskState.REVIEW,
             },
+            FixtureFaultPoint.SLACK_ROOT_RECEIPT: set(),
+            FixtureFaultPoint.SLACK_TERMINAL_RECEIPT: set(),
         }[self._injection.fault]
         if state not in allowed:
             raise FixtureFaultRejected("Fixture fault stage attempted an unexpected state write")
@@ -647,6 +809,9 @@ class _FixtureFaultTracker:
             self._delegate.upsert_run_comment(repository, task_id, marker, body)
             return
         if self._injection.fault is FixtureFaultPoint.START_STATUS_RECOVERY:
+            self._delegate.upsert_run_comment(repository, task_id, marker, body)
+            return
+        if self._injection.fault is FixtureFaultPoint.SLACK_TERMINAL_RECEIPT:
             self._delegate.upsert_run_comment(repository, task_id, marker, body)
             return
         if self._injection.fault is not FixtureFaultPoint.ISSUE_COMMENT_RECEIPT:
@@ -674,6 +839,8 @@ class _FixtureFaultTracker:
         ):
             return self._delegate.create_draft_pr(request)
         if self._injection.fault is FixtureFaultPoint.START_STATUS_RECOVERY:
+            return self._delegate.create_draft_pr(request)
+        if self._injection.fault is FixtureFaultPoint.SLACK_TERMINAL_RECEIPT:
             return self._delegate.create_draft_pr(request)
         if self._injection.fault is not FixtureFaultPoint.DRAFT_PR_RECEIPT:
             raise FixtureFaultRejected("Fixture reached an unexpected Draft PR write")
@@ -730,6 +897,7 @@ def validate_fixture_preflight(
     *,
     fault: FixtureFaultPoint,
     issue_number: int,
+    store: StateStore | None = None,
 ) -> None:
     """Require the exact state immediately preceding the requested lost receipt."""
     if not isinstance(plan, SshPreflightPlan):
@@ -754,6 +922,7 @@ def validate_fixture_preflight(
         FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL,
         FixtureFaultPoint.START_RECEIPT,
         FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL,
+        FixtureFaultPoint.SLACK_ROOT_RECEIPT,
     }:
         if (
             plan.status is not SshPreflightStatus.READY_CANDIDATE
@@ -762,6 +931,43 @@ def validate_fixture_preflight(
             or task.state is not TaskState.READY
         ):
             raise FixtureFaultRejected("initial fault requires one new ready Fixture candidate")
+        return
+
+    if fault is FixtureFaultPoint.SLACK_TERMINAL_RECEIPT:
+        if store is None:
+            raise FixtureFaultRejected(
+                "Slack terminal receipt fault requires read-only SQLite proof"
+            )
+        root = (
+            None
+            if work_item is None
+            else store.get_slack_delivery(f"slack:{work_item.work_item_id}:root")
+        )
+        if (
+            plan.status is not SshPreflightStatus.READY_RECOVERY
+            or plan.recovery_action is not SshRecoveryAction.START_CLAIMED_TURN
+            or work_item is None
+            or work_item.repository != FIXTURE_REPOSITORY
+            or work_item.issue_number != issue_number
+            or task.issue_node_id != work_item.issue_node_id
+            or task.state is not TaskState.DISPATCHING
+            or work_item.state is not WorkItemState.READY
+            or work_item.codex_session_id is not None
+            or work_item.last_published_sha is not None
+            or work_item.pr_number is not None
+            or work_item.slack_channel_id is not None
+            or work_item.slack_thread_ts is not None
+            or plan.turn is not None
+            or root is None
+            or root.kind is not SlackReportKind.ROOT
+            or root.state is not SlackDeliveryState.PREPARED
+            or root.channel_id != FIXTURE_SLACK_CHANNEL_ID
+            or root.turn_id is not None
+            or root.thread_ts is not None
+        ):
+            raise FixtureFaultRejected(
+                "Slack terminal receipt fault requires exact root-receipt recovery"
+            )
         return
 
     if fault is FixtureFaultPoint.START_STATUS_RECOVERY:

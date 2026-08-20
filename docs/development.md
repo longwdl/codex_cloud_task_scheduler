@@ -99,9 +99,12 @@ fresh argv/PID/PGID/SID validation and exact process-group termination. The orig
 run survived two idle sweeps. After explicit review and merge of PR `#15`, the normal completion
 path also projected Issue `#14` to `agent:completed` after the local tombstone and fixed comment;
 the task branch remained and a repeated sweep was idle. Slack root/result receipt loss and outbox
-recovery remain covered through an idempotent fake publisher. The real Slack publisher contract was
-separately proven by an exact-retry live fixture that returned one receipt and left one visible
-message. A later normal task lifecycle also delivered one root/result thread, preserved one
+recovery are covered through an idempotent fake publisher. A guarded live-only path now discards
+only a fully validated real root or result receipt at an exact durable SQLite stage, requires the
+fixed Fixture channel and both SSH/Slack write gates, and leaves recovery to the ordinary sweep; it
+must still be exercised live before this claim is promoted to provider evidence. The real Slack
+publisher contract was separately proven by an exact-retry live fixture that returned one receipt
+and left one visible message. A later normal task lifecycle also delivered one root/result thread, preserved one
 WorkItem/Turn/session/branch/Draft PR, passed the exact-SHA Fixture workflow, and returned idle on an
 immediate repeated sweep.
 The Runner must not receive GitHub write or production credentials.

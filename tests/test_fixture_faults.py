@@ -7,9 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from codex_dispatcher.config import SlackRuntimeConfig
 from codex_dispatcher.fixture_fault_cli import _create_backup, _run
 from codex_dispatcher.fixture_faults import (
     FIXTURE_REPOSITORY,
+    FIXTURE_SLACK_CHANNEL_ID,
     FixtureFaultInjection,
     FixtureFaultPoint,
     FixtureFaultRejected,
@@ -17,6 +19,7 @@ from codex_dispatcher.fixture_faults import (
     FixtureReceiptLost,
     _is_durable_ssh_start_proof,
     validate_fixture_preflight,
+    validate_fixture_slack_config,
 )
 from codex_dispatcher.git_publisher import (
     GitPublicationInterrupted,
@@ -36,6 +39,12 @@ from codex_dispatcher.ssh_runner_transport import SshInvocationPlan
 from codex_dispatcher.ssh_preflight import SshPreflightPlan, SshPreflightStatus
 from codex_dispatcher.ssh_recovery import SshRecoveryAction
 from codex_dispatcher.state_store import StateStore
+from codex_dispatcher.slack_reporting import (
+    SlackDeliveryReceipt,
+    SlackDeliveryState,
+    SlackReportKind,
+    build_slack_report,
+)
 from codex_dispatcher.testing.fakes import FakeTracker
 from codex_dispatcher.trackers.base import (
     DraftPullRequestRequest,
@@ -142,6 +151,158 @@ def _reconciling_turn(item: WorkItem) -> Turn:
 
 
 class FixtureFaultTests(unittest.TestCase):
+    def test_slack_receipt_faults_require_exact_durable_stages(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            with StateStore(Path(root) / "state.db") as store:
+                store.migrate()
+                item = WorkItem.new(
+                    repository=FIXTURE_REPOSITORY,
+                    issue_number=ISSUE,
+                    issue_node_id="I_fixture_fault_7",
+                    base_branch="main",
+                    base_sha=BASE_SHA,
+                    at="2026-08-19T00:00:00Z",
+                )
+                store.create_work_item(item)
+                store.update_work_item_state(
+                    item.work_item_id,
+                    WorkItemState.PREPARING,
+                )
+                ready = store.update_work_item_state(
+                    item.work_item_id,
+                    WorkItemState.READY,
+                )
+                root_report = build_slack_report(
+                    work_item_id=ready.work_item_id,
+                    kind=SlackReportKind.ROOT,
+                    channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                    text="Fixture root",
+                )
+                store.prepare_slack_delivery(root_report)
+                root_receipt = SlackDeliveryReceipt(
+                    deduplication_key=root_report.deduplication_key,
+                    channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                    message_ts="1700000000.000001",
+                    thread_ts="1700000000.000001",
+                    permalink=(
+                        "https://fixture.slack.com/archives/"
+                        f"{FIXTURE_SLACK_CHANNEL_ID}/p1700000000000001"
+                    ),
+                )
+                calls = []
+                delegate = SimpleNamespace(
+                    publish=lambda report: (calls.append(report), root_receipt)[1]
+                )
+                root_injection = FixtureFaultInjection(
+                    FixtureFaultPoint.SLACK_ROOT_RECEIPT,
+                    ISSUE,
+                )
+
+                with self.assertRaisesRegex(FixtureReceiptLost, "slack-root-receipt"):
+                    root_injection.wrap_slack_publisher(
+                        delegate,
+                        store=store,
+                    ).publish(root_report)
+
+                self.assertTrue(root_injection.triggered)
+                self.assertEqual(root_receipt, root_injection.slack_receipt)
+                self.assertEqual(
+                    SlackDeliveryState.PREPARED,
+                    store.get_slack_delivery(root_report.deduplication_key).state,
+                )
+                self.assertEqual([root_report], calls)
+
+                # A terminal fault is permitted to recover only that exact
+                # prepared root before it reaches the finished result report.
+                terminal_calls = []
+
+                def publish(report):
+                    terminal_calls.append(report)
+                    if report.kind is SlackReportKind.ROOT:
+                        return root_receipt
+                    return SlackDeliveryReceipt(
+                        deduplication_key=report.deduplication_key,
+                        channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                        message_ts="1700000000.000002",
+                        thread_ts=root_receipt.thread_ts,
+                        permalink=(
+                            "https://fixture.slack.com/archives/"
+                            f"{FIXTURE_SLACK_CHANNEL_ID}/p1700000000000002"
+                            "?thread_ts=1700000000.000001&"
+                            f"cid={FIXTURE_SLACK_CHANNEL_ID}"
+                        ),
+                    )
+
+                terminal_injection = FixtureFaultInjection(
+                    FixtureFaultPoint.SLACK_TERMINAL_RECEIPT,
+                    ISSUE,
+                )
+                terminal_publisher = terminal_injection.wrap_slack_publisher(
+                    SimpleNamespace(publish=publish),
+                    store=store,
+                )
+                self.assertEqual(root_receipt, terminal_publisher.publish(root_report))
+                self.assertFalse(terminal_injection.triggered)
+                store.complete_slack_delivery(
+                    root_report.deduplication_key,
+                    root_receipt,
+                )
+                running, turn = store.begin_turn(
+                    ready.work_item_id,
+                    issue_revision="revision-1",
+                    prompt_sha256="d" * 64,
+                    input_head_sha=BASE_SHA,
+                    turn_id="turn_" + "7" * 32,
+                )
+                store.bind_codex_session(
+                    running.work_item_id,
+                    "123e4567-e89b-12d3-a456-426614174000",
+                )
+                store.update_turn_state(turn.turn_id, TurnState.STARTING)
+                store.record_turn_result(
+                    turn.turn_id,
+                    output_sha256="e" * 64,
+                    output_head_sha=HEAD_SHA,
+                    result_status="completed",
+                    result_summary="Fixture completed",
+                )
+                review, finished = store.finalize_turn(
+                    turn.turn_id,
+                    turn_state=TurnState.FINISHED,
+                    work_item_state=WorkItemState.REVIEW,
+                )
+                store.record_published_sha(
+                    review.work_item_id,
+                    previous_sha=BASE_SHA,
+                    head_sha=HEAD_SHA,
+                )
+                review = store.bind_draft_pr(review.work_item_id, 17)
+                result_report = build_slack_report(
+                    work_item_id=review.work_item_id,
+                    turn_id=finished.turn_id,
+                    kind=SlackReportKind.RESULT,
+                    channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                    thread_ts=root_receipt.thread_ts,
+                    text="Fixture result",
+                )
+                store.prepare_slack_delivery(result_report)
+
+                with self.assertRaisesRegex(
+                    FixtureReceiptLost,
+                    "slack-terminal-receipt",
+                ):
+                    terminal_publisher.publish(result_report)
+
+                self.assertTrue(terminal_injection.triggered)
+                self.assertEqual(
+                    SlackDeliveryState.PREPARED,
+                    store.get_slack_delivery(result_report.deduplication_key).state,
+                )
+                self.assertEqual(
+                    [SlackReportKind.ROOT, SlackReportKind.RESULT],
+                    [report.kind for report in terminal_calls],
+                )
+
     def test_publisher_discards_only_a_successful_exact_fixture_receipt(self) -> None:
         item = _running_item()
         plan = _plan(item)
@@ -653,6 +814,11 @@ class FixtureFaultTests(unittest.TestCase):
             fault=FixtureFaultPoint.SSH_TRANSPORT_PROCESS_KILL,
             issue_number=ISSUE,
         )
+        validate_fixture_preflight(
+            ready,
+            fault=FixtureFaultPoint.SLACK_ROOT_RECEIPT,
+            issue_number=ISSUE,
+        )
 
         ambiguous_item = _running_item()
         ambiguous = SshPreflightPlan(
@@ -733,6 +899,85 @@ class FixtureFaultTests(unittest.TestCase):
                 issue_number=ISSUE,
             )
 
+    def test_slack_terminal_preflight_requires_one_prepared_unbound_root(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            with StateStore(Path(root) / "state.db") as store:
+                store.migrate()
+                item = WorkItem.new(
+                    repository=FIXTURE_REPOSITORY,
+                    issue_number=ISSUE,
+                    issue_node_id="I_fixture_fault_7",
+                    base_branch="main",
+                    base_sha=BASE_SHA,
+                    at="2026-08-19T00:00:00Z",
+                )
+                store.create_work_item(item)
+                store.update_work_item_state(
+                    item.work_item_id,
+                    WorkItemState.PREPARING,
+                )
+                ready = store.update_work_item_state(
+                    item.work_item_id,
+                    WorkItemState.READY,
+                )
+                report = build_slack_report(
+                    work_item_id=ready.work_item_id,
+                    kind=SlackReportKind.ROOT,
+                    channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                    text="Fixture root",
+                )
+                store.prepare_slack_delivery(report)
+                plan = SshPreflightPlan(
+                    SshPreflightStatus.READY_RECOVERY,
+                    SshRecoveryAction.START_CLAIMED_TURN,
+                    task=_task(TaskState.DISPATCHING),
+                    work_item=ready,
+                )
+
+                validate_fixture_preflight(
+                    plan,
+                    fault=FixtureFaultPoint.SLACK_TERMINAL_RECEIPT,
+                    issue_number=ISSUE,
+                    store=store,
+                )
+                with self.assertRaisesRegex(FixtureFaultRejected, "SQLite proof"):
+                    validate_fixture_preflight(
+                        plan,
+                        fault=FixtureFaultPoint.SLACK_TERMINAL_RECEIPT,
+                        issue_number=ISSUE,
+                    )
+
+        config = make_config(global_max_active=1, repository_max_active=1)
+        fixture_config = replace(
+            config,
+            repositories=(
+                replace(
+                    config.repositories[0],
+                    slug=FIXTURE_REPOSITORY,
+                    allowed_paths=("README.md",),
+                    denied_paths=(),
+                    maintainers=("longwdl",),
+                    required_checks=("fixture",),
+                ),
+            ),
+            slack_runtime=SlackRuntimeConfig(
+                channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                request_timeout_seconds=10,
+                idempotency_contract="client_msg_id-live-fixture-verified-v1",
+            ),
+        )
+        validate_fixture_slack_config(fixture_config)
+        with self.assertRaisesRegex(FixtureFaultRejected, "Slack receipt"):
+            validate_fixture_slack_config(
+                replace(
+                    fixture_config,
+                    slack_runtime=replace(
+                        fixture_config.slack_runtime,
+                        channel_id="C0000000000",
+                    ),
+                )
+            )
+
     def test_cli_guards_fail_before_loading_live_config(self) -> None:
         environments = (
             {},
@@ -759,6 +1004,349 @@ class FixtureFaultTests(unittest.TestCase):
                 self.assertEqual(1, code)
                 self.assertFalse(payload["ok"])
                 load.assert_not_called()
+
+    def test_cli_slack_fault_requires_separate_gate_and_bot_token(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            database = Path(root) / "state.db"
+            with StateStore(database) as store:
+                store.migrate()
+            base = make_config(global_max_active=1, repository_max_active=1)
+            config = replace(
+                base,
+                scheduler=replace(base.scheduler, database_path=database),
+                repositories=(
+                    replace(
+                        base.repositories[0],
+                        slug=FIXTURE_REPOSITORY,
+                        allowed_paths=("README.md",),
+                        denied_paths=(),
+                        maintainers=("longwdl",),
+                        required_checks=("fixture",),
+                    ),
+                ),
+                slack_runtime=SlackRuntimeConfig(
+                    channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                    request_timeout_seconds=10,
+                    idempotency_contract="client_msg_id-live-fixture-verified-v1",
+                ),
+            )
+            common = {
+                "CODEX_DISPATCHER_ENABLE_SSH_WRITES": "1",
+                "CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS": FIXTURE_REPOSITORY,
+                "GITHUB_TOKEN": "github_pat_fixture_test",
+            }
+            for environment, message in (
+                (common, "ENABLE_SLACK_WRITES"),
+                ({**common, "CODEX_DISPATCHER_ENABLE_SLACK_WRITES": "1"}, "bot token"),
+            ):
+                with (
+                    self.subTest(message=message),
+                    patch.dict("os.environ", environment, clear=True),
+                    patch(
+                        "codex_dispatcher.fixture_fault_cli.load_protected_ssh_config",
+                        return_value=config,
+                    ),
+                    patch(
+                        "codex_dispatcher.fixture_fault_cli.validate_runtime_state_path"
+                    ),
+                    patch(
+                        "codex_dispatcher.fixture_fault_cli.run_ssh_preflight"
+                    ) as preflight,
+                ):
+                    code, payload = _run(
+                        Path(root) / "config.toml",
+                        issue_number=ISSUE,
+                        fault=FixtureFaultPoint.SLACK_ROOT_RECEIPT,
+                    )
+
+                self.assertEqual(1, code)
+                self.assertIn(message, payload["error"])
+                preflight.assert_not_called()
+
+    def test_cli_reports_slack_root_receipt_loss_as_unstarted_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            database = Path(root) / "state.db"
+            with StateStore(database) as store:
+                store.migrate()
+            base = make_config(global_max_active=1, repository_max_active=1)
+            config = replace(
+                base,
+                scheduler=replace(base.scheduler, database_path=database),
+                repositories=(
+                    replace(
+                        base.repositories[0],
+                        slug=FIXTURE_REPOSITORY,
+                        allowed_paths=("README.md",),
+                        denied_paths=(),
+                        maintainers=("longwdl",),
+                        required_checks=("fixture",),
+                    ),
+                ),
+                slack_runtime=SlackRuntimeConfig(
+                    channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                    request_timeout_seconds=10,
+                    idempotency_contract="client_msg_id-live-fixture-verified-v1",
+                ),
+            )
+            preflight = SshPreflightPlan(
+                SshPreflightStatus.READY_CANDIDATE,
+                SshRecoveryAction.IDLE,
+                task=_task(TaskState.READY),
+            )
+
+            def build_fixture_sweep(**kwargs):
+                injection = kwargs["injection"]
+                store = kwargs["store"]
+
+                def run_once():
+                    item = WorkItem.new(
+                        repository=FIXTURE_REPOSITORY,
+                        issue_number=ISSUE,
+                        issue_node_id="I_fixture_fault_7",
+                        base_branch="main",
+                        base_sha=BASE_SHA,
+                        at="2026-08-19T00:00:00Z",
+                    )
+                    store.create_work_item(item)
+                    store.update_work_item_state(
+                        item.work_item_id,
+                        WorkItemState.PREPARING,
+                    )
+                    item = store.update_work_item_state(
+                        item.work_item_id,
+                        WorkItemState.READY,
+                    )
+                    report = build_slack_report(
+                        work_item_id=item.work_item_id,
+                        kind=SlackReportKind.ROOT,
+                        channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                        text="Fixture root",
+                    )
+                    store.prepare_slack_delivery(report)
+                    injection.slack_receipt = SlackDeliveryReceipt(
+                        report.deduplication_key,
+                        FIXTURE_SLACK_CHANNEL_ID,
+                        "1700000000.000001",
+                        "1700000000.000001",
+                        (
+                            "https://fixture.slack.com/archives/"
+                            f"{FIXTURE_SLACK_CHANNEL_ID}/p1700000000000001"
+                        ),
+                    )
+                    injection.triggered = True
+                    raise FixtureReceiptLost("fixture Slack root receipt lost")
+
+                return SimpleNamespace(run_once=run_once)
+
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "CODEX_DISPATCHER_ENABLE_SSH_WRITES": "1",
+                        "CODEX_DISPATCHER_ENABLE_SLACK_WRITES": "1",
+                        "CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS": FIXTURE_REPOSITORY,
+                        "GITHUB_TOKEN": "github_pat_fixture_test",
+                        "SLACK_BOT_TOKEN": "xoxb-1234567890-fixture",
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.load_protected_ssh_config",
+                    return_value=config,
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.validate_runtime_state_path"
+                ),
+                patch("codex_dispatcher.fixture_fault_cli.verify_slack_workspace"),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.run_ssh_preflight",
+                    return_value=SshPreflightInspection(preflight, (), True),
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.build_ssh_fixture_fault_sweep",
+                    side_effect=build_fixture_sweep,
+                ),
+            ):
+                code, payload = _run(
+                    Path(root) / "config.toml",
+                    issue_number=ISSUE,
+                    fault=FixtureFaultPoint.SLACK_ROOT_RECEIPT,
+                )
+
+        self.assertEqual(0, code)
+        self.assertTrue(payload["fault_triggered"])
+        self.assertEqual("receipt_lost", payload["status"])
+        self.assertEqual("prepared", payload["slack_outbox_state"])
+        self.assertTrue(payload["slack_receipt_discarded"])
+
+    def test_cli_reports_slack_terminal_receipt_loss_as_projection_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            database = Path(root) / "state.db"
+            with StateStore(database) as store:
+                store.migrate()
+                item = WorkItem.new(
+                    repository=FIXTURE_REPOSITORY,
+                    issue_number=ISSUE,
+                    issue_node_id="I_fixture_fault_7",
+                    base_branch="main",
+                    base_sha=BASE_SHA,
+                    at="2026-08-19T00:00:00Z",
+                )
+                store.create_work_item(item)
+                store.update_work_item_state(item.work_item_id, WorkItemState.PREPARING)
+                ready = store.update_work_item_state(
+                    item.work_item_id,
+                    WorkItemState.READY,
+                )
+                root_report = build_slack_report(
+                    work_item_id=ready.work_item_id,
+                    kind=SlackReportKind.ROOT,
+                    channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                    text="Fixture root",
+                )
+                store.prepare_slack_delivery(root_report)
+            base = make_config(global_max_active=1, repository_max_active=1)
+            config = replace(
+                base,
+                scheduler=replace(base.scheduler, database_path=database),
+                repositories=(
+                    replace(
+                        base.repositories[0],
+                        slug=FIXTURE_REPOSITORY,
+                        allowed_paths=("README.md",),
+                        denied_paths=(),
+                        maintainers=("longwdl",),
+                        required_checks=("fixture",),
+                    ),
+                ),
+                slack_runtime=SlackRuntimeConfig(
+                    channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                    request_timeout_seconds=10,
+                    idempotency_contract="client_msg_id-live-fixture-verified-v1",
+                ),
+            )
+            preflight = SshPreflightPlan(
+                SshPreflightStatus.READY_RECOVERY,
+                SshRecoveryAction.START_CLAIMED_TURN,
+                task=_task(TaskState.DISPATCHING),
+                work_item=ready,
+            )
+
+            def build_fixture_sweep(**kwargs):
+                injection = kwargs["injection"]
+                store = kwargs["store"]
+
+                def run_once():
+                    root_receipt = SlackDeliveryReceipt(
+                        root_report.deduplication_key,
+                        FIXTURE_SLACK_CHANNEL_ID,
+                        "1700000000.000001",
+                        "1700000000.000001",
+                        (
+                            "https://fixture.slack.com/archives/"
+                            f"{FIXTURE_SLACK_CHANNEL_ID}/p1700000000000001"
+                        ),
+                    )
+                    store.complete_slack_delivery(
+                        root_report.deduplication_key,
+                        root_receipt,
+                    )
+                    running, turn = store.begin_turn(
+                        ready.work_item_id,
+                        issue_revision="revision-1",
+                        prompt_sha256="d" * 64,
+                        input_head_sha=BASE_SHA,
+                        turn_id="turn_" + "8" * 32,
+                    )
+                    store.bind_codex_session(
+                        running.work_item_id,
+                        "123e4567-e89b-12d3-a456-426614174000",
+                    )
+                    store.update_turn_state(turn.turn_id, TurnState.STARTING)
+                    store.record_turn_result(
+                        turn.turn_id,
+                        output_sha256="e" * 64,
+                        output_head_sha=HEAD_SHA,
+                        result_status="completed",
+                        result_summary="Fixture completed",
+                    )
+                    review, finished = store.finalize_turn(
+                        turn.turn_id,
+                        turn_state=TurnState.FINISHED,
+                        work_item_state=WorkItemState.REVIEW,
+                    )
+                    store.record_published_sha(
+                        review.work_item_id,
+                        previous_sha=BASE_SHA,
+                        head_sha=HEAD_SHA,
+                    )
+                    review = store.bind_draft_pr(review.work_item_id, 17)
+                    report = build_slack_report(
+                        work_item_id=review.work_item_id,
+                        turn_id=finished.turn_id,
+                        kind=SlackReportKind.RESULT,
+                        channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                        thread_ts=root_receipt.thread_ts,
+                        text="Fixture result",
+                    )
+                    store.prepare_slack_delivery(report)
+                    injection.slack_receipt = SlackDeliveryReceipt(
+                        report.deduplication_key,
+                        FIXTURE_SLACK_CHANNEL_ID,
+                        "1700000000.000002",
+                        root_receipt.thread_ts,
+                        (
+                            "https://fixture.slack.com/archives/"
+                            f"{FIXTURE_SLACK_CHANNEL_ID}/p1700000000000002"
+                            "?thread_ts=1700000000.000001&"
+                            f"cid={FIXTURE_SLACK_CHANNEL_ID}"
+                        ),
+                    )
+                    injection.triggered = True
+                    raise FixtureReceiptLost("fixture Slack terminal receipt lost")
+
+                return SimpleNamespace(run_once=run_once)
+
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "CODEX_DISPATCHER_ENABLE_SSH_WRITES": "1",
+                        "CODEX_DISPATCHER_ENABLE_SLACK_WRITES": "1",
+                        "CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS": FIXTURE_REPOSITORY,
+                        "GITHUB_TOKEN": "github_pat_fixture_test",
+                        "SLACK_BOT_TOKEN": "xoxb-1234567890-fixture",
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.load_protected_ssh_config",
+                    return_value=config,
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.validate_runtime_state_path"
+                ),
+                patch("codex_dispatcher.fixture_fault_cli.verify_slack_workspace"),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.run_ssh_preflight",
+                    return_value=SshPreflightInspection(preflight, (), True),
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.build_ssh_fixture_fault_sweep",
+                    side_effect=build_fixture_sweep,
+                ),
+            ):
+                code, payload = _run(
+                    Path(root) / "config.toml",
+                    issue_number=ISSUE,
+                    fault=FixtureFaultPoint.SLACK_TERMINAL_RECEIPT,
+                )
+
+        self.assertEqual(0, code)
+        self.assertTrue(payload["fault_triggered"])
+        self.assertEqual("receipt_lost", payload["status"])
+        self.assertEqual("turn_" + "8" * 32, payload["turn_id"])
+        self.assertEqual("prepared", payload["slack_outbox_state"])
 
     def test_cli_reports_an_expected_publisher_receipt_loss_as_recoverable(self) -> None:
         with tempfile.TemporaryDirectory() as root:

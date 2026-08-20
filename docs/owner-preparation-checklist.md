@@ -355,6 +355,43 @@ created exactly one Slack root and one result reply, persisted both receipts, pr
 permalink to the one fixed Issue comment, created one Draft PR, and passed the exact-SHA `fixture`
 workflow. A read-only preflight and an immediate repeated write-enabled sweep were both idle.
 
+### 6.1 Integrated Slack receipt-loss fixture
+
+The provider-level exact-retry proof above is separate from Dispatcher recovery. To exercise the
+real outbox without adding Slack read scopes, use one new reviewed Fixture Issue whose bounded task
+will complete in one Turn. In addition to the normal fault gates, both stages require the configured
+Slack write gate and a bot token in `SLACK_BOT_TOKEN`:
+
+```bash
+CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_SLACK_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS=longwdl/codex-dispatcher-fixture \
+PYTHONPATH=src python3 -m codex_dispatcher.fixture_fault_cli \
+  --config /absolute/path/dispatcher.toml --issue ISSUE_NUMBER \
+  --fault slack-root-receipt --apply --json
+
+CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_SLACK_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS=longwdl/codex-dispatcher-fixture \
+PYTHONPATH=src python3 -m codex_dispatcher.fixture_fault_cli \
+  --config /absolute/path/dispatcher.toml --issue ISSUE_NUMBER \
+  --fault slack-terminal-receipt --apply --json
+```
+
+The first command may discard a receipt only after the exact root message and permalink have been
+returned. It must leave one unstarted `READY` WorkItem, no Turn/session, and one `PREPARED` root
+outbox record. Read-only preflight must then report `start_claimed_turn`. The second command first
+recovers that same root, then may discard only the successful result-reply receipt after the same
+WorkItem has one finished Turn, published SHA, and bound Draft PR. It must leave the Issue remotely
+dispatching, the WorkItem locally in review, and only the result outbox record prepared. Read-only
+preflight must then report `sync_tracker_state`.
+
+Run the ordinary `ssh-run-once` once to recover the exact result delivery and final Issue label.
+Compare the discarded and durable root/result timestamps and permalinks, then independently verify
+one WorkItem, Turn, session, branch, Draft PR, Actions run, Slack root, and Slack reply. A repeated
+preflight and sweep must be idle. Stop on any other state; do not add history/search scopes, replay
+the Prompt, create a second Issue, or edit SQLite.
+
 The GitHub Issue will store a direct Slack thread link. Human task input remains in GitHub only.
 
 ## Keep out of scope

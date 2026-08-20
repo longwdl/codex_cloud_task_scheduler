@@ -228,6 +228,48 @@ class SshRuntimeTests(unittest.TestCase):
         guarded_transport = ssh_sweep._dispatch._orchestrator._transport
         self.assertIsNotNone(guarded_transport._delegate._process_started_hook)
 
+        slack_config = replace(
+            fixture_config,
+            slack_runtime=SlackRuntimeConfig(
+                channel_id="C0BR2D0MS8Y",
+                request_timeout_seconds=10,
+                idempotency_contract="client_msg_id-live-fixture-verified-v1",
+            ),
+        )
+        slack_injection = FixtureFaultInjection(
+            FixtureFaultPoint.SLACK_ROOT_RECEIPT,
+            7,
+        )
+        with (
+            patch(
+                "codex_dispatcher.ssh_runtime.run_control_host_contract_checks",
+                return_value=(ContractCheck("tools", True, "fixture"),),
+            ),
+            self.assertRaisesRegex(SshRuntimeError, "Slack runtime"),
+        ):
+            build_ssh_fixture_fault_sweep(
+                config=slack_config,
+                store=self.store,
+                github_token=TOKEN,
+                injection=slack_injection,
+            )
+        with patch(
+            "codex_dispatcher.ssh_runtime.run_control_host_contract_checks",
+            return_value=(ContractCheck("tools", True, "fixture"),),
+        ):
+            slack_sweep = build_ssh_fixture_fault_sweep(
+                config=slack_config,
+                store=self.store,
+                github_token=TOKEN,
+                slack_token="xoxb-1234567890-fixture",
+                injection=slack_injection,
+            )
+        assert slack_sweep._slack_delivery is not None
+        self.assertIsInstance(
+            slack_sweep._slack_delivery._publisher._delegate,
+            SlackWebApiPublisher,
+        )
+
     def test_live_config_and_sqlite_paths_must_be_owned_and_protected(self) -> None:
         config_path = self.root / "dispatcher.toml"
         configured = VALID.replace(

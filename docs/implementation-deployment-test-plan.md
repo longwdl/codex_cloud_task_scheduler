@@ -678,6 +678,10 @@ redirect/markup/mention/unfurl/broadcast、限制响应大小和超时，token �
 `C0BR2D0MS8Y` 完成该证明：两次精确请求返回同一 receipt，维护者确认只存在一条可见消息。
 随后正常 Fixture Issue `#16` 完成一个 WorkItem/Turn/session、一个 Slack root/result thread、一个
 Draft PR 和精确 SHA Actions success；重复 preflight/sweep 均为 idle，补齐正常路径端到端验收。
+另外已有仅限固定 Fixture channel 的真实回执丢失入口：root fault 仅可从新 candidate 丢弃已验证
+receipt 并留下未启动 WorkItem，terminal fault 仅可从该 root recovery 状态继续同一 WorkItem，在
+一个完成 Turn/发布 SHA/绑定 PR 后丢弃 result receipt。两个阶段都要求 SQLite online backup、
+SSH/Slack 双写开关和普通 sweep 恢复；在实际 provider 注入完成前，不把该机制本身计作 live 证据。
 
 ### Phase F：Docker 加固
 
