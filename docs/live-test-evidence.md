@@ -31,6 +31,39 @@ without installation. The backup service scored `2.1 OK` in the offline security
 was not enabled; no real Control Host database or backup path was opened, no credential environment
 was loaded, and no existing backup was deleted.
 
+## Linux Control Host staged production initialization — 2026-08-20
+
+The dedicated `s2` Control Host was initialized to the reviewed production filesystem and ownership
+boundary at checkpoint `2a1be9dd127e08acc4b6460e7a781d5c47ba584c`. A root-owned CPython 3.14.7
+was built from the official source checksum below `/opt/codex-python`, without replacing Ubuntu's
+system Python. The immutable Dispatcher release, atomic `current` symlink, no-login
+`codex-dispatcher` account, protected `/etc/codex-dispatcher` configuration and environment,
+mode-`0600` Runner identity and known-host pin, mode-`0700` mutable roots, migrated SQLite state,
+and four root-owned system units were installed. Credential values, private-key contents, Prompts,
+and full Runner output were not printed or recorded.
+
+The target host passed all 336 offline tests under the service account with the production Python,
+minimal environment, `umask 077`, and service-owned temporary directory. Target `compileall`,
+configuration loading, SQLite `integrity_check`, and `systemd-analyze verify` also passed. The loaded
+Dispatcher and backup services scored `2.8 OK` and `2.1 OK`, respectively. One manually started,
+credential-free, network-isolated backup oneshot created a service-owned mode-`0600` 147,456-byte
+snapshot; its integrity was `ok` and its WorkItem/Turn counts matched the source database.
+
+A transient service-account `ssh-preflight` loaded the same protected GitHub credential through
+systemd, verified the exact Git, `gh`, and OpenSSH pins, and returned `idle`,
+`external_writes=false`, and `authorizes_apply=false`. The configured state database SHA-256 was
+unchanged before and after preflight. The command did not connect to the Runner or perform a GitHub,
+Slack, branch, PR, merge, deployment, release, or tag write.
+
+Activation then failed closed at the documented host-capacity gate. The host exposed 1 vCPU,
+980,152 KiB RAM, no swap, and a 20,747,476,992-byte root filesystem with 12,606,046,208 bytes
+available, below the production minimum of 2 vCPU, 4 GiB RAM, and 50 GiB SSD. Consequently the
+write-enabled Dispatcher service was never started and both timers remain disabled and inactive.
+The root-owned installation, verified state database, and first good backup remain staged for a
+future capacity upgrade. Exact local and remote deployment staging directories, build scripts, and
+build logs were deleted after verification; no installed release, configuration, state, or backup
+was removed.
+
 ## Runner CODEX_HOME isolation migration — 2026-08-20
 
 The dedicated `s3` Fixture Runner moved its shared Codex-managed state from
