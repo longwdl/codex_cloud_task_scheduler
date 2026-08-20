@@ -123,11 +123,17 @@ delivered records. The private Fixture remained on default branch `main`, with s
 its five most recent accessible Actions runs were all completed successfully. Runner ownership had
 no exceptions, its lock remained acquirable, and no exact Codex process remained. The Dispatcher
 timer was re-enabled, the exact temporary release staging directory was removed, and rollback copies
-of both Runner and Control Host configurations plus the old wrapper and releases were retained.
+of both Runner and Control Host configurations plus the old wrapper and releases were retained. The
+temporary `ecs-user` NOPASSWD bootstrap rule was moved out of the sudo include directory into a
+root-only mode-`0600` rollback file; a new ordinary session proved passwordless sudo was no longer
+available.
 
 This completes the account, immutable-input, and SSH authorization boundary only. Docker is still
-absent on `s3`; per-WorkItem auth/session storage, effective egress denial, and a hard aggregate disk
-limit remain mandatory gates before container activation or admission of higher-value repositories.
+absent on `s3`, as are the rootless helper binaries and user manager. Cgroup v2 and subordinate ID
+ranges are available, but host output/forward policy is permissive, private and cloud-service routes
+exist, and WorkItems remain on ext4 without project quota. Per-WorkItem auth/session storage, an
+allowlisted egress path with internal/metadata denial, and a hard aggregate disk limit remain
+mandatory gates before container activation or admission of higher-value repositories.
 
 ## Runner CODEX_HOME isolation migration — 2026-08-20
 
