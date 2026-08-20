@@ -15,8 +15,9 @@ writes. Perform those steps only after a separately approved deployment command 
 
 ## Required host boundary
 
-- systemd 249 or newer, Python 3.12 or newer, and the exact Git, `gh`, and OpenSSH versions pinned
-  in `config.toml`;
+- systemd 249 or newer, a root-owned Python 3.12 or newer at
+  `/opt/codex-python/current/bin/python3`, and the exact Git, `gh`, and OpenSSH versions pinned in
+  `config.toml`; do not replace the distribution's `/usr/bin/python3`;
 - a system account and group both named `codex-dispatcher`, with no login shell;
 - root-owned, non-group/world-writable releases below `/opt/codex-dispatcher/releases` and an atomic
   `/opt/codex-dispatcher/current` symlink;

@@ -110,7 +110,10 @@ class ControlHostSystemdTests(unittest.TestCase):
         self.assertTrue(wrapper.startswith("#!/bin/sh\n"))
         self.assertNotEqual(0, WRAPPER_PATH.stat().st_mode & 0o111)
         self.assertIn('if [ "$#" -ne 0 ]; then', wrapper)
-        self.assertIn("exec /usr/bin/python3 -P -s -m codex_dispatcher", wrapper)
+        self.assertIn(
+            "exec /opt/codex-python/current/bin/python3 -P -s -m codex_dispatcher",
+            wrapper,
+        )
         self.assertIn("ssh-run-once", wrapper)
         self.assertIn("--apply", wrapper)
         self.assertIn("--config /etc/codex-dispatcher/config.toml", wrapper)
@@ -145,6 +148,10 @@ class ControlHostSystemdTests(unittest.TestCase):
         wrapper = BACKUP_WRAPPER_PATH.read_text(encoding="utf-8")
         self.assertNotEqual(0, BACKUP_WRAPPER_PATH.stat().st_mode & 0o111)
         self.assertIn('if [ "$#" -ne 0 ]; then', wrapper)
+        self.assertIn(
+            "exec /opt/codex-python/current/bin/python3 -P -s -m codex_dispatcher",
+            wrapper,
+        )
         self.assertIn("state-backup", wrapper)
         self.assertNotIn("ssh-run-once", wrapper)
         self.assertNotIn("--apply", wrapper)
