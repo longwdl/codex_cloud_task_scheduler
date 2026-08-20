@@ -320,6 +320,44 @@ exact Issue, WorkItem, and PR number. Then run one ordinary double-opt-in `ssh-r
 Any closed-but-unmerged PR, head mismatch, cross-repository PR, or premature completed/ready label is
 `blocked`. A lost completion comment or label receipt may retry only the same Issue projection.
 
+### 5.7 Controlled completion receipt-loss fixture
+
+Use the same reviewed Fixture Issue only after its one bound Draft PR has passed the exact-SHA
+required check and the maintainer has explicitly marked it ready and merged it. The dispatcher must
+not perform the merge. With the current Slack-enabled Fixture configuration, keep both normal write
+gates enabled and supply the bot token only through `SLACK_BOT_TOKEN`:
+
+```bash
+CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_SLACK_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS=longwdl/codex-dispatcher-fixture \
+PYTHONPATH=src python3 -m codex_dispatcher.fixture_fault_cli \
+  --config /absolute/path/dispatcher.toml --issue ISSUE_NUMBER \
+  --fault completion-comment-receipt --apply --json
+
+CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_SLACK_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS=longwdl/codex-dispatcher-fixture \
+PYTHONPATH=src python3 -m codex_dispatcher.fixture_fault_cli \
+  --config /absolute/path/dispatcher.toml --issue ISSUE_NUMBER \
+  --fault completion-label-receipt --apply --json
+```
+
+Before the first command, read-only preflight must select `complete_merged_work_item` for the exact
+Issue, WorkItem, branch, PR, and persisted head SHA. The first command must commit the irreversible
+local `completed` tombstone, write the exact fixed `agent:completed` comment, discard only that
+successful response, and leave the remote label at `agent:review`. Preflight must then select
+`sync_tracker_state`. The second command must idempotently update the same comment, apply and read
+back the exact `agent:completed` label, and discard only that verified response. It must not invoke
+Source, Runner, Git Publisher, Slack Publisher, create another Turn/PR, or replay a Prompt.
+
+Each invocation must create a verified mode-`0600` SQLite online backup and report the exact
+completion guard flags. After the label response is discarded, both read-only preflight and a normal
+write-enabled sweep must already be idle because the remote completed state was read back before the
+fault. Independently verify one WorkItem, finished Turn, session, branch, merged PR, fixed comment,
+completed label, successful exact-SHA Actions run, and unchanged Runner record; then repeat the
+ordinary sweep. Stop on any identity or state mismatch.
+
 ### 6. Slack outbound app
 
 The existing official Codex Slack binding is not the Dispatcher integration. A custom outbound-only

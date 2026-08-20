@@ -259,7 +259,7 @@ def _assemble_ssh_control_sweep(
         github_token=github_token,
     )
     if fixture_fault_injection is not None:
-        tracker = fixture_fault_injection.wrap_tracker(tracker)
+        tracker = fixture_fault_injection.wrap_tracker(tracker, store=store)
         publisher = fixture_fault_injection.wrap_publisher(publisher)
     slack_delivery = None
     if config.slack_runtime is not None:

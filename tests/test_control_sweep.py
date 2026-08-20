@@ -181,10 +181,12 @@ class _InterruptingDeliveryTracker(FakeTracker):
         *,
         interrupt_create_once: bool = False,
         interrupt_comment_once: bool = False,
+        interrupt_state_once: bool = False,
     ) -> None:
         super().__init__()
         self.interrupt_create_once = interrupt_create_once
         self.interrupt_comment_once = interrupt_comment_once
+        self.interrupt_state_once = interrupt_state_once
 
     def create_draft_pr(self, request):
         pull_request = super().create_draft_pr(request)
@@ -204,6 +206,13 @@ class _InterruptingDeliveryTracker(FakeTracker):
         if self.interrupt_comment_once:
             self.interrupt_comment_once = False
             raise RuntimeError("fixture lost Issue comment receipt")
+
+    def set_state(self, repository: str, task_id: str, state: TaskState):
+        updated = super().set_state(repository, task_id, state)
+        if self.interrupt_state_once:
+            self.interrupt_state_once = False
+            raise RuntimeError("fixture lost Issue label receipt")
+        return updated
 
 
 class _RecordingPublisher:
@@ -690,6 +699,85 @@ class SshControlSweepTests(unittest.TestCase):
         self.assertEqual(
             0,
             sum(call.method == "create_draft_pr" for call in tracker.calls),
+        )
+
+    def test_lost_completion_label_receipt_is_confirmed_without_other_work(self) -> None:
+        tracker = _InterruptingDeliveryTracker(interrupt_state_once=True)
+        task = replace(
+            claimed_task(),
+            state=TaskState.REVIEW,
+            labels=("agent:review", "exec:ssh-cli", "priority:p1"),
+        )
+        tracker.tasks[task.task_id] = task
+        source = _RecordingSource()
+        item = self.dispatch.resolve_and_prepare(
+            claimed_task(),
+            base_sha=BASE_SHA,
+            source_bundle=_bundle(),
+        )
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.RUNNING)
+        head_sha = "d" * 40
+        self.store.record_published_sha(
+            item.work_item_id,
+            previous_sha=BASE_SHA,
+            head_sha=head_sha,
+        )
+        item = self.store.update_work_item_state(
+            item.work_item_id,
+            WorkItemState.REVIEW,
+        )
+        item = self.store.bind_draft_pr(item.work_item_id, 7)
+        tracker.pull_requests[(item.repository, item.task_branch)] = PullRequest(
+            number=7,
+            url="https://github.com/owner/repo/pull/7",
+            branch_name=item.task_branch,
+            title="Codex work",
+            is_draft=False,
+            base_branch=item.base_branch,
+            state=PullRequestState.MERGED,
+            head_sha=head_sha,
+        )
+        self.transport.calls.clear()
+        delivery = GitHubDeliveryCoordinator(store=self.store, tracker=tracker)
+        sweep = self._sweep(tracker, source, delivery=delivery)
+
+        with self.assertRaisesRegex(RuntimeError, "lost Issue label receipt"):
+            sweep.run_once()
+
+        completed = self.store.get_work_item(item.work_item_id)
+        assert completed is not None
+        self.assertEqual(WorkItemState.COMPLETED, completed.state)
+        self.assertEqual(TaskState.COMPLETED, tracker.tasks[task.task_id].state)
+        writes_before = tuple(
+            call
+            for call in tracker.calls
+            if call.method in {"upsert_run_comment", "set_state"}
+        )
+
+        idle = sweep.run_once()
+
+        self.assertEqual(ControlSweepStatus.IDLE, idle.status)
+        self.assertEqual(
+            writes_before,
+            tuple(
+                call
+                for call in tracker.calls
+                if call.method in {"upsert_run_comment", "set_state"}
+            ),
+        )
+        self.assertEqual([], source.calls)
+        self.assertEqual([], self.transport.calls)
+        self.assertEqual(
+            1,
+            sum(call.method == "upsert_run_comment" for call in tracker.calls),
+        )
+        self.assertEqual(
+            1,
+            sum(
+                call.method == "set_state"
+                and call.args[-1] is TaskState.COMPLETED
+                for call in tracker.calls
+            ),
         )
 
     def test_interrupted_prepare_retries_exact_persisted_source(self) -> None:

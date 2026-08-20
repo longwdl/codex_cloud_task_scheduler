@@ -376,6 +376,35 @@ def _run(
             status = interruption
             work_item_id = observed_work_item.work_item_id
             turn_id = terminal_turn.turn_id
+        elif fault in {
+            FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
+            FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
+        }:
+            terminal_turn = observed_turns[-1] if len(observed_turns) == 1 else None
+            label_expected = fault is FixtureFaultPoint.COMPLETION_LABEL_RECEIPT
+            if (
+                result is not None
+                or interruption != "receipt_lost"
+                or observed_work_item is None
+                or observed_work_item.state.value != "completed"
+                or observed_work_item.last_published_sha is None
+                or observed_work_item.pr_number is None
+                or observed_turn is not None
+                or terminal_turn is None
+                or terminal_turn.state.value != "finished"
+                or terminal_turn.result_status != "completed"
+                or terminal_turn.output_head_sha
+                != observed_work_item.last_published_sha
+                or not injection.completion_identity_validated
+                or not injection.completion_comment_projected
+                or injection.completion_label_projected is not label_expected
+            ):
+                raise FixtureFaultRejected(
+                    "completion receipt fault did not preserve exact projection recovery"
+                )
+            status = interruption
+            work_item_id = observed_work_item.work_item_id
+            turn_id = terminal_turn.turn_id
         else:
             if result is not None or interruption != "receipt_lost":
                 raise FixtureFaultRejected("Fixture receipt loss unexpectedly returned a sweep result")
@@ -425,6 +454,20 @@ def _run(
                     "slack_thread_ts": slack_receipt.thread_ts,
                     "slack_permalink": slack_receipt.permalink,
                     "slack_outbox_state": "prepared",
+                }
+            )
+        if fault in {
+            FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
+            FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
+        }:
+            payload.update(
+                {
+                    "completion_identity_validated": True,
+                    "completion_comment_projected": True,
+                    "completion_label_projected": (
+                        fault is FixtureFaultPoint.COMPLETION_LABEL_RECEIPT
+                    ),
+                    "work_item_state": "completed",
                 }
             )
         return 0, payload

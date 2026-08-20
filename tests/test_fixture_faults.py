@@ -108,6 +108,21 @@ def _plan(item: WorkItem) -> PublicationPlan:
     )
 
 
+def _completion_comment(item: WorkItem) -> str:
+    assert item.last_published_sha is not None
+    assert item.pr_number is not None
+    return "\n".join(
+        (
+            f"Codex work item `{item.work_item_id}`",
+            "",
+            f"- Task branch: `{item.task_branch}`",
+            "- Dispatcher state: `agent:completed`",
+            f"- Published checkpoint: `{item.last_published_sha}`",
+            f"- Pull request: https://github.com/{item.repository}/pull/{item.pr_number}",
+        )
+    )
+
+
 def _checkpoint_turn(item: WorkItem) -> Turn:
     turn = Turn.new(
         work_item_id=item.work_item_id,
@@ -382,6 +397,154 @@ class FixtureFaultTests(unittest.TestCase):
 
         self.assertTrue(comment_injection.triggered)
         self.assertEqual("upsert_run_comment", comment_delegate.calls[-1].method)
+
+    def test_completion_receipts_require_merged_identity_and_ordered_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            with StateStore(Path(root) / "state.db") as store:
+                store.migrate()
+                item = WorkItem.new(
+                    repository=FIXTURE_REPOSITORY,
+                    issue_number=ISSUE,
+                    issue_node_id="I_fixture_fault_7",
+                    base_branch="main",
+                    base_sha=BASE_SHA,
+                    at="2026-08-19T00:00:00Z",
+                )
+                store.create_work_item(item)
+                for state in (
+                    WorkItemState.PREPARING,
+                    WorkItemState.READY,
+                    WorkItemState.RUNNING,
+                ):
+                    store.update_work_item_state(item.work_item_id, state)
+                store.record_published_sha(
+                    item.work_item_id,
+                    previous_sha=BASE_SHA,
+                    head_sha=HEAD_SHA,
+                )
+                review = store.update_work_item_state(
+                    item.work_item_id,
+                    WorkItemState.REVIEW,
+                )
+                review = store.bind_draft_pr(review.work_item_id, 19)
+                pull_request = PullRequest(
+                    19,
+                    f"https://github.com/{FIXTURE_REPOSITORY}/pull/19",
+                    review.task_branch,
+                    "Fixture completion",
+                    False,
+                    "main",
+                    PullRequestState.MERGED,
+                    False,
+                    HEAD_SHA,
+                )
+                delegate = FakeTracker()
+                delegate.tasks[str(ISSUE)] = _task(TaskState.REVIEW)
+                delegate.pull_requests[(FIXTURE_REPOSITORY, review.task_branch)] = (
+                    pull_request
+                )
+                comment_injection = FixtureFaultInjection(
+                    FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
+                    ISSUE,
+                )
+                comment_tracker = comment_injection.wrap_tracker(
+                    delegate,
+                    store=store,
+                )
+
+                self.assertEqual(
+                    pull_request,
+                    comment_tracker.find_pr_by_branch(
+                        FIXTURE_REPOSITORY,
+                        review.task_branch,
+                    ),
+                )
+                comment_injection.before_completion_candidate(
+                    delegate.tasks[str(ISSUE)],
+                    review,
+                    pull_request,
+                )
+                store.update_work_item_state(
+                    review.work_item_id,
+                    WorkItemState.COMPLETED,
+                )
+                completed = store.get_work_item(review.work_item_id)
+                assert completed is not None
+                calls_before_rejection = tuple(delegate.calls)
+                with self.assertRaisesRegex(
+                    FixtureFaultRejected,
+                    "exact projection identity",
+                ):
+                    comment_tracker.upsert_run_comment(
+                        FIXTURE_REPOSITORY,
+                        str(ISSUE),
+                        f"work-item:{review.work_item_id}:status",
+                        "Dispatcher state: agent:completed",
+                    )
+                self.assertEqual(calls_before_rejection, tuple(delegate.calls))
+                with self.assertRaisesRegex(
+                    FixtureReceiptLost,
+                    "completion-comment-receipt",
+                ):
+                    comment_tracker.upsert_run_comment(
+                        FIXTURE_REPOSITORY,
+                        str(ISSUE),
+                        f"work-item:{review.work_item_id}:status",
+                        _completion_comment(completed),
+                    )
+
+                self.assertTrue(comment_injection.completion_identity_validated)
+                self.assertTrue(comment_injection.completion_comment_projected)
+                self.assertFalse(comment_injection.completion_label_projected)
+                self.assertEqual(TaskState.REVIEW, delegate.tasks[str(ISSUE)].state)
+
+                label_injection = FixtureFaultInjection(
+                    FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
+                    ISSUE,
+                )
+                label_tracker = label_injection.wrap_tracker(delegate, store=store)
+                label_tracker.find_pr_by_branch(
+                    FIXTURE_REPOSITORY,
+                    review.task_branch,
+                )
+                label_tracker.upsert_run_comment(
+                    FIXTURE_REPOSITORY,
+                    str(ISSUE),
+                    f"work-item:{review.work_item_id}:status",
+                    _completion_comment(completed),
+                )
+                with self.assertRaisesRegex(
+                    FixtureReceiptLost,
+                    "completion-label-receipt",
+                ):
+                    label_tracker.set_state(
+                        FIXTURE_REPOSITORY,
+                        str(ISSUE),
+                        TaskState.COMPLETED,
+                    )
+
+                self.assertTrue(label_injection.completion_identity_validated)
+                self.assertTrue(label_injection.completion_comment_projected)
+                self.assertTrue(label_injection.completion_label_projected)
+                self.assertEqual(
+                    TaskState.COMPLETED,
+                    delegate.tasks[str(ISSUE)].state,
+                )
+                with self.assertRaisesRegex(
+                    FixtureFaultRejected,
+                    "unexpectedly invoked Slack",
+                ):
+                    label_injection.wrap_slack_publisher(
+                        SimpleNamespace(publish=lambda report: None),
+                        store=store,
+                    ).publish(
+                        build_slack_report(
+                            work_item_id=review.work_item_id,
+                            kind=SlackReportKind.ROOT,
+                            channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                            text="must not publish",
+                        )
+                    )
 
     def test_tracker_rejects_wrong_issue_and_stage_before_delegate_write(self) -> None:
         delegate = FakeTracker()
@@ -899,6 +1062,53 @@ class FixtureFaultTests(unittest.TestCase):
                 issue_number=ISSUE,
             )
 
+        completion_review = replace(review, pr_number=19)
+        merged = PullRequest(
+            19,
+            f"https://github.com/{FIXTURE_REPOSITORY}/pull/19",
+            completion_review.task_branch,
+            "Fixture completion",
+            False,
+            "main",
+            PullRequestState.MERGED,
+            False,
+            HEAD_SHA,
+        )
+        completion_comment = SshPreflightPlan(
+            SshPreflightStatus.READY_RECOVERY,
+            SshRecoveryAction.COMPLETE_MERGED_WORK_ITEM,
+            task=_task(TaskState.REVIEW),
+            work_item=completion_review,
+            pull_request=merged,
+        )
+        validate_fixture_preflight(
+            completion_comment,
+            fault=FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
+            issue_number=ISSUE,
+        )
+        completion_label = replace(
+            completion_comment,
+            recovery_action=SshRecoveryAction.SYNC_TRACKER_STATE,
+            work_item=completion_review.transition_to(
+                WorkItemState.COMPLETED,
+                at="2026-08-19T00:00:01Z",
+            ),
+        )
+        validate_fixture_preflight(
+            completion_label,
+            fault=FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
+            issue_number=ISSUE,
+        )
+        with self.assertRaisesRegex(FixtureFaultRejected, "merged Fixture PR"):
+            validate_fixture_preflight(
+                replace(
+                    completion_comment,
+                    pull_request=replace(merged, is_draft=True),
+                ),
+                fault=FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
+                issue_number=ISSUE,
+            )
+
     def test_slack_terminal_preflight_requires_one_prepared_unbound_root(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             with StateStore(Path(root) / "state.db") as store:
@@ -1347,6 +1557,192 @@ class FixtureFaultTests(unittest.TestCase):
         self.assertEqual("receipt_lost", payload["status"])
         self.assertEqual("turn_" + "8" * 32, payload["turn_id"])
         self.assertEqual("prepared", payload["slack_outbox_state"])
+
+    def test_cli_reports_ordered_completion_comment_and_label_receipt_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            database = Path(root) / "state.db"
+            with StateStore(database) as store:
+                store.migrate()
+                item = WorkItem.new(
+                    repository=FIXTURE_REPOSITORY,
+                    issue_number=ISSUE,
+                    issue_node_id="I_fixture_fault_7",
+                    base_branch="main",
+                    base_sha=BASE_SHA,
+                    at="2026-08-19T00:00:00Z",
+                )
+                store.create_work_item(item)
+                store.update_work_item_state(item.work_item_id, WorkItemState.PREPARING)
+                ready = store.update_work_item_state(
+                    item.work_item_id,
+                    WorkItemState.READY,
+                )
+                running, turn = store.begin_turn(
+                    ready.work_item_id,
+                    issue_revision="revision-1",
+                    prompt_sha256="d" * 64,
+                    input_head_sha=BASE_SHA,
+                    turn_id="turn_" + "9" * 32,
+                )
+                store.bind_codex_session(
+                    running.work_item_id,
+                    "123e4567-e89b-12d3-a456-426614174000",
+                )
+                store.update_turn_state(turn.turn_id, TurnState.STARTING)
+                store.record_turn_result(
+                    turn.turn_id,
+                    output_sha256="e" * 64,
+                    output_head_sha=HEAD_SHA,
+                    result_status="completed",
+                    result_summary="Fixture completed",
+                )
+                review, finished = store.finalize_turn(
+                    turn.turn_id,
+                    turn_state=TurnState.FINISHED,
+                    work_item_state=WorkItemState.REVIEW,
+                )
+                store.record_published_sha(
+                    review.work_item_id,
+                    previous_sha=BASE_SHA,
+                    head_sha=HEAD_SHA,
+                )
+                review = store.bind_draft_pr(review.work_item_id, 19)
+            base = make_config(global_max_active=1, repository_max_active=1)
+            config = replace(
+                base,
+                scheduler=replace(base.scheduler, database_path=database),
+                repositories=(
+                    replace(
+                        base.repositories[0],
+                        slug=FIXTURE_REPOSITORY,
+                        allowed_paths=("README.md",),
+                        denied_paths=(),
+                        maintainers=("longwdl",),
+                        required_checks=("fixture",),
+                    ),
+                ),
+            )
+            merged = PullRequest(
+                19,
+                f"https://github.com/{FIXTURE_REPOSITORY}/pull/19",
+                review.task_branch,
+                "Fixture completion",
+                False,
+                "main",
+                PullRequestState.MERGED,
+                False,
+                HEAD_SHA,
+            )
+            comment_plan = SshPreflightPlan(
+                SshPreflightStatus.READY_RECOVERY,
+                SshRecoveryAction.COMPLETE_MERGED_WORK_ITEM,
+                task=_task(TaskState.REVIEW),
+                work_item=review,
+                pull_request=merged,
+            )
+
+            def build_comment_sweep(**kwargs):
+                injection = kwargs["injection"]
+                store = kwargs["store"]
+
+                def run_once():
+                    store.update_work_item_state(
+                        review.work_item_id,
+                        WorkItemState.COMPLETED,
+                    )
+                    injection.completion_identity_validated = True
+                    injection.completion_comment_projected = True
+                    injection.triggered = True
+                    raise FixtureReceiptLost("completion comment receipt lost")
+
+                return SimpleNamespace(run_once=run_once)
+
+            environment = {
+                "CODEX_DISPATCHER_ENABLE_SSH_WRITES": "1",
+                "CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS": FIXTURE_REPOSITORY,
+                "GITHUB_TOKEN": "github_pat_fixture_test",
+            }
+            common_patches = (
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.load_protected_ssh_config",
+                    return_value=config,
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.validate_runtime_state_path"
+                ),
+            )
+            with (
+                patch.dict("os.environ", environment, clear=True),
+                common_patches[0],
+                common_patches[1],
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.run_ssh_preflight",
+                    return_value=SshPreflightInspection(comment_plan, (), True),
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.build_ssh_fixture_fault_sweep",
+                    side_effect=build_comment_sweep,
+                ),
+            ):
+                code, comment = _run(
+                    Path(root) / "config.toml",
+                    issue_number=ISSUE,
+                    fault=FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
+                )
+
+            self.assertEqual(0, code)
+            self.assertTrue(comment["completion_comment_projected"])
+            self.assertFalse(comment["completion_label_projected"])
+            with StateStore(database, read_only=True) as store:
+                completed = store.get_work_item(review.work_item_id)
+            assert completed is not None
+            label_plan = replace(
+                comment_plan,
+                recovery_action=SshRecoveryAction.SYNC_TRACKER_STATE,
+                work_item=completed,
+            )
+
+            def build_label_sweep(**kwargs):
+                injection = kwargs["injection"]
+
+                def run_once():
+                    injection.completion_identity_validated = True
+                    injection.completion_comment_projected = True
+                    injection.completion_label_projected = True
+                    injection.triggered = True
+                    raise FixtureReceiptLost("completion label receipt lost")
+
+                return SimpleNamespace(run_once=run_once)
+
+            with (
+                patch.dict("os.environ", environment, clear=True),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.load_protected_ssh_config",
+                    return_value=config,
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.validate_runtime_state_path"
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.run_ssh_preflight",
+                    return_value=SshPreflightInspection(label_plan, (), True),
+                ),
+                patch(
+                    "codex_dispatcher.fixture_fault_cli.build_ssh_fixture_fault_sweep",
+                    side_effect=build_label_sweep,
+                ),
+            ):
+                code, label = _run(
+                    Path(root) / "config.toml",
+                    issue_number=ISSUE,
+                    fault=FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
+                )
+
+        self.assertEqual(0, code)
+        self.assertTrue(label["completion_identity_validated"])
+        self.assertTrue(label["completion_comment_projected"])
+        self.assertTrue(label["completion_label_projected"])
+        self.assertEqual(finished.turn_id, label["turn_id"])
 
     def test_cli_reports_an_expected_publisher_receipt_loss_as_recoverable(self) -> None:
         with tempfile.TemporaryDirectory() as root:

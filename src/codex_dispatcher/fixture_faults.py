@@ -45,6 +45,7 @@ from codex_dispatcher.trackers.base import (
     ClaimResult,
     DraftPullRequestRequest,
     PullRequest,
+    PullRequestState,
     TaskState,
     Tracker,
     TrackerComment,
@@ -88,6 +89,8 @@ class FixtureFaultPoint(StrEnum):
     START_STATUS_RECOVERY = "start-status-recovery"
     SLACK_ROOT_RECEIPT = "slack-root-receipt"
     SLACK_TERMINAL_RECEIPT = "slack-terminal-receipt"
+    COMPLETION_COMMENT_RECEIPT = "completion-comment-receipt"
+    COMPLETION_LABEL_RECEIPT = "completion-label-receipt"
 
 
 class FixtureFaultRejected(RuntimeError):
@@ -157,6 +160,9 @@ class FixtureFaultInjection:
     ssh_status_attempts: int = field(default=0, init=False)
     ssh_interrupt_rejection: str | None = field(default=None, init=False)
     slack_receipt: SlackDeliveryReceipt | None = field(default=None, init=False)
+    completion_identity_validated: bool = field(default=False, init=False)
+    completion_comment_projected: bool = field(default=False, init=False)
+    completion_label_projected: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.fault, FixtureFaultPoint):
@@ -182,8 +188,20 @@ class FixtureFaultInjection:
                     "pinned base is allowed only for the process-kill Fixture"
                 )
 
-    def wrap_tracker(self, tracker: Tracker) -> Tracker:
-        return _FixtureFaultTracker(self, tracker)
+    def wrap_tracker(
+        self,
+        tracker: Tracker,
+        *,
+        store: StateStore | None = None,
+    ) -> Tracker:
+        if self.fault in {
+            FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
+            FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
+        } and not isinstance(store, StateStore):
+            raise FixtureFaultRejected(
+                "completion receipt fault requires durable SQLite proof"
+            )
+        return _FixtureFaultTracker(self, tracker, store=store)
 
     def wrap_publisher(self, publisher: TaskBranchPublisher) -> TaskBranchPublisher:
         return _FixtureFaultPublisher(self, publisher)
@@ -197,6 +215,11 @@ class FixtureFaultInjection:
         *,
         store: StateStore,
     ) -> SlackPublisher:
+        if self.fault in {
+            FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
+            FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
+        }:
+            return _FixtureRejectingSlackPublisher()
         if self.fault not in {
             FixtureFaultPoint.SLACK_ROOT_RECEIPT,
             FixtureFaultPoint.SLACK_TERMINAL_RECEIPT,
@@ -205,6 +228,11 @@ class FixtureFaultInjection:
         return _FixtureFaultSlackPublisher(self, publisher, store=store)
 
     def wrap_source(self, source: _FixtureSource) -> _FixtureSource:
+        if self.fault in {
+            FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
+            FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
+        }:
+            return _FixtureRejectingSource()
         if self.fault is not FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL:
             return source
         if self.pinned_base_sha is None:
@@ -348,6 +376,27 @@ class FixtureFaultInjection:
         pull_request: PullRequest,
     ) -> None:
         self.require_repository(task.repository)
+        if self.fault is FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT:
+            if (
+                not self.completion_identity_validated
+                or task.task_id != str(self.issue_number)
+                or task.issue_number != self.issue_number
+                or task.issue_node_id != work_item.issue_node_id
+                or task.state is not TaskState.REVIEW
+                or work_item.repository != self.repository
+                or work_item.issue_number != self.issue_number
+                or work_item.state is not WorkItemState.REVIEW
+                or work_item.last_published_sha is None
+                or work_item.pr_number != pull_request.number
+                or pull_request.state is not PullRequestState.MERGED
+                or pull_request.is_draft
+                or pull_request.is_cross_repository
+                or pull_request.head_sha != work_item.last_published_sha
+            ):
+                raise FixtureFaultRejected(
+                    "completion comment fault candidate identity is invalid"
+                )
+            return
         if (
             task.issue_number != work_item.issue_number
             or pull_request.number != work_item.pr_number
@@ -431,6 +480,13 @@ class _FixtureFaultTransport:
 
     def invoke(self, request, **kwargs):
         self._injection.require_target(self._injection.repository)
+        if self._injection.fault in {
+            FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
+            FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
+        }:
+            raise FixtureFaultRejected(
+                "completion receipt fault unexpectedly invoked the Runner"
+            )
         if self._injection.fault is FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL:
             raise FixtureFaultRejected(
                 "claim-acquired process kill unexpectedly invoked the Runner"
@@ -616,6 +672,13 @@ class _FixtureFaultSlackPublisher:
             )
 
 
+class _FixtureRejectingSlackPublisher:
+    def publish(self, report: SlackReport) -> SlackDeliveryReceipt:
+        raise FixtureFaultRejected(
+            "completion receipt fault unexpectedly invoked Slack"
+        )
+
+
 class _FixturePinnedSource:
     def __init__(
         self,
@@ -640,6 +703,18 @@ class _FixturePinnedSource:
                 "process-kill source requested a different base SHA"
             )
         return self._delegate.exact(repository, base_sha)
+
+
+class _FixtureRejectingSource:
+    def current(self, repository: str, base_branch: str) -> SourceBundle:
+        raise FixtureFaultRejected(
+            "completion receipt fault unexpectedly requested a source bundle"
+        )
+
+    def exact(self, repository: str, base_sha: str) -> SourceBundle:
+        raise FixtureFaultRejected(
+            "completion receipt fault unexpectedly requested a source bundle"
+        )
 
 
 class _FixtureFaultPublisher:
@@ -689,6 +764,13 @@ class _FixtureFaultPublisher:
             raise FixtureFaultRejected(
                 "Slack root receipt fault unexpectedly invoked the Publisher"
             )
+        if self._injection.fault in {
+            FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
+            FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
+        }:
+            raise FixtureFaultRejected(
+                "completion receipt fault unexpectedly invoked the Publisher"
+            )
         if self._injection.fault is FixtureFaultPoint.START_STATUS_RECOVERY and (
             self._injection.recovery_operations
             != [RunnerOperation.STATUS, RunnerOperation.EXPORT]
@@ -716,9 +798,16 @@ class _FixtureFaultPublisher:
 
 
 class _FixtureFaultTracker:
-    def __init__(self, injection: FixtureFaultInjection, delegate: Tracker) -> None:
+    def __init__(
+        self,
+        injection: FixtureFaultInjection,
+        delegate: Tracker,
+        *,
+        store: StateStore | None,
+    ) -> None:
         self._injection = injection
         self._delegate = delegate
+        self._store = store
 
     def list_ready_tasks(self, repository: str) -> tuple[TrackerTask, ...]:
         self._injection.require_target(repository)
@@ -787,9 +876,37 @@ class _FixtureFaultTracker:
             },
             FixtureFaultPoint.SLACK_ROOT_RECEIPT: set(),
             FixtureFaultPoint.SLACK_TERMINAL_RECEIPT: set(),
+            FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT: set(),
+            FixtureFaultPoint.COMPLETION_LABEL_RECEIPT: {TaskState.COMPLETED},
         }[self._injection.fault]
         if state not in allowed:
             raise FixtureFaultRejected("Fixture fault stage attempted an unexpected state write")
+        if self._injection.fault is FixtureFaultPoint.COMPLETION_LABEL_RECEIPT:
+            work_item = self._completion_work_item(WorkItemState.COMPLETED)
+            if (
+                not self._injection.completion_identity_validated
+                or not self._injection.completion_comment_projected
+                or task_id != str(work_item.issue_number)
+                or state is not TaskState.COMPLETED
+            ):
+                raise FixtureFaultRejected(
+                    "completion label fault was not preceded by exact comment recovery"
+                )
+            updated = self._delegate.set_state(repository, task_id, state)
+            if (
+                updated.repository != self._injection.repository
+                or updated.issue_number != self._injection.issue_number
+                or updated.task_id != str(self._injection.issue_number)
+                or updated.issue_node_id != work_item.issue_node_id
+                or updated.state is not TaskState.COMPLETED
+            ):
+                raise FixtureFaultRejected(
+                    "completion label fault did not receive an exact completed Issue"
+                )
+            self._injection.completion_label_projected = True
+            self._injection.discard_receipt(
+                FixtureFaultPoint.COMPLETION_LABEL_RECEIPT
+            )
         return self._delegate.set_state(repository, task_id, state)
 
     def upsert_run_comment(
@@ -802,6 +919,30 @@ class _FixtureFaultTracker:
         self._injection.require_target(repository, task_id)
         if not marker.startswith("work-item:") or not marker.endswith(":status"):
             raise FixtureFaultRejected("Fixture reached an unexpected Issue comment write")
+        if self._injection.fault in {
+            FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
+            FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
+        }:
+            work_item = self._completion_work_item(WorkItemState.COMPLETED)
+            if (
+                not self._injection.completion_identity_validated
+                or task_id != str(work_item.issue_number)
+                or marker != f"work-item:{work_item.work_item_id}:status"
+                or body != self._completion_comment_body(work_item)
+            ):
+                raise FixtureFaultRejected(
+                    "completion comment fault escaped its exact projection identity"
+                )
+            self._delegate.upsert_run_comment(repository, task_id, marker, body)
+            self._injection.completion_comment_projected = True
+            if (
+                self._injection.fault
+                is FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT
+            ):
+                self._injection.discard_receipt(
+                    FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT
+                )
+            return
         if (
             self._injection.fault
             is FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY
@@ -823,7 +964,104 @@ class _FixtureFaultTracker:
         self, repository: str, branch_name: str
     ) -> PullRequest | None:
         self._injection.require_repository(repository)
-        return self._delegate.find_pr_by_branch(repository, branch_name)
+        pull_request = self._delegate.find_pr_by_branch(repository, branch_name)
+        if self._injection.fault not in {
+            FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
+            FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
+        }:
+            return pull_request
+        expected_state = (
+            WorkItemState.REVIEW
+            if self._injection.fault
+            is FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT
+            else WorkItemState.COMPLETED
+        )
+        work_item = self._completion_work_item(expected_state)
+        if (
+            branch_name != work_item.task_branch
+            or pull_request is None
+            or pull_request.number != work_item.pr_number
+            or pull_request.url
+            != f"https://github.com/{repository}/pull/{work_item.pr_number}"
+            or pull_request.branch_name != work_item.task_branch
+            or pull_request.base_branch != work_item.base_branch
+            or pull_request.state is not PullRequestState.MERGED
+            or pull_request.is_draft
+            or pull_request.is_cross_repository
+            or pull_request.head_sha != work_item.last_published_sha
+        ):
+            raise FixtureFaultRejected(
+                "completion receipt fault did not read one exact merged pull request"
+            )
+        self._injection.completion_identity_validated = True
+        return pull_request
+
+    def _completion_work_item(self, state: WorkItemState) -> WorkItem:
+        if self._store is None:
+            raise FixtureFaultRejected(
+                "completion receipt fault has no durable SQLite proof"
+            )
+        work_item = self._store.get_work_item_by_issue(
+            self._injection.repository,
+            self._injection.issue_number,
+        )
+        if (
+            work_item is None
+            or work_item.repository != self._injection.repository
+            or work_item.issue_number != self._injection.issue_number
+            or work_item.state is not state
+            or work_item.last_published_sha is None
+            or work_item.pr_number is None
+        ):
+            raise FixtureFaultRejected(
+                "completion receipt fault has no exact durable WorkItem"
+            )
+        return work_item
+
+    def _completion_comment_body(self, work_item: WorkItem) -> str:
+        assert work_item.last_published_sha is not None
+        assert work_item.pr_number is not None
+        lines = [
+            f"Codex work item `{work_item.work_item_id}`",
+            "",
+            f"- Task branch: `{work_item.task_branch}`",
+            "- Dispatcher state: `agent:completed`",
+            f"- Published checkpoint: `{work_item.last_published_sha}`",
+            (
+                "- Pull request: "
+                f"https://github.com/{work_item.repository}/pull/{work_item.pr_number}"
+            ),
+        ]
+        if (
+            work_item.slack_channel_id is None
+            and work_item.slack_thread_ts is None
+        ):
+            return "\n".join(lines)
+        if (
+            work_item.slack_channel_id is None
+            or work_item.slack_thread_ts is None
+        ):
+            raise FixtureFaultRejected(
+                "completed WorkItem has an incomplete Slack thread binding"
+            )
+        assert self._store is not None
+        root = self._store.get_slack_delivery(
+            f"slack:{work_item.work_item_id}:root"
+        )
+        if (
+            root is None
+            or root.state is not SlackDeliveryState.DELIVERED
+            or root.work_item_id != work_item.work_item_id
+            or root.kind is not SlackReportKind.ROOT
+            or root.channel_id != work_item.slack_channel_id
+            or root.message_ts != work_item.slack_thread_ts
+            or root.permalink is None
+        ):
+            raise FixtureFaultRejected(
+                "completed WorkItem Slack projection is not durably bound"
+            )
+        lines.append(f"- Slack execution thread: {root.permalink}")
+        return "\n".join(lines)
 
     def create_draft_pr(self, request: DraftPullRequestRequest) -> PullRequest:
         self._injection.require_target(request.repository)
@@ -892,6 +1130,41 @@ def _is_durable_ssh_start_proof(reply: RunnerTurnReply) -> bool:
     )
 
 
+def _completion_preflight_matches(
+    plan: SshPreflightPlan,
+    *,
+    issue_number: int,
+    work_item_state: WorkItemState,
+) -> bool:
+    task = plan.task
+    work_item = plan.work_item
+    pull_request = plan.pull_request
+    return bool(
+        task is not None
+        and work_item is not None
+        and pull_request is not None
+        and task.repository == FIXTURE_REPOSITORY
+        and task.task_id == str(issue_number)
+        and task.issue_number == issue_number
+        and task.issue_node_id == work_item.issue_node_id
+        and task.state is TaskState.REVIEW
+        and work_item.repository == FIXTURE_REPOSITORY
+        and work_item.issue_number == issue_number
+        and work_item.state is work_item_state
+        and work_item.last_published_sha is not None
+        and work_item.pr_number == pull_request.number
+        and pull_request.url
+        == f"https://github.com/{FIXTURE_REPOSITORY}/pull/{work_item.pr_number}"
+        and pull_request.branch_name == work_item.task_branch
+        and pull_request.base_branch == work_item.base_branch
+        and pull_request.state is PullRequestState.MERGED
+        and not pull_request.is_draft
+        and not pull_request.is_cross_repository
+        and pull_request.head_sha == work_item.last_published_sha
+        and plan.turn is None
+    )
+
+
 def validate_fixture_preflight(
     plan: SshPreflightPlan,
     *,
@@ -916,6 +1189,37 @@ def validate_fixture_preflight(
         raise FixtureFaultRejected("preflight did not resolve the exact Fixture Issue")
 
     work_item = plan.work_item
+    if fault is FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT:
+        if (
+            plan.status is not SshPreflightStatus.READY_RECOVERY
+            or plan.recovery_action
+            is not SshRecoveryAction.COMPLETE_MERGED_WORK_ITEM
+            or not _completion_preflight_matches(
+                plan,
+                issue_number=issue_number,
+                work_item_state=WorkItemState.REVIEW,
+            )
+        ):
+            raise FixtureFaultRejected(
+                "completion comment fault requires one exact merged Fixture PR"
+            )
+        return
+
+    if fault is FixtureFaultPoint.COMPLETION_LABEL_RECEIPT:
+        if (
+            plan.status is not SshPreflightStatus.READY_RECOVERY
+            or plan.recovery_action is not SshRecoveryAction.SYNC_TRACKER_STATE
+            or not _completion_preflight_matches(
+                plan,
+                issue_number=issue_number,
+                work_item_state=WorkItemState.COMPLETED,
+            )
+        ):
+            raise FixtureFaultRejected(
+                "completion label fault requires exact completed projection recovery"
+            )
+        return
+
     if fault in {
         FixtureFaultPoint.PUBLISHER_RECEIPT,
         FixtureFaultPoint.PUBLICATION_RECORDED,
