@@ -3,6 +3,23 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Linux Control Host systemd artifact validation — 2026-08-20
+
+The repository's fixed Control Host wrapper, `Type=oneshot` service, inactive-relative timer, and
+root-only environment-file template were validated without installing or activating them. Five
+offline invariant tests proved the fixed service user and argv, absence of fixture/preflight entry
+points, explicit write gate template without credential values, protected state/runtime write
+boundary, empty capability sets, argument-free wrapper, and non-overlapping timer shape.
+
+All 324 offline tests passed. `sh -n`, `compileall`, and `git diff --check` also passed. A temporary
+credential-free copy was transferred to a `mktemp` directory on the dedicated Linux Fixture host,
+where systemd 255 accepted both units with `systemd-analyze verify --recursive-errors=no`. The same
+temporary service scored `2.8 OK` under offline `systemd-analyze security`; the remaining exposure
+was principally the required Internet/Unix sockets plus syscall/IP filters intentionally deferred
+until the actual Control Host is selected. The temporary directory was removed afterward. No unit
+was installed, no manager reload/start/enable occurred, and no Dispatcher, GitHub, Slack, Runner,
+Publisher, branch, PR, merge, deployment, or release action was invoked.
+
 ## Runner CODEX_HOME isolation migration — 2026-08-20
 
 The dedicated `s3` Fixture Runner moved its shared Codex-managed state from

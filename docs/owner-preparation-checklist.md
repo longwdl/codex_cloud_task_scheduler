@@ -20,7 +20,7 @@ credential values in chat, Issue bodies, Slack, repository files, or TOML config
 Prepare a non-production Linux host or VM with:
 
 - 2 vCPU, 4 GiB RAM, and 50 GiB SSD minimum;
-- Python 3.12+, Git, OpenSSH client, SQLite support, and systemd;
+- Python 3.12+, Git, OpenSSH client, SQLite support, and systemd 249+;
 - outbound access to GitHub and Slack;
 - a stable hostname and backups for `/var/lib/codex-dispatcher`;
 - no production database, deployment, Kubernetes, cloud, or personal credentials.
@@ -57,6 +57,16 @@ labels, or pull requests. Preserve the non-sensitive JSON and verify the reposit
 status, recovery action, and rejection codes before separately authorizing `ssh-run-once`. The
 preflight JSON always says `authorizes_apply=false`; it is a point-in-time snapshot, and the live
 sweep revalidates state while holding the Dispatcher lock.
+
+For service operation, use the reviewed files in `deploy/systemd/` and the fixed
+`scripts/codex-dispatcher-v1` entrypoint. The service remains a bounded one-sweep `Type=oneshot`, not
+a daemon loop. Install `dispatcher.env` as root-owned mode `0600`; place only the explicit write
+gate and repository-scoped GitHub token there, plus the separate Slack gate/token only when Slack is
+configured. Keep the release root-owned and non-writable by the service account. Before the first
+write-enabled start, run `systemd-analyze verify`, inspect `systemd-analyze security`, run the normal
+read-only preflight as the service user, and obtain separate approval for the exact `systemctl`
+installation/activation commands. See `deploy/systemd/README.md` for staging, observation, and
+rollback boundaries.
 
 ### 2. Dedicated Linux Runner
 

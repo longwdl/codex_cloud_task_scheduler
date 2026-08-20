@@ -1,0 +1,62 @@
+[Unit]
+Description=Codex SSH task dispatcher single recovery-first sweep
+Documentation=file:///opt/codex-dispatcher/current/docs/implementation-deployment-test-plan.md
+Wants=network-online.target
+After=network-online.target
+ConditionFileIsExecutable=/opt/codex-dispatcher/current/scripts/codex-dispatcher-v1
+ConditionPathIsDirectory=/etc/codex-dispatcher
+ConditionPathIsDirectory=/var/lib/codex-dispatcher
+
+[Service]
+Type=oneshot
+User=codex-dispatcher
+Group=codex-dispatcher
+UMask=0077
+WorkingDirectory=/var/lib/codex-dispatcher
+EnvironmentFile=/etc/codex-dispatcher/dispatcher.env
+ExecStart=/opt/codex-dispatcher/current/scripts/codex-dispatcher-v1
+
+RuntimeDirectory=codex-dispatcher
+RuntimeDirectoryMode=0700
+StateDirectory=codex-dispatcher
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/codex-dispatcher /run/codex-dispatcher
+
+# GitHub/Git/SSH/Slack operations already have bounded application-level
+# deadlines. A second shorter service deadline could kill a valid multi-step
+# STATUS/EXPORT or PREPARE/START/EXPORT recovery chain at an ambiguous point.
+TimeoutStartSec=infinity
+TimeoutStopSec=30s
+KillMode=control-group
+SendSIGKILL=yes
+Restart=no
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=codex-dispatcher
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+KeyringMode=private
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+TasksMax=256

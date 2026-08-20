@@ -117,10 +117,13 @@ The Runner must not receive GitHub write or production credentials.
 
 Explicitly deferred:
 
-- systemd/timer activation of the one-sweep entry point;
-- systemd deployment;
+- installation and activation of the reviewed systemd units on a real Linux Control Host;
 - Docker isolation on the Runner;
 - any dispatcher-initiated merge, deployment, release, or production access.
+
+The repository now includes the fixed Control Host wrapper, hardened `Type=oneshot` service,
+non-overlapping timer, protected environment-file template, deployment/rollback checklist, and
+offline invariant tests. These artifacts do not install or activate themselves.
 
 ## Architecture constraints for offline code
 

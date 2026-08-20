@@ -713,7 +713,11 @@ delivered outbox record；Runner STATUS 为 finished，重复 preflight/sweep id
 ```text
 /opt/codex-dispatcher/releases/<version>/
 /opt/codex-dispatcher/current
+/opt/codex-dispatcher/current/scripts/codex-dispatcher-v1
 /etc/codex-dispatcher/config.toml
+/etc/codex-dispatcher/dispatcher.env
+/etc/systemd/system/codex-dispatcher.service
+/etc/systemd/system/codex-dispatcher.timer
 /var/lib/codex-dispatcher/state.db
 /var/lib/codex-dispatcher/repos/
 /var/lib/codex-dispatcher/quarantine/
@@ -723,6 +727,14 @@ delivered outbox record；Runner STATUS 为 finished，重复 preflight/sweep id
 
 SQLite 使用 Online Backup API；WAL 模式下禁止仅复制主 DB 文件。GitHub、Slack 和 SSH 凭据
 不写 TOML、仓库、Issue、Prompt 或日志。
+
+Control Host 使用固定无参数 wrapper 启动 `ssh-run-once --apply`。systemd service 为
+`Type=oneshot`；timer 在上一次 sweep 进入 inactive 后再等待 120 秒，不制造定时器
+积压或有意并发。`dispatcher.env` 必须 root 拥有、权限 `0600`，token 不得出现在
+unit、ExecStart argv、TOML 或 release 中。service 使用稳定低权限用户、`UMask=0077`、
+空 capability set 和只读系统目录，仅对 `/var/lib/codex-dispatcher` 与
+`/run/codex-dispatcher` 保留写权。正式启用前必须在目标 Linux 上执行
+`systemd-analyze verify` 和只读 `ssh-preflight`。
 
 ### 11.3 Runner 目录
 
@@ -826,6 +838,7 @@ git diff --check
 | AC-054 | claim 后 Dispatcher 被 SIGKILL | 只终止精确握手子进程；无本地 WorkItem/Turn、Runner 未调用；preflight 为 `recover_orphan_claim`，普通路径恢复同一 Issue 且只创建一套 1:1:1 身份 |
 | AC-055 | 人工合并后的 completed 投影 | 仅 exact bound PR 在 persisted head SHA 合并后先落本地 completed，再写固定 comment 和 label；丢回执只重试投影，不调用 Runner/Publisher，不创建 PR；任何身份/head/merge 状态冲突均 blocked |
 | AC-056 | durable START 后真实 SSH 客户端中断 | 仅在本地 WorkItem/Turn 已持久化且第二条只读 STATUS 证明 Runner durable executing/finished 后，复核 primary SSH 的 exact argv/PID/PGID/SID 并只终止该进程组；同一 Turn 留在 reconciling，恢复只走 STATUS/EXPORT，不重发 Prompt，并最终只产生一套身份和一个 PR |
+| AC-057 | Linux Control Host systemd 服务化 | 固定无参数 wrapper 只执行一次 write-enabled recovery-first sweep；oneshot/timer 不重叠，token 只由 root-only EnvironmentFile 注入，unit 无 fixture 入口且只写受保护的 state/runtime 目录 |
 
 ### 12.3 Live Fixture 顺序
 

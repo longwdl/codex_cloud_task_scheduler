@@ -101,6 +101,16 @@ Dispatcher user, non-symlink, and non-group/world-writable.
 The SQLite parent, database, WAL, and SHM files must be owned by the Dispatcher user and are checked
 against the non-symlink/non-group-or-world-writable boundary before SQLite opens them.
 
+On the Linux Control Host, systemd activates that same one-sweep entry through a fixed, argument-free
+wrapper. The service is `Type=oneshot`; a monotonic timer starts the first sweep after boot and waits
+until the preceding service is inactive before beginning the next interval. systemd serialization,
+the non-blocking process lock, and SQLite constraints are independent single-instance controls.
+Credentials enter only through a root-owned mode-`0600` `EnvironmentFile`; they do not appear in the
+unit, wrapper argv, TOML, or release tree. The unit drops privileges to the stable Dispatcher user,
+removes capabilities, makes the system tree read-only, and allows writes only below the Dispatcher
+state and runtime directories. It retains only the network families needed for GitHub, Slack, and
+the fixed SSH Runner.
+
 ## Input and output channels
 
 GitHub is the only human-input channel. The scheduler accepts a change only after an allowed
