@@ -194,6 +194,8 @@ approved; they are not needed for the offline core.
 - [Development notes](docs/development.md)
 - [Architecture baseline](docs/architecture.md)
 - [Live fixture test evidence](docs/live-test-evidence.md)
+- [Linux Control Host system service](deploy/systemd/README.md)
+- [Rootless Fixture Control Host user service](deploy/systemd-user/README.md)
 
 ## Security model
 

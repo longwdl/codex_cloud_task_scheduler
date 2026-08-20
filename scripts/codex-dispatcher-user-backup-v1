@@ -1,0 +1,29 @@
+#!/bin/sh
+
+set -eu
+umask 077
+
+if [ "$#" -ne 0 ]; then
+    printf '%s\n' 'codex-dispatcher-user-backup-v1: arguments are not accepted' >&2
+    exit 2
+fi
+
+case "${HOME-}" in
+    /*) ;;
+    *)
+        printf '%s\n' 'codex-dispatcher-user-backup-v1: HOME must be absolute' >&2
+        exit 2
+        ;;
+esac
+
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+export PATH=/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONNOUSERSITE=1
+export PYTHONPATH="$HOME/.local/opt/codex-dispatcher/current/src"
+
+exec /home/linuxbrew/.linuxbrew/bin/python3 -P -s -m codex_dispatcher \
+    state-backup \
+    --config "$HOME/.config/codex-dispatcher/config.toml" \
+    --json

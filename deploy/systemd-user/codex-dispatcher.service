@@ -1,0 +1,56 @@
+[Unit]
+Description=Codex SSH task dispatcher single recovery-first sweep (user)
+ConditionFileIsExecutable=%h/.local/opt/codex-dispatcher/current/scripts/codex-dispatcher-user-v1
+ConditionPathIsDirectory=%h/.config/codex-dispatcher
+ConditionPathIsDirectory=%S/codex-dispatcher
+
+[Service]
+Type=oneshot
+UMask=0077
+WorkingDirectory=%S/codex-dispatcher
+Environment=HOME=%h
+EnvironmentFile=%h/.config/codex-dispatcher/dispatcher.env
+ExecStart=%h/.local/opt/codex-dispatcher/current/scripts/codex-dispatcher-user-v1
+
+RuntimeDirectory=codex-dispatcher
+RuntimeDirectoryMode=0700
+StateDirectory=codex-dispatcher
+StateDirectoryMode=0700
+ReadWritePaths=%S/codex-dispatcher %t/codex-dispatcher
+
+# The application bounds each external operation. Killing a valid multi-step
+# recovery chain at a second, shorter deadline would create ambiguity.
+TimeoutStartSec=infinity
+TimeoutStopSec=30s
+KillMode=control-group
+SendSIGKILL=yes
+Restart=no
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=codex-dispatcher
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=read-only
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+KeyringMode=private
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+TasksMax=256

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the user Codex SSH task dispatcher after each idle interval
+
+[Timer]
+Unit=codex-dispatcher.service
+OnStartupSec=2min
+OnUnitInactiveSec=2min
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
