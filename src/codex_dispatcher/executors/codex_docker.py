@@ -1,0 +1,207 @@
+"""Pure fixed-argv planning for one rootless Docker Codex container."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
+from typing import Mapping
+
+from codex_dispatcher.executors.codex_cli import (
+    build_codex_invocation,
+    build_codex_login_status_invocation,
+)
+from codex_dispatcher.work_items import validate_turn_id, validate_work_item_id
+
+
+CONTAINER_CODEX_HOME = Path("/codex-home")
+CONTAINER_CODEX_PATH = Path("/usr/local/bin/codex")
+CONTAINER_REPOSITORY = Path("/workspace")
+CONTAINER_SCHEMA = Path("/runner-contract/agent-result.schema.json")
+DOCKER_NETWORK = "codex-egress"
+CPU_LIMIT = "2.0"
+MEMORY_LIMIT_BYTES = 8 * 1024 * 1024 * 1024
+PIDS_LIMIT = 512
+TMPFS_LIMIT_BYTES = 1024 * 1024 * 1024
+
+_IMAGE_RE = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
+
+
+@dataclass(frozen=True, slots=True)
+class DockerCodexRuntime:
+    """Trusted, host-level Docker inputs that never come from an Issue."""
+
+    docker_path: Path
+    docker_host: str
+    image: str
+
+    def __post_init__(self) -> None:
+        _absolute_host_path(self.docker_path, "docker_path")
+        if (
+            not isinstance(self.docker_host, str)
+            or not self.docker_host.startswith("unix:///")
+            or "\x00" in self.docker_host
+            or any(character.isspace() for character in self.docker_host)
+        ):
+            raise ValueError("docker_host must be an absolute Unix socket URL")
+        socket_path = Path(self.docker_host.removeprefix("unix://"))
+        _absolute_host_path(socket_path, "docker_host socket")
+        if not isinstance(self.image, str) or not _IMAGE_RE.fullmatch(self.image):
+            raise ValueError("image must be a lowercase digest-pinned reference")
+
+
+@dataclass(frozen=True, slots=True)
+class DockerCodexPlan:
+    argv: tuple[str, ...]
+    environment: Mapping[str, str]
+    reads_prompt_from_stdin: bool
+
+
+def build_docker_login_status_plan(
+    *,
+    runtime: DockerCodexRuntime,
+    work_item_id: str,
+    codex_home: Path,
+    auth_file: Path,
+) -> DockerCodexPlan:
+    """Run only the fixed ChatGPT login-status check in one WorkItem boundary."""
+    work_item_id = validate_work_item_id(work_item_id)
+    codex_home = _mount_source(codex_home, "codex_home")
+    auth_file = _mount_source(auth_file, "auth_file")
+    _validate_codex_home(codex_home)
+    if auth_file.name != "auth.json":
+        raise ValueError("auth_file must name auth.json")
+    inner = build_codex_login_status_invocation(
+        codex_path=CONTAINER_CODEX_PATH,
+        codex_home=CONTAINER_CODEX_HOME,
+    )
+    argv = (
+        *_docker_prefix(runtime, f"codex-auth-{work_item_id}"),
+        _mount(codex_home, CONTAINER_CODEX_HOME),
+        _mount(auth_file, CONTAINER_CODEX_HOME / "auth.json", readonly=True),
+        *_container_environment(inner.environment),
+        f"--workdir={CONTAINER_CODEX_HOME}",
+        runtime.image,
+        *inner.argv,
+    )
+    return DockerCodexPlan(argv, MappingProxyType({}), False)
+
+
+def build_docker_codex_plan(
+    *,
+    runtime: DockerCodexRuntime,
+    work_item_id: str,
+    turn_id: str,
+    repository: Path,
+    codex_home: Path,
+    auth_file: Path,
+    output_schema: Path,
+    session_id: str | None,
+) -> DockerCodexPlan:
+    """Build a fixed Docker invocation; the Prompt remains standard-input only."""
+    validate_work_item_id(work_item_id)
+    turn_id = validate_turn_id(turn_id)
+    repository = _mount_source(repository, "repository")
+    codex_home = _mount_source(codex_home, "codex_home")
+    auth_file = _mount_source(auth_file, "auth_file")
+    output_schema = _mount_source(output_schema, "output_schema")
+    _validate_work_item_mounts(repository, codex_home)
+    if auth_file.name != "auth.json":
+        raise ValueError("auth_file must name auth.json")
+    if output_schema.name != "agent-result.schema.json":
+        raise ValueError("output_schema must name agent-result.schema.json")
+    inner = build_codex_invocation(
+        codex_path=CONTAINER_CODEX_PATH,
+        repository_directory=CONTAINER_REPOSITORY,
+        codex_home=CONTAINER_CODEX_HOME,
+        output_schema=CONTAINER_SCHEMA,
+        session_id=session_id,
+    )
+    argv = (
+        *_docker_prefix(runtime, f"codex-{turn_id}"),
+        _mount(repository, CONTAINER_REPOSITORY),
+        _mount(codex_home, CONTAINER_CODEX_HOME),
+        _mount(auth_file, CONTAINER_CODEX_HOME / "auth.json", readonly=True),
+        _mount(output_schema, CONTAINER_SCHEMA, readonly=True),
+        *_container_environment(inner.environment),
+        f"--workdir={CONTAINER_REPOSITORY}",
+        runtime.image,
+        *inner.argv,
+    )
+    return DockerCodexPlan(argv, MappingProxyType({}), True)
+
+
+def _docker_prefix(runtime: DockerCodexRuntime, name: str) -> tuple[str, ...]:
+    return (
+        str(runtime.docker_path),
+        f"--host={runtime.docker_host}",
+        "run",
+        "--rm",
+        "--pull=never",
+        "--log-driver=none",
+        f"--name={name}",
+        "--interactive",
+        "--init",
+        "--read-only",
+        f"--network={DOCKER_NETWORK}",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges=true",
+        "--pids-limit=512",
+        f"--memory={MEMORY_LIMIT_BYTES}",
+        f"--memory-swap={MEMORY_LIMIT_BYTES}",
+        f"--cpus={CPU_LIMIT}",
+        "--ulimit=nofile=1024:1024",
+        "--ulimit=nproc=512:512",
+        "--ulimit=core=0:0",
+        (
+            "--tmpfs=/tmp:rw,nosuid,nodev,mode=1777,"
+            f"size={TMPFS_LIMIT_BYTES}"
+        ),
+    )
+
+
+def _container_environment(environment: Mapping[str, str]) -> tuple[str, ...]:
+    return (
+        f"--env=HOME={CONTAINER_CODEX_HOME}",
+        *(f"--env={key}={value}" for key, value in environment.items()),
+    )
+
+
+def _mount(source: Path, target: Path, *, readonly: bool = False) -> str:
+    suffix = ",readonly" if readonly else ""
+    return f"--mount=type=bind,source={source},target={target}{suffix}"
+
+
+def _mount_source(value: Path, field: str) -> Path:
+    value = _absolute_host_path(value, field)
+    if "," in str(value):
+        raise ValueError(f"{field} must not contain a comma")
+    return value
+
+
+def _validate_work_item_mounts(repository: Path, codex_home: Path) -> None:
+    work_item_root = repository.parent
+    _validate_codex_home(codex_home)
+    if (
+        repository.name != "repo"
+        or codex_home != work_item_root / "runner-state" / "codex-home"
+    ):
+        raise ValueError("container mounts must belong to one WorkItem directory")
+
+
+def _validate_codex_home(codex_home: Path) -> None:
+    if codex_home.name != "codex-home" or codex_home.parent.name != "runner-state":
+        raise ValueError("codex_home must belong to one WorkItem runner-state")
+
+
+def _absolute_host_path(value: Path, field: str) -> Path:
+    if (
+        not isinstance(value, Path)
+        or not value.is_absolute()
+        or ".." in value.parts
+        or "\x00" in str(value)
+        or any(ord(character) < 32 for character in str(value))
+    ):
+        raise ValueError(f"{field} must be a normalized absolute path")
+    return value

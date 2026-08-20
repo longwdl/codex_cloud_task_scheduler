@@ -127,3 +127,4 @@ authorization after the later container boundary is active. They do not yet stop
 executed Codex process from reading or damaging another WorkItem or the shared `CODEX_HOME`.
 Higher-value repositories remain prohibited until per-WorkItem container storage, session/auth
 handling, resource controls, and internal-network/metadata denial are implemented and live-tested.
+The staged fixed-argv contract and its remaining gates are documented in [DOCKER.md](DOCKER.md).
