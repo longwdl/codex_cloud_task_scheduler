@@ -10,13 +10,14 @@ from codex_dispatcher.executors.codex_cli import (
 
 
 SESSION = "123e4567-e89b-12d3-a456-426614174000"
+CODEX_HOME = Path("/srv/codex-runner/app")
 
 
 class CodexCliInvocationTests(unittest.TestCase):
     def test_login_status_plan_uses_only_shared_codex_home(self) -> None:
         plan = build_codex_login_status_invocation(
             codex_path=Path("/opt/codex/bin/codex"),
-            codex_home=Path("/srv/codex-runner"),
+            codex_home=CODEX_HOME,
         )
         self.assertEqual(
             (
@@ -30,7 +31,7 @@ class CodexCliInvocationTests(unittest.TestCase):
             ),
             plan.argv,
         )
-        self.assertEqual("/srv/codex-runner", plan.environment["CODEX_HOME"])
+        self.assertEqual(str(CODEX_HOME), plan.environment["CODEX_HOME"])
         self.assertNotIn("OPENAI_API_KEY", plan.environment)
         self.assertNotIn("GITHUB_TOKEN", plan.environment)
 
@@ -38,7 +39,7 @@ class CodexCliInvocationTests(unittest.TestCase):
         plan = build_codex_invocation(
             codex_path=Path("/usr/local/bin/codex"),
             repository_directory=Path("/srv/tasks/issue-1/repo"),
-            codex_home=Path("/srv/codex-runner"),
+            codex_home=CODEX_HOME,
             output_schema=Path("/srv/codex-runner/etc/result.schema.json"),
         )
         self.assertEqual("-", plan.argv[-1])
@@ -48,16 +49,14 @@ class CodexCliInvocationTests(unittest.TestCase):
         self.assertIn('cli_auth_credentials_store="file"', plan.argv)
         self.assertNotIn("resume", plan.argv)
         self.assertTrue(plan.reads_prompt_from_stdin)
-        self.assertEqual(
-            "/srv/codex-runner", plan.environment["CODEX_HOME"]
-        )
+        self.assertEqual(str(CODEX_HOME), plan.environment["CODEX_HOME"])
         self.assertFalse(any("GITHUB" in name or name == "GH_TOKEN" for name in plan.environment))
 
     def test_resume_plan_names_exact_session_and_never_uses_last_or_ephemeral(self) -> None:
         plan = build_codex_invocation(
             codex_path=Path("/usr/local/bin/codex"),
             repository_directory=Path("/srv/tasks/issue-1/repo"),
-            codex_home=Path("/srv/codex-runner"),
+            codex_home=CODEX_HOME,
             output_schema=Path("/srv/codex-runner/etc/result.schema.json"),
             session_id=SESSION,
         )
@@ -71,14 +70,14 @@ class CodexCliInvocationTests(unittest.TestCase):
             build_codex_invocation(
                 codex_path=Path("codex"),
                 repository_directory=Path("/srv/tasks/issue-1/repo"),
-                codex_home=Path("/srv/codex-runner"),
+                codex_home=CODEX_HOME,
                 output_schema=Path("/srv/codex-runner/etc/result.schema.json"),
             )
         with self.assertRaisesRegex(ValueError, "canonical UUID"):
             build_codex_invocation(
                 codex_path=Path("/usr/local/bin/codex"),
                 repository_directory=Path("/srv/tasks/issue-1/repo"),
-                codex_home=Path("/srv/codex-runner"),
+                codex_home=CODEX_HOME,
                 output_schema=Path("/srv/codex-runner/etc/result.schema.json"),
                 session_id="last",
             )
@@ -86,7 +85,7 @@ class CodexCliInvocationTests(unittest.TestCase):
             build_codex_invocation(
                 codex_path=Path("/usr/local/bin/codex"),
                 repository_directory=Path("/srv/tasks/../other/repo"),
-                codex_home=Path("/srv/codex-runner"),
+                codex_home=CODEX_HOME,
                 output_schema=Path("/srv/codex-runner/etc/result.schema.json"),
             )
 

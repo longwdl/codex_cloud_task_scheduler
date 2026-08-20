@@ -3,6 +3,40 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Runner CODEX_HOME isolation migration — 2026-08-20
+
+The dedicated `s3` Fixture Runner moved its shared Codex-managed state from
+`/srv/codex-runner` to the protected `/srv/codex-runner/app` directory. The business directories
+`bin`, `current`, `etc`, `releases`, `run`, and `work-items` remained at the Runner root. No release,
+task repository, Runner protocol state, or forced-command path moved.
+
+Migration began only after a read-only Dispatcher preflight returned `idle`, no Codex or Runner
+process was active, the global Runner lock was acquired, five Codex SQLite databases returned
+`quick_check=ok`, and the source and destination were confirmed to be on the same filesystem. The
+first guarded attempt failed closed before any move because the SQLite checks had materialized
+additional WAL/SHM sidecars; the root, configuration, and absent destination were independently
+verified unchanged. The exact allowlist was extended only for those Codex-owned sidecars.
+
+The successful attempt atomically renamed 28 exact Codex-owned entries while holding the global
+lock, atomically changed only `codex_home` in the protected Runner configuration, and retained the
+mode-`0600` rollback copy
+`/srv/codex-runner/etc/config.json.pre-codex-home-app-20260820T123232Z`. Post-checks found only the
+six business entries at the Runner root, `/srv/codex-runner/app` at mode `0700`, `auth.json` at mode
+`0600`, all five SQLite checks still `ok`, and the original session-file count unchanged. Credential
+and session contents were never read or printed.
+
+With a minimal environment, `CODEX_HOME=/srv/codex-runner/app codex login status` reported the
+existing ChatGPT login. A real forced-command `STATUS` request then returned the existing fixture
+Turn as `finished` with its original WorkItem, Turn, directory, and Codex session binding. It did not
+start or resume Codex, resend a Prompt, export an artifact, or perform a GitHub, Slack, branch, PR,
+merge, deployment, or release write.
+
+After the example configuration and current architecture/operations documentation were updated,
+all 319 offline tests passed. `compileall`, example JSON parsing, `git diff --check`, and a
+credential-pattern diff scan also passed. A final read-only Dispatcher `ssh-preflight` returned
+`ok=true`, `status=idle`, and `external_writes=false` with no selected Issue, WorkItem, Turn, or
+recovery action.
+
 ## Slack Web API exact-retry fixture — 2026-08-20
 
 This fixture proves the provider-side contract required before enabling the real outbound Slack

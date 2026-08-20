@@ -97,11 +97,12 @@ recommendation but sufficient for the bounded fixture. The implementation fixes 
 
 ### 3. Codex authentication on Runner
 
-`CODEX_HOME=/srv/codex-runner` is already logged in using ChatGPT. It is one shared Runner-level
-home, not one copy per task. Keep the directory owned by `ecs-user` with mode `0700`, keep
+`CODEX_HOME=/srv/codex-runner/app` is already logged in using ChatGPT. It is one shared Runner-level
+home, separate from the Runner's `etc`, `run`, and `work-items` directories, not one copy per task.
+Keep the directory owned by `ecs-user` with mode `0700`, keep
 `auth.json` at `0600`, and initialize or refresh login only in place. Dispatcher and fixture scripts
 must never read, print, copy, or log the credential file. Before each live fixture, verify only the
-non-secret result of `CODEX_HOME=/srv/codex-runner codex login status`. Generated Codex child
+non-secret result of `CODEX_HOME=/srv/codex-runner/app codex login status`. Generated Codex child
 commands must not receive GitHub or Control Host credentials.
 
 For the current Mac fixture only, Dispatcher may use the existing SSH identity and the protected

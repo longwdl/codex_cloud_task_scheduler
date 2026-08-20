@@ -119,17 +119,17 @@ SQLite 不承担多调度器租约或并发抢占协议。
 
 ```text
 /srv/codex-runner/
+├── app/              # protected shared CODEX_HOME
 ├── etc/
 ├── run/
-├── work-items/
-└── auth.json / sessions / other Codex-managed state
+└── work-items/
 
 /srv/codex-runner/work-items/<repository-key>/issue-<number>/
 ├── repo/
 └── runner-state/
 ```
 
-`CODEX_HOME=/srv/codex-runner` 在 Runner 范围共享，权限为 `0700`；Codex 登录状态只在该目录
+`CODEX_HOME=/srv/codex-runner/app` 在 Runner 范围共享，权限为 `0700`；Codex 登录状态只在该目录
 原地初始化和刷新，不复制到 WorkItem。WorkItem 与 Codex 上下文的绑定由持久化的精确 session
 ID 完成。
 
@@ -384,7 +384,7 @@ base ref 的 self-contained bundle；不在 mirror 中创建临时 ref。Runner 
 
 ```text
 cwd=<work-item>/repo
-CODEX_HOME=/srv/codex-runner
+CODEX_HOME=/srv/codex-runner/app
 codex exec --json --dangerously-bypass-approvals-and-sandbox \
   --output-schema <fixed-schema> -
 ```
@@ -395,7 +395,7 @@ codex exec --json --dangerously-bypass-approvals-and-sandbox \
 
 ```text
 cwd=<work-item>/repo
-CODEX_HOME=/srv/codex-runner
+CODEX_HOME=/srv/codex-runner/app
 codex exec resume <recorded-session-id> --json \
   --dangerously-bypass-approvals-and-sandbox --output-schema <fixed-schema> -
 ```
@@ -732,6 +732,7 @@ SQLite 使用 Online Backup API；WAL 模式下禁止仅复制主 DB 文件。Gi
 /srv/codex-runner/bin/codex-runner-v1
 /srv/codex-runner/etc/config.json
 /srv/codex-runner/etc/agent-result.schema.json
+/srv/codex-runner/app/                # protected shared CODEX_HOME
 /srv/codex-runner/work-items/
 /srv/codex-runner/run/active.lock
 ```

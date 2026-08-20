@@ -23,7 +23,8 @@ Linux control host (high trust)
 Dedicated Linux runner (low trust and rebuildable)
 ├── Codex CLI, with no GitHub write credential
 ├── one persistent repository/state directory per work item
-└── one protected, runner-wide CODEX_HOME for ChatGPT auth and Codex session state
+└── one protected, runner-wide CODEX_HOME at /srv/codex-runner/app for ChatGPT auth
+    and Codex session state
 ```
 
 The Dispatcher and Publisher run on the same control host. They remain separate responsibilities:
