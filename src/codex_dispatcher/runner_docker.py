@@ -12,6 +12,7 @@ from typing import Any
 
 from codex_dispatcher.command_runner import run_command
 from codex_dispatcher.executors.codex_docker import (
+    CONTAINER_CODE_MODE_HOST_PATH,
     DOCKER_NETWORK,
     DOCKER_NETWORK_GATEWAY,
     DOCKER_NETWORK_SUBNET,
@@ -24,6 +25,7 @@ from codex_dispatcher.work_items import validate_session_id, validate_work_item_
 
 
 _SESSION_BINDING_VERSION = 1
+_TOOL_BINDING_VERSION = 1
 _MAX_SESSION_BINDING_BYTES = 4096
 
 
@@ -37,8 +39,10 @@ class DockerWorkItemContext:
     state: Path
     codex_home: Path
     session_binding: Path
+    tool_binding: Path
     image: str
     codex_sha256: str
+    code_mode_host_sha256: str
 
 
 def prepare_docker_work_item(
@@ -71,8 +75,14 @@ def prepare_docker_work_item(
 
     codex_home = paths.state / "codex-home"
     session_binding = paths.state / "codex-session.json"
+    tool_binding = paths.state / "codex-session-tools.json"
     if request.operation is RunnerOperation.START:
-        if session_binding.exists() or session_binding.is_symlink():
+        if (
+            session_binding.exists()
+            or session_binding.is_symlink()
+            or tool_binding.exists()
+            or tool_binding.is_symlink()
+        ):
             raise RunnerDockerError("Docker START cannot replace a bound Codex session")
         if codex_home.exists() or codex_home.is_symlink():
             _owned_protected_directory(codex_home, "WorkItem Codex home")
@@ -97,14 +107,29 @@ def prepare_docker_work_item(
             runtime.codex_sha256,
         ):
             raise RunnerDockerError("Docker RESUME session binding is unavailable")
+        tool_binding_value = _read_tool_binding(tool_binding, required=False)
+        expected_tool_binding = (
+            request.work_item_id,
+            request.session_id,
+            runtime.image,
+            runtime.codex_sha256,
+            runtime.code_mode_host_sha256,
+        )
+        if (
+            tool_binding_value is not None
+            and tool_binding_value != expected_tool_binding
+        ):
+            raise RunnerDockerError("Docker RESUME session binding is unavailable")
     _owned_protected_directory(codex_home, "WorkItem Codex home")
     return DockerWorkItemContext(
         paths.repository,
         paths.state,
         codex_home,
         session_binding,
+        tool_binding,
         runtime.image,
         runtime.codex_sha256,
+        runtime.code_mode_host_sha256,
     )
 
 
@@ -127,11 +152,20 @@ def validate_docker_command_boundary(
         context.state != context.repository.parent / "runner-state"
         or context.codex_home != context.state / "codex-home"
         or context.session_binding != context.state / "codex-session.json"
+        or context.tool_binding != context.state / "codex-session-tools.json"
         or context.image != runtime.image
         or context.codex_sha256 != runtime.codex_sha256
+        or context.code_mode_host_sha256 != runtime.code_mode_host_sha256
+        or runtime.code_mode_host_path
+        != codex_path.with_name(CONTAINER_CODE_MODE_HOST_PATH.name)
     ):
         raise RunnerDockerError("Docker WorkItem context is inconsistent")
-    _validate_codex_binary(codex_path, runtime.codex_sha256)
+    _validate_codex_binary(codex_path, runtime.codex_sha256, "Codex executable")
+    _validate_codex_binary(
+        runtime.code_mode_host_path,
+        runtime.code_mode_host_sha256,
+        "Codex code-mode host",
+    )
     _trusted_regular_file(auth_file, "Codex auth file", secret=True)
     _trusted_regular_file(output_schema, "output schema", secret=False)
 
@@ -147,52 +181,78 @@ def bind_docker_session(
     session_id = validate_session_id(session_id)
     _owned_protected_directory(context.state, "WorkItem state")
     _owned_protected_directory(context.codex_home, "WorkItem Codex home")
-    existing = _read_session_binding(context.session_binding, required=False)
-    if existing is not None:
-        if existing != (
-            work_item_id,
-            session_id,
-            context.image,
-            context.codex_sha256,
-        ):
-            raise RunnerDockerError("WorkItem Codex session binding conflicts")
-        return
-    payload = {
-        "version": _SESSION_BINDING_VERSION,
-        "work_item_id": work_item_id,
-        "session_id": session_id,
-        "image": context.image,
-        "codex_sha256": context.codex_sha256,
-    }
+    expected_session_binding = (
+        work_item_id,
+        session_id,
+        context.image,
+        context.codex_sha256,
+    )
+    existing_session_binding = _read_session_binding(
+        context.session_binding, required=False
+    )
+    if existing_session_binding is None:
+        _persist_binding(
+            context.session_binding,
+            {
+                "version": _SESSION_BINDING_VERSION,
+                "work_item_id": work_item_id,
+                "session_id": session_id,
+                "image": context.image,
+                "codex_sha256": context.codex_sha256,
+            },
+            "WorkItem Codex session binding",
+        )
+        existing_session_binding = _read_session_binding(context.session_binding)
+    if existing_session_binding != expected_session_binding:
+        raise RunnerDockerError("WorkItem Codex session binding conflicts")
+
+    expected_tool_binding = (
+        *expected_session_binding,
+        context.code_mode_host_sha256,
+    )
+    existing_tool_binding = _read_tool_binding(
+        context.tool_binding, required=False
+    )
+    if existing_tool_binding is None:
+        _persist_binding(
+            context.tool_binding,
+            {
+                "version": _TOOL_BINDING_VERSION,
+                "work_item_id": work_item_id,
+                "session_id": session_id,
+                "image": context.image,
+                "codex_sha256": context.codex_sha256,
+                "code_mode_host_sha256": context.code_mode_host_sha256,
+            },
+            "WorkItem Codex tool binding",
+        )
+        existing_tool_binding = _read_tool_binding(context.tool_binding)
+    if existing_tool_binding != expected_tool_binding:
+        raise RunnerDockerError("WorkItem Codex tool binding conflicts")
+
+
+def _persist_binding(path: Path, payload: dict[str, object], field: str) -> None:
     encoded = json.dumps(
         payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
-    temporary = context.state / f".codex-session.{os.getpid()}.tmp"
+    temporary = path.parent / f".{path.name}.{os.getpid()}.tmp"
     try:
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(encoded)
             stream.flush()
             os.fsync(stream.fileno())
-        os.link(temporary, context.session_binding)
-        directory_descriptor = os.open(context.state, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            pass
+        directory_descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory_descriptor)
         finally:
             os.close(directory_descriptor)
-    except FileExistsError:
-        existing = _read_session_binding(context.session_binding, required=False)
-        if existing != (
-            work_item_id,
-            session_id,
-            context.image,
-            context.codex_sha256,
-        ):
-            raise RunnerDockerError("WorkItem Codex session binding conflicts")
     except OSError as exc:
-        raise RunnerDockerError(
-            "WorkItem Codex session binding could not be persisted"
-        ) from exc
+        raise RunnerDockerError(f"{field} could not be persisted") from exc
     finally:
         try:
             temporary.unlink(missing_ok=True)
@@ -245,15 +305,67 @@ def _expected_rootless_socket() -> Path:
 def _read_session_binding(
     path: Path, *, required: bool = True
 ) -> tuple[str, str, str, str] | None:
+    payload = _read_binding_payload(
+        path, required=required, field="WorkItem Codex session binding"
+    )
+    if payload is None:
+        return None
+    try:
+        if set(payload) != {
+            "version",
+            "work_item_id",
+            "session_id",
+            "image",
+            "codex_sha256",
+        } or payload["version"] != _SESSION_BINDING_VERSION:
+            raise ValueError("unexpected fields")
+        common = _parse_binding_common(payload)
+    except (TypeError, ValueError) as exc:
+        raise RunnerDockerError(
+            "WorkItem Codex session binding is malformed"
+        ) from exc
+    return common
+
+
+def _read_tool_binding(
+    path: Path, *, required: bool = True
+) -> tuple[str, str, str, str, str] | None:
+    payload = _read_binding_payload(
+        path, required=required, field="WorkItem Codex tool binding"
+    )
+    if payload is None:
+        return None
+    try:
+        if set(payload) != {
+            "version",
+            "work_item_id",
+            "session_id",
+            "image",
+            "codex_sha256",
+            "code_mode_host_sha256",
+        } or payload["version"] != _TOOL_BINDING_VERSION:
+            raise ValueError("unexpected fields")
+        common = _parse_binding_common(payload)
+        code_mode_host_sha256 = _validate_binding_sha256(
+            payload["code_mode_host_sha256"], "code-mode host"
+        )
+    except (TypeError, ValueError) as exc:
+        raise RunnerDockerError("WorkItem Codex tool binding is malformed") from exc
+    return (*common, code_mode_host_sha256)
+
+
+def _read_binding_payload(
+    path: Path, *, required: bool, field: str
+) -> dict[str, Any] | None:
     if not path.exists():
         if required:
-            raise RunnerDockerError("WorkItem Codex session binding is unavailable")
+            raise RunnerDockerError(f"{field} is unavailable")
         return None
     try:
         binding_stat = path.lstat()
         raw = path.read_bytes()
     except OSError as exc:
-        raise RunnerDockerError("WorkItem Codex session binding is unavailable") from exc
+        raise RunnerDockerError(f"{field} is unavailable") from exc
     if (
         not stat.S_ISREG(binding_stat.st_mode)
         or path.is_symlink()
@@ -263,47 +375,49 @@ def _read_session_binding(
         or len(raw) > _MAX_SESSION_BINDING_BYTES
         or b"\x00" in raw
     ):
-        raise RunnerDockerError("WorkItem Codex session binding is invalid")
+        raise RunnerDockerError(f"{field} is invalid")
     try:
         payload = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
-        if not isinstance(payload, dict) or set(payload) != {
-            "version",
-            "work_item_id",
-            "session_id",
-            "image",
-            "codex_sha256",
-        }:
-            raise ValueError("unexpected fields")
-        if payload["version"] != _SESSION_BINDING_VERSION:
-            raise ValueError("unsupported version")
-        work_item_id = validate_work_item_id(payload["work_item_id"])
-        session_id = validate_session_id(payload["session_id"])
-        image = payload["image"]
-        if not isinstance(image, str) or not image:
-            raise ValueError("invalid image")
-        codex_sha256 = payload["codex_sha256"]
-        if (
-            not isinstance(codex_sha256, str)
-            or len(codex_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in codex_sha256)
-        ):
-            raise ValueError("invalid Codex digest")
+        if not isinstance(payload, dict):
+            raise ValueError("binding is not an object")
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise RunnerDockerError("WorkItem Codex session binding is malformed") from exc
+        raise RunnerDockerError(f"{field} is malformed") from exc
+    return payload
+
+
+def _parse_binding_common(payload: dict[str, Any]) -> tuple[str, str, str, str]:
+    work_item_id = validate_work_item_id(payload["work_item_id"])
+    session_id = validate_session_id(payload["session_id"])
+    image = payload["image"]
+    if not isinstance(image, str) or not image:
+        raise ValueError("invalid image")
+    codex_sha256 = _validate_binding_sha256(payload["codex_sha256"], "Codex")
     return work_item_id, session_id, image, codex_sha256
 
 
-def _validate_codex_binary(path: Path, expected_sha256: str) -> None:
-    _trusted_executable(path, "Codex executable")
+def _validate_binding_sha256(value: Any, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"invalid {field} digest")
+    return value
+
+
+def _validate_codex_binary(
+    path: Path, expected_sha256: str, field: str
+) -> None:
+    _trusted_executable(path, field)
     digest = sha256()
     try:
         with path.open("rb") as stream:
             while chunk := stream.read(1024 * 1024):
                 digest.update(chunk)
     except OSError as exc:
-        raise RunnerDockerError("Codex executable could not be hashed") from exc
+        raise RunnerDockerError(f"{field} could not be hashed") from exc
     if digest.hexdigest() != expected_sha256:
-        raise RunnerDockerError("Codex executable digest is invalid")
+        raise RunnerDockerError(f"{field} digest is invalid")
 
 
 def _validate_docker_assets(runtime: DockerCodexRuntime) -> None:

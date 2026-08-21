@@ -64,10 +64,11 @@ privilege tools, and Docker clients are absent. Projects that need native compil
 separately reviewed image variant; they must not install an unbounded toolchain into this baseline.
 
 Docker bind mounts are writable by default and directly expose host paths, so every source must be
-an owned, protected, non-symlink path derived from the durable WorkItem registry. The planner's four
-mounts are necessary but not sufficient: runtime integration must freshly validate source ownership,
-mode, type, resolved containment, and the per-WorkItem auth mount behavior immediately before
-starting Docker. See Docker's official
+an owned, protected, non-symlink path derived from the durable WorkItem registry or the fixed Codex
+tool bundle. The Turn planner's six mounts are necessary but not sufficient: runtime integration
+must freshly validate source ownership, mode, type, resolved containment, independent executable
+digests, and the per-WorkItem auth mount behavior immediately before starting Docker. See Docker's
+official
 [bind-mount security warning](https://docs.docker.com/engine/storage/bind-mounts/).
 
 Docker has no resource limits by default, so every hard limit above is mandatory and must be proven
@@ -82,11 +83,16 @@ and all existing session state. Mounting that complete directory into every cont
 behavior but would not isolate WorkItems, so it is forbidden.
 
 The container layout gives each WorkItem a separate protected `runner-state/codex-home`. Its exact
-WorkItem/session/image/Codex-binary-digest binding is stored in
-`runner-state/codex-session.json`, which is never mounted into the container. START requires an
-absent binding and an absent or empty session home. RESUME requires the exact protected session,
-image, and binary binding; legacy shared-home state is therefore blocked rather than silently
-replaced. Only the minimum auth file is supplied read-only for the duration of the container.
+WorkItem/session/image/primary-Codex binding remains in the backward-compatible
+`runner-state/codex-session.json`; the independently hashed companion binding is stored in the new
+`runner-state/codex-session-tools.json` sidecar. Neither file is mounted into the container. START
+requires both bindings to be absent and the session home to be absent or empty. RESUME requires the
+exact protected session, image, and executable bindings. An existing isolated session without the
+sidecar may gain it once only after the original binding matches and both current executables pass
+their protected-path and configured-digest checks. The original version-1 binding is never rewritten,
+so a Runner code rollback can still read it; conflicting sidecars and other legacy or shared-home
+state remain blocked. Only the minimum auth file is supplied read-only for the duration of the
+container.
 Offline fake execution now proves the START/RESUME identity and failure boundary. A live
 credential-safe fixture must still prove:
 

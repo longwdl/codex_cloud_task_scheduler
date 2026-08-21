@@ -19,6 +19,7 @@ from codex_dispatcher.work_items import validate_turn_id, validate_work_item_id
 
 CONTAINER_CODEX_HOME = Path("/codex-home")
 CONTAINER_CODEX_PATH = Path("/usr/local/bin/codex")
+CONTAINER_CODE_MODE_HOST_PATH = Path("/usr/local/bin/codex-code-mode-host")
 CONTAINER_TIMEOUT_PATH = Path("/usr/bin/timeout")
 CONTAINER_REPOSITORY = Path("/workspace")
 CONTAINER_SCHEMA = Path("/runner-contract/agent-result.schema.json")
@@ -46,11 +47,18 @@ class DockerCodexRuntime:
     cli_config_directory: Path
     image: str
     codex_sha256: str
+    code_mode_host_path: Path
+    code_mode_host_sha256: str
     egress_proxy_url: str | None = None
 
     def __post_init__(self) -> None:
         _absolute_host_path(self.docker_path, "docker_path")
         _absolute_host_path(self.cli_config_directory, "cli_config_directory")
+        _absolute_host_path(self.code_mode_host_path, "code_mode_host_path")
+        if self.code_mode_host_path.name != CONTAINER_CODE_MODE_HOST_PATH.name:
+            raise ValueError(
+                "code_mode_host_path must name codex-code-mode-host"
+            )
         if (
             not isinstance(self.docker_host, str)
             or not self.docker_host.startswith("unix:///")
@@ -67,6 +75,13 @@ class DockerCodexRuntime:
             or not _SHA256_RE.fullmatch(self.codex_sha256)
         ):
             raise ValueError("codex_sha256 must be a lowercase SHA-256 digest")
+        if (
+            not isinstance(self.code_mode_host_sha256, str)
+            or not _SHA256_RE.fullmatch(self.code_mode_host_sha256)
+        ):
+            raise ValueError(
+                "code_mode_host_sha256 must be a lowercase SHA-256 digest"
+            )
         if self.egress_proxy_url is not None:
             validate_egress_proxy_url(self.egress_proxy_url)
 
@@ -90,6 +105,10 @@ def build_docker_login_status_plan(
     proxy_url = _required_proxy_url(runtime)
     work_item_id = validate_work_item_id(work_item_id)
     codex_path = _mount_source(codex_path, "codex_path")
+    code_mode_host_path = _mount_source(
+        runtime.code_mode_host_path, "code_mode_host_path"
+    )
+    _validate_codex_tool_bundle(codex_path, code_mode_host_path)
     codex_home = _mount_source(codex_home, "codex_home")
     auth_file = _mount_source(auth_file, "auth_file")
     _validate_codex_home(codex_home)
@@ -103,6 +122,11 @@ def build_docker_login_status_plan(
     argv = (
         *_docker_prefix(runtime, f"codex-auth-{work_item_id}"),
         _mount(codex_path, CONTAINER_CODEX_PATH, readonly=True),
+        _mount(
+            code_mode_host_path,
+            CONTAINER_CODE_MODE_HOST_PATH,
+            readonly=True,
+        ),
         _mount(codex_home, CONTAINER_CODEX_HOME),
         _mount(auth_file, CONTAINER_CODEX_HOME / "auth.json", readonly=True),
         *_container_environment(inner.environment),
@@ -136,6 +160,10 @@ def build_docker_codex_plan(
     validate_work_item_id(work_item_id)
     turn_id = validate_turn_id(turn_id)
     codex_path = _mount_source(codex_path, "codex_path")
+    code_mode_host_path = _mount_source(
+        runtime.code_mode_host_path, "code_mode_host_path"
+    )
+    _validate_codex_tool_bundle(codex_path, code_mode_host_path)
     repository = _mount_source(repository, "repository")
     codex_home = _mount_source(codex_home, "codex_home")
     auth_file = _mount_source(auth_file, "auth_file")
@@ -162,6 +190,11 @@ def build_docker_codex_plan(
     argv = (
         *_docker_prefix(runtime, f"codex-{turn_id}"),
         _mount(codex_path, CONTAINER_CODEX_PATH, readonly=True),
+        _mount(
+            code_mode_host_path,
+            CONTAINER_CODE_MODE_HOST_PATH,
+            readonly=True,
+        ),
         _mount(repository, CONTAINER_REPOSITORY),
         _mount(codex_home, CONTAINER_CODEX_HOME),
         _mount(auth_file, CONTAINER_CODEX_HOME / "auth.json", readonly=True),
@@ -258,6 +291,17 @@ def _validate_work_item_mounts(repository: Path, codex_home: Path) -> None:
 def _validate_codex_home(codex_home: Path) -> None:
     if codex_home.name != "codex-home" or codex_home.parent.name != "runner-state":
         raise ValueError("codex_home must belong to one WorkItem runner-state")
+
+
+def _validate_codex_tool_bundle(
+    codex_path: Path, code_mode_host_path: Path
+) -> None:
+    if code_mode_host_path != codex_path.with_name(
+        CONTAINER_CODE_MODE_HOST_PATH.name
+    ):
+        raise ValueError(
+            "code_mode_host_path must be the fixed sibling of codex_path"
+        )
 
 
 def _absolute_host_path(value: Path, field: str) -> Path:

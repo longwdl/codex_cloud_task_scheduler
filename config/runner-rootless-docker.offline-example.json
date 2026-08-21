@@ -16,6 +16,7 @@
     "cli_config_directory": "/srv/codex-runner/run/docker-cli",
     "image": "replace.invalid/codex-runner@sha256:0000000000000000000000000000000000000000000000000000000000000000",
     "codex_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "code_mode_host_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
     "egress_proxy_url": "http://10.0.2.2:3128",
     "work_item_disk": {
       "image_directory": "/srv/codex-runner/work-item-images",

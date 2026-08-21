@@ -28,6 +28,11 @@ def config(root: Path) -> Path:
     schema = root / "schema.json"
     protected_file(git, "#!/bin/sh\nexit 0\n", executable=True)
     protected_file(codex, "#!/bin/sh\nexit 0\n", executable=True)
+    protected_file(
+        root / "codex-code-mode-host",
+        "#!/bin/sh\nexit 0\n",
+        executable=True,
+    )
     protected_file(schema, "{}\n")
     codex_home = root / "codex-home"
     codex_home.mkdir(mode=0o700, exist_ok=True)
@@ -97,6 +102,7 @@ class RunnerMainTests(unittest.TestCase):
                 "cli_config_directory": str(docker_config),
                 "image": "registry.example.invalid/codex-runner@sha256:" + "a" * 64,
                 "codex_sha256": "b" * 64,
+                "code_mode_host_sha256": "c" * 64,
                 "egress_proxy_url": ROOTLESS_HOST_PROXY_URL,
                 "work_item_disk": {
                     "image_directory": str(disk_images),
@@ -116,6 +122,15 @@ class RunnerMainTests(unittest.TestCase):
             self.assertEqual("rootless_docker", loaded.execution_mode)
             self.assertIsNotNone(loaded.docker_runtime)
             self.assertIsNotNone(loaded.work_item_disk)
+            assert loaded.docker_runtime is not None
+            self.assertEqual(
+                (root / "codex-code-mode-host").resolve(),
+                loaded.docker_runtime.code_mode_host_path,
+            )
+            self.assertEqual(
+                "c" * 64,
+                loaded.docker_runtime.code_mode_host_sha256,
+            )
             self.assertIsNotNone(build_runner_service(loaded))
 
     def test_rejects_implicit_partial_or_wrong_rootless_docker_configuration(self) -> None:
@@ -134,6 +149,7 @@ class RunnerMainTests(unittest.TestCase):
                     "cli_config_directory": str(docker_config),
                     "image": "registry.example.invalid/codex-runner@sha256:" + "a" * 64,
                     "codex_sha256": "b" * 64,
+                    "code_mode_host_sha256": "c" * 64,
                     "egress_proxy_url": ROOTLESS_HOST_PROXY_URL,
                     "work_item_disk": {
                         "image_directory": str(disk_images),
@@ -161,6 +177,48 @@ class RunnerMainTests(unittest.TestCase):
                 path.write_text(json.dumps(payload), encoding="utf-8")
 
                 with self.assertRaises(RunnerConfigurationError):
+                    load_runner_configuration(path)
+
+    def test_rootless_docker_requires_trusted_code_mode_host(self) -> None:
+        for failure in ("missing", "writable"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                path = config(root)
+                docker_config = root / "docker-config"
+                docker_config.mkdir(mode=0o700)
+                disk_images = root / "disk-images"
+                disk_images.mkdir(mode=0o700)
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["execution_mode"] = "rootless_docker"
+                payload["docker_runtime"] = {
+                    "docker_path": str(root / "git"),
+                    "docker_host": f"unix:///run/user/{os.geteuid()}/docker.sock",
+                    "cli_config_directory": str(docker_config),
+                    "image": "registry.example.invalid/codex-runner@sha256:" + "a" * 64,
+                    "codex_sha256": "b" * 64,
+                    "code_mode_host_sha256": "c" * 64,
+                    "egress_proxy_url": ROOTLESS_HOST_PROXY_URL,
+                    "work_item_disk": {
+                        "image_directory": str(disk_images),
+                        "image_size_bytes": 64 * 1024 * 1024,
+                        "host_reserve_bytes": 64 * 1024 * 1024,
+                        "mkfs_ext4_path": str(root / "git"),
+                        "fuse2fs_path": str(root / "git"),
+                        "fusermount_path": str(root / "git"),
+                        "e2fsck_path": str(root / "git"),
+                        "findmnt_path": str(root / "git"),
+                    },
+                }
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                code_mode_host = root / "codex-code-mode-host"
+                if failure == "missing":
+                    code_mode_host.unlink()
+                else:
+                    code_mode_host.chmod(0o722)
+
+                with self.assertRaisesRegex(
+                    RunnerConfigurationError, "code_mode_host_path"
+                ):
                     load_runner_configuration(path)
 
     def test_rejects_proxy_credentials_and_non_http_endpoints(self) -> None:

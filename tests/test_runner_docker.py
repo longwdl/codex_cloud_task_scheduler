@@ -85,6 +85,7 @@ def mount_source(target):
     raise AssertionError(f"missing mount {{target}}")
 
 assert mount_source("/usr/local/bin/codex").is_file()
+assert mount_source("/usr/local/bin/codex-code-mode-host").is_file()
 
 if codex[-2:] == ["login", "status"]:
     with Path({str(call_log)!r}).open("a", encoding="utf-8") as stream:
@@ -180,12 +181,19 @@ class RunnerDockerExecutionTests(unittest.TestCase):
         codex = root / "unused-codex"
         codex.write_bytes(b"fixture-codex-binary")
         codex.chmod(0o700)
+        code_mode_host = root / "codex-code-mode-host"
+        code_mode_host.write_bytes(b"fixture-code-mode-host-binary")
+        code_mode_host.chmod(0o700)
         runtime = DockerCodexRuntime(
             docker_path=docker,
             docker_host=f"unix://{socket_path}",
             cli_config_directory=docker_config,
             image=IMAGE,
             codex_sha256=sha256(codex.read_bytes()).hexdigest(),
+            code_mode_host_path=code_mode_host,
+            code_mode_host_sha256=sha256(
+                code_mode_host.read_bytes()
+            ).hexdigest(),
             egress_proxy_url=ROOTLESS_HOST_PROXY_URL,
         )
         shared_home = root / "shared-codex-home"
@@ -230,6 +238,8 @@ class RunnerDockerExecutionTests(unittest.TestCase):
                         first_prompt,
                     )
                     assert first.head_sha is not None
+                    paths = workspace.paths(WORK_ITEM)
+                    (paths.state / "codex-session-tools.json").unlink()
                     second_prompt = b"second change"
                     second = turns.execute(
                         _request(
@@ -255,9 +265,27 @@ class RunnerDockerExecutionTests(unittest.TestCase):
             self.assertEqual(WORK_ITEM, binding["work_item_id"])
             self.assertEqual(SESSION, binding["session_id"])
             self.assertEqual(IMAGE, binding["image"])
+            self.assertEqual(1, binding["version"])
+            self.assertNotIn("code_mode_host_sha256", binding)
             self.assertEqual(
                 sha256((root / "unused-codex").read_bytes()).hexdigest(),
                 binding["codex_sha256"],
+            )
+            tool_binding = json.loads(
+                (paths.state / "codex-session-tools.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(1, tool_binding["version"])
+            self.assertEqual(WORK_ITEM, tool_binding["work_item_id"])
+            self.assertEqual(SESSION, tool_binding["session_id"])
+            self.assertEqual(IMAGE, tool_binding["image"])
+            self.assertEqual(binding["codex_sha256"], tool_binding["codex_sha256"])
+            self.assertEqual(
+                sha256(
+                    (root / "codex-code-mode-host").read_bytes()
+                ).hexdigest(),
+                tool_binding["code_mode_host_sha256"],
             )
             self.assertTrue((paths.state / "codex-home").is_dir())
             self.assertEqual(
@@ -315,6 +343,56 @@ class RunnerDockerExecutionTests(unittest.TestCase):
             self.assertEqual("docker_boundary_invalid", reply.error_code)
             self.assertFalse(call_log.exists())
 
+    def test_resume_rejects_drifted_code_mode_host_session_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, turns, base_sha, call_log, socket_path, listener = self._setup(
+                root
+            )
+            assert listener is not None
+            try:
+                with patch(
+                    "codex_dispatcher.runner_docker._expected_rootless_socket",
+                    return_value=socket_path,
+                ):
+                    first_prompt = b"first change"
+                    first = turns.execute(
+                        _request(
+                            RunnerOperation.START,
+                            TURN_ONE,
+                            first_prompt,
+                            base_sha,
+                        ),
+                        first_prompt,
+                    )
+                    assert first.head_sha is not None
+                    binding_path = (
+                        workspace.paths(WORK_ITEM).state
+                        / "codex-session-tools.json"
+                    )
+                    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+                    binding["code_mode_host_sha256"] = "f" * 64
+                    binding_path.write_text(json.dumps(binding), encoding="utf-8")
+                    binding_path.chmod(0o600)
+                    second_prompt = b"must not resume"
+                    second = turns.execute(
+                        _request(
+                            RunnerOperation.RESUME,
+                            TURN_TWO,
+                            second_prompt,
+                            first.head_sha,
+                            session_id=SESSION,
+                        ),
+                        second_prompt,
+                    )
+            finally:
+                listener.close()
+
+            self.assertEqual(RunnerTurnRemoteState.FINISHED, first.state)
+            self.assertEqual(RunnerTurnRemoteState.FAILED, second.state)
+            self.assertEqual("docker_boundary_invalid", second.error_code)
+            self.assertEqual(["auth", "turn"], call_log.read_text().splitlines())
+
     def test_writable_auth_source_fails_before_docker(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -370,6 +448,39 @@ class RunnerDockerExecutionTests(unittest.TestCase):
             self.assertEqual(RunnerTurnRemoteState.FAILED, reply.state)
             self.assertEqual("docker_boundary_invalid", reply.error_code)
             self.assertFalse(call_log.exists())
+
+    def test_missing_or_changed_code_mode_host_fails_before_docker(self) -> None:
+        for failure in ("missing", "changed"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                _, turns, base_sha, call_log, socket_path, listener = self._setup(root)
+                assert listener is not None
+                code_mode_host = root / "codex-code-mode-host"
+                if failure == "missing":
+                    code_mode_host.unlink()
+                else:
+                    code_mode_host.write_bytes(b"changed-after-runtime-binding")
+                prompt = b"must not expose an incomplete Codex tool bundle"
+                try:
+                    with patch(
+                        "codex_dispatcher.runner_docker._expected_rootless_socket",
+                        return_value=socket_path,
+                    ):
+                        reply = turns.execute(
+                            _request(
+                                RunnerOperation.START,
+                                TURN_ONE,
+                                prompt,
+                                base_sha,
+                            ),
+                            prompt,
+                        )
+                finally:
+                    listener.close()
+
+                self.assertEqual(RunnerTurnRemoteState.FAILED, reply.state)
+                self.assertEqual("docker_boundary_invalid", reply.error_code)
+                self.assertFalse(call_log.exists())
 
     def test_drifted_image_or_network_fails_before_docker(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -5,10 +5,11 @@ It deliberately contains only Python 3.12, pip, Node.js 22, npm/npx, Bash, Git, 
 curl, GNU `timeout`, ripgrep, patch, and their runtime libraries. It has no compiler toolchain,
 Java, Go, Rust, Ruby, PHP, .NET, Swift, Bun, Gradle/Maven, browser, Docker CLI, or `sudo`.
 
-The host's independently hashed, static Codex CLI remains a read-only bind mount at
-`/usr/local/bin/codex`; it is not copied into the image. Repository, WorkItem session home,
-authentication, output Schema, network, resource, and read-only-root boundaries remain owned by the
-Runner invocation rather than this Dockerfile.
+The host's independently hashed, static Codex CLI and its fixed sibling
+`codex-code-mode-host` remain separate read-only bind mounts at `/usr/local/bin/codex` and
+`/usr/local/bin/codex-code-mode-host`; neither is copied into the image. Repository, WorkItem
+session home, authentication, output Schema, network, resource, and read-only-root boundaries
+remain owned by the Runner invocation rather than this Dockerfile.
 
 Both Docker Official Image inputs are versioned and digest-pinned. The Node stage contributes only
 the Node executable, npm/npx module, and Node license to the final Python image. Docker recommends
@@ -53,8 +54,9 @@ Before any auth mount or Prompt enters the image, prove with the production fixe
 3. The Docker socket, host paths, other WorkItems, and ambient Docker/SSH configuration are absent.
 4. Public access works only through the audited proxy; direct, unrelated public, private, metadata,
    host, and other-container access fail; stopping the proxy fails closed.
-5. The exact host Codex binary digest runs read-only, while no credential, Prompt, raw stream, or
-   complete output is printed or persisted outside the existing bounded protocol.
+5. The exact host Codex and code-mode-host binary digests run through separate read-only mounts,
+   while no credential, Prompt, raw stream, or complete output is printed or persisted outside the
+   existing bounded protocol.
 
 Push the candidate to the dedicated private GHCR package, pull it by RepoDigest, and configure only
 that lowercase `name@sha256:<digest>` identity. A locally built tag or image ID is insufficient

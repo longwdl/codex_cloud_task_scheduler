@@ -18,6 +18,8 @@ SESSION = "123e4567-e89b-12d3-a456-426614174000"
 IMAGE = "registry.example.invalid/codex-runner@sha256:" + "a" * 64
 CODEX_SHA256 = "b" * 64
 CODEX_PATH = Path("/srv/codex-runner/tools/codex/0.147.0/bin/codex")
+CODE_MODE_HOST_PATH = CODEX_PATH.with_name("codex-code-mode-host")
+CODE_MODE_HOST_SHA256 = "c" * 64
 PROXY_URL = "http://codex-egress-proxy:3128"
 DOCKER_CONFIG = Path("/srv/codex-runner/run/docker-cli")
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +32,8 @@ def runtime() -> DockerCodexRuntime:
         cli_config_directory=DOCKER_CONFIG,
         image=IMAGE,
         codex_sha256=CODEX_SHA256,
+        code_mode_host_path=CODE_MODE_HOST_PATH,
+        code_mode_host_sha256=CODE_MODE_HOST_SHA256,
         egress_proxy_url=PROXY_URL,
     )
 
@@ -54,6 +58,10 @@ class DockerCodexPlanTests(unittest.TestCase):
         self.assertEqual(
             "http://10.0.2.2:3128",
             payload["docker_runtime"]["egress_proxy_url"],
+        )
+        self.assertEqual(
+            "0" * 64,
+            payload["docker_runtime"]["code_mode_host_sha256"],
         )
 
     def test_turn_plan_is_digest_pinned_bounded_and_prompt_free(self) -> None:
@@ -151,21 +159,26 @@ class DockerCodexPlanTests(unittest.TestCase):
         )
         mounts = tuple(item for item in plan.argv if item.startswith("--mount="))
 
-        self.assertEqual(5, len(mounts))
+        self.assertEqual(6, len(mounts))
         self.assertEqual(
             f"--mount=type=bind,source={CODEX_PATH},target=/usr/local/bin/codex,readonly",
             mounts[0],
         )
-        self.assertIn(f"source={repository},target=/workspace", mounts[1])
-        self.assertIn(f"source={codex_home},target=/codex-home", mounts[2])
+        self.assertEqual(
+            f"--mount=type=bind,source={CODE_MODE_HOST_PATH},"
+            "target=/usr/local/bin/codex-code-mode-host,readonly",
+            mounts[1],
+        )
+        self.assertIn(f"source={repository},target=/workspace", mounts[2])
+        self.assertIn(f"source={codex_home},target=/codex-home", mounts[3])
         self.assertEqual(
             f"--mount=type=bind,source={auth_file},target=/codex-home/auth.json,readonly",
-            mounts[3],
+            mounts[4],
         )
         self.assertEqual(
             f"--mount=type=bind,source={schema},"
             "target=/runner-contract/agent-result.schema.json,readonly",
-            mounts[4],
+            mounts[5],
         )
         self.assertFalse(any("target=/srv" in item for item in mounts))
         self.assertFalse(any("source=/srv/codex-runner/app,target=" in item for item in mounts))
@@ -184,19 +197,24 @@ class DockerCodexPlanTests(unittest.TestCase):
         mounts = tuple(item for item in plan.argv if item.startswith("--mount="))
 
         self.assertFalse(plan.reads_prompt_from_stdin)
-        self.assertEqual(3, len(mounts))
+        self.assertEqual(4, len(mounts))
         self.assertIn("target=/usr/local/bin/codex,readonly", mounts[0])
+        self.assertIn(
+            "target=/usr/local/bin/codex-code-mode-host,readonly", mounts[1]
+        )
         self.assertEqual(("login", "status"), plan.argv[-2:])
         self.assertFalse(any("/workspace" in item for item in plan.argv))
         self.assertFalse(any("agent-result.schema" in item for item in plan.argv))
 
     def test_rejects_unpinned_images_nonunix_daemons_and_unsafe_mounts(self) -> None:
         compatible_runtime = DockerCodexRuntime(
-            Path("/usr/bin/docker"),
-            "unix:///run/user/998/docker.sock",
-            DOCKER_CONFIG,
-            IMAGE,
-            CODEX_SHA256,
+            docker_path=Path("/usr/bin/docker"),
+            docker_host="unix:///run/user/998/docker.sock",
+            cli_config_directory=DOCKER_CONFIG,
+            image=IMAGE,
+            codex_sha256=CODEX_SHA256,
+            code_mode_host_path=CODE_MODE_HOST_PATH,
+            code_mode_host_sha256=CODE_MODE_HOST_SHA256,
         )
         with self.assertRaisesRegex(ValueError, "audited egress proxy"):
             build_docker_login_status_plan(
@@ -210,39 +228,78 @@ class DockerCodexPlanTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "digest-pinned"):
             DockerCodexRuntime(
-                Path("/usr/bin/docker"),
-                "unix:///run/user/998/docker.sock",
-                DOCKER_CONFIG,
-                "registry.example.invalid/codex-runner:latest",
-                CODEX_SHA256,
-                PROXY_URL,
+                docker_path=Path("/usr/bin/docker"),
+                docker_host="unix:///run/user/998/docker.sock",
+                cli_config_directory=DOCKER_CONFIG,
+                image="registry.example.invalid/codex-runner:latest",
+                codex_sha256=CODEX_SHA256,
+                code_mode_host_path=CODE_MODE_HOST_PATH,
+                code_mode_host_sha256=CODE_MODE_HOST_SHA256,
+                egress_proxy_url=PROXY_URL,
             )
         with self.assertRaisesRegex(ValueError, "codex_sha256"):
             DockerCodexRuntime(
-                Path("/usr/bin/docker"),
-                "unix:///run/user/998/docker.sock",
-                DOCKER_CONFIG,
-                IMAGE,
-                "not-a-digest",
-                PROXY_URL,
+                docker_path=Path("/usr/bin/docker"),
+                docker_host="unix:///run/user/998/docker.sock",
+                cli_config_directory=DOCKER_CONFIG,
+                image=IMAGE,
+                codex_sha256="not-a-digest",
+                code_mode_host_path=CODE_MODE_HOST_PATH,
+                code_mode_host_sha256=CODE_MODE_HOST_SHA256,
+                egress_proxy_url=PROXY_URL,
+            )
+        with self.assertRaisesRegex(ValueError, "code_mode_host_sha256"):
+            DockerCodexRuntime(
+                docker_path=Path("/usr/bin/docker"),
+                docker_host="unix:///run/user/998/docker.sock",
+                cli_config_directory=DOCKER_CONFIG,
+                image=IMAGE,
+                codex_sha256=CODEX_SHA256,
+                code_mode_host_path=CODE_MODE_HOST_PATH,
+                code_mode_host_sha256="not-a-digest",
+                egress_proxy_url=PROXY_URL,
             )
         with self.assertRaisesRegex(ValueError, "Unix socket"):
             DockerCodexRuntime(
-                Path("/usr/bin/docker"),
-                "tcp://127.0.0.1:2375",
-                DOCKER_CONFIG,
-                IMAGE,
-                CODEX_SHA256,
-                PROXY_URL,
+                docker_path=Path("/usr/bin/docker"),
+                docker_host="tcp://127.0.0.1:2375",
+                cli_config_directory=DOCKER_CONFIG,
+                image=IMAGE,
+                codex_sha256=CODEX_SHA256,
+                code_mode_host_path=CODE_MODE_HOST_PATH,
+                code_mode_host_sha256=CODE_MODE_HOST_SHA256,
+                egress_proxy_url=PROXY_URL,
             )
         with self.assertRaisesRegex(ValueError, "egress_proxy_url"):
             DockerCodexRuntime(
-                Path("/usr/bin/docker"),
-                "unix:///run/user/998/docker.sock",
-                DOCKER_CONFIG,
-                IMAGE,
-                CODEX_SHA256,
-                "http://user:secret@codex-egress-proxy:3128",
+                docker_path=Path("/usr/bin/docker"),
+                docker_host="unix:///run/user/998/docker.sock",
+                cli_config_directory=DOCKER_CONFIG,
+                image=IMAGE,
+                codex_sha256=CODEX_SHA256,
+                code_mode_host_path=CODE_MODE_HOST_PATH,
+                code_mode_host_sha256=CODE_MODE_HOST_SHA256,
+                egress_proxy_url="http://user:secret@codex-egress-proxy:3128",
+            )
+        mismatched_runtime = DockerCodexRuntime(
+            docker_path=Path("/usr/bin/docker"),
+            docker_host="unix:///run/user/998/docker.sock",
+            cli_config_directory=DOCKER_CONFIG,
+            image=IMAGE,
+            codex_sha256=CODEX_SHA256,
+            code_mode_host_path=Path("/opt/other/codex-code-mode-host"),
+            code_mode_host_sha256=CODE_MODE_HOST_SHA256,
+            egress_proxy_url=PROXY_URL,
+        )
+        with self.assertRaisesRegex(ValueError, "fixed sibling"):
+            build_docker_login_status_plan(
+                runtime=mismatched_runtime,
+                work_item_id=WORK_ITEM,
+                codex_path=CODEX_PATH,
+                codex_home=Path(
+                    "/srv/codex-runner/work-items/owner__repo/issue-42/runner-state/codex-home"
+                ),
+                auth_file=Path("/srv/codex-runner/app/auth.json"),
             )
         with self.assertRaisesRegex(ValueError, "comma"):
             build_docker_login_status_plan(

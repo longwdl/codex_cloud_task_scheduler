@@ -19,6 +19,8 @@ Install immutable inputs as root-owned and non-group/world-writable:
 /srv/codex-runner/current                 root-owned symlink
 /srv/codex-runner/tools/                  root:root             0755
 /srv/codex-runner/tools/codex/0.147.0/    root:root             0755
+/srv/codex-runner/tools/codex/0.147.0/bin/codex root:root       0755
+/srv/codex-runner/tools/codex/0.147.0/bin/codex-code-mode-host root:root 0755
 /srv/codex-runner/bin/                    root:root             0755
 /srv/codex-runner/bin/codex-runner-v1     root:root             0755
 /srv/codex-runner/etc/                    root:codex-runner     0750
@@ -43,8 +45,10 @@ the existing ChatGPT login and session state and must be moved only by changing 
 same filesystem. Never copy, print, archive, or inspect credential contents during migration.
 
 The protected Runner configuration may be owned only by root or the executing account. Git, Codex,
-the output Schema, the work-item root, the active-lock parent, and an existing lock file are checked
-before the request frame is accepted. Every configured protected path also requires a complete
+the fixed sibling `codex-code-mode-host`, the output Schema, the work-item root, the active-lock
+parent, and an existing lock file are checked before the request frame is accepted. Rootless Docker
+configuration carries independent SHA-256 values for both Codex executables; both are rehashed
+immediately before each container command. Every configured protected path also requires a complete
 root-or-Runner-owned, non-writable parent chain so an administrator account without sudo cannot
 replace a trusted executable through a writable package-manager directory. Mutable directories and
 lock files must be owned by the executing account with no group or world access.

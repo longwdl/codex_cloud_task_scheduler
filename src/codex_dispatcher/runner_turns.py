@@ -272,6 +272,13 @@ class RunnerTurnExecutor:
                 auth_file=auth_file,
                 output_schema=self._output_schema,
             )
+            if request.operation is RunnerOperation.RESUME:
+                assert request.session_id is not None
+                bind_docker_session(
+                    context,
+                    work_item_id=request.work_item_id,
+                    session_id=request.session_id,
+                )
             plan = build_docker_codex_plan(
                 runtime=self._docker_runtime,
                 work_item_id=request.work_item_id,

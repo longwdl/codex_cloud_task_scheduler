@@ -14,6 +14,7 @@ from typing import Any, BinaryIO
 
 from codex_dispatcher.executors.codex_cli import validate_egress_proxy_url
 from codex_dispatcher.executors.codex_docker import (
+    CONTAINER_CODE_MODE_HOST_PATH,
     ROOTLESS_HOST_PROXY_URL,
     DockerCodexRuntime,
 )
@@ -159,6 +160,7 @@ def load_runner_configuration(path: Path) -> RunnerConfiguration:
     else:
         docker_runtime, work_item_disk = _load_docker_runtime(
             docker_payload,
+            codex_path=codex_path,
             work_items_root=work_items_root,
         )
     return RunnerConfiguration(
@@ -355,6 +357,7 @@ def _positive_number(value: Any, field: str) -> float:
 def _load_docker_runtime(
     payload: Any,
     *,
+    codex_path: Path,
     work_items_root: Path,
 ) -> tuple[DockerCodexRuntime, WorkItemDiskRuntime]:
     expected = {
@@ -363,12 +366,17 @@ def _load_docker_runtime(
         "cli_config_directory",
         "image",
         "codex_sha256",
+        "code_mode_host_sha256",
         "egress_proxy_url",
         "work_item_disk",
     }
     if not isinstance(payload, dict) or set(payload) != expected:
         raise RunnerConfigurationError("docker_runtime fields are invalid")
     docker_path = _protected_executable(payload["docker_path"], "docker_path")
+    code_mode_host_path = _protected_executable(
+        str(codex_path.with_name(CONTAINER_CODE_MODE_HOST_PATH.name)),
+        "code_mode_host_path",
+    )
     cli_config_directory = _protected_directory(
         payload["cli_config_directory"], "cli_config_directory"
     )
@@ -384,6 +392,8 @@ def _load_docker_runtime(
             cli_config_directory=cli_config_directory,
             image=payload["image"],
             codex_sha256=payload["codex_sha256"],
+            code_mode_host_path=code_mode_host_path,
+            code_mode_host_sha256=payload["code_mode_host_sha256"],
             egress_proxy_url=payload["egress_proxy_url"],
         )
     except (TypeError, ValueError) as exc:
