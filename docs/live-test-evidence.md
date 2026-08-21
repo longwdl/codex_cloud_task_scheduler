@@ -258,7 +258,9 @@ and zero containers. The existing proxy and nftables services remained active, a
 exited successfully with no active run, and a second read-only `ssh-preflight` again returned
 `idle`, `external_writes=false`, and `authorizes_apply=false`. The Dispatcher timer was restored.
 No GitHub, Slack, WorkItem, Turn, branch, pull request, Action, merge, deployment, release, or tag
-write was performed by this bootstrap.
+write was performed by this bootstrap. The temporary `s3` sudoers grant was moved into the
+root-only rollback directory at mode `0600`; an independent SSH connection then proved that
+passwordless sudo was no longer available while the rootless daemon remained active.
 
 This checkpoint proves only package provenance, rootless daemon ownership, rootful exclusion, and
 safe coexistence with the direct Runner. It does not admit container Turns. The next separately
