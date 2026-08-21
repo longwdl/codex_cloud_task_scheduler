@@ -16,6 +16,16 @@ the Node executable, npm/npx module, and Node license to the final Python image.
 Base-digest updates require a new review, build, package inventory, vulnerability report, and final
 runtime digest; a floating tag must never enter Runner configuration.
 
+The Node 22.23.2 release still bundles npm 10.9.8 with fixable high and critical findings in npm's
+own dependency tree. The build therefore pins the Node-22-compatible npm 11.19.0 release and stages
+two exact patch-level transitive updates, `brace-expansion@5.0.9` and `ip-address@10.3.1`, in an empty
+temporary prefix before replacing only those packages and `balanced-match@4.0.4` in npm's dependency
+tree. The build and runtime gates verify those versions plus the expected `picomatch@4.0.4`,
+`sigstore@4.1.1`, and `tar@7.5.19` versions. These overrides must be removed or updated only after a
+new independently scanned npm release contains the same or newer fixes.
+The final stage also rewrites the fixed Debian mirror entries to HTTPS before the first package
+operation; the audited build proxy never needs to permit plaintext HTTP.
+
 ## Build gate
 
 Build only for `linux/amd64` on an isolated reviewed builder. Do not pass secrets, auth files, SSH

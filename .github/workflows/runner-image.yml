@@ -57,7 +57,13 @@ jobs:
               test "$(python3 -c '\''import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'\'')" = 3.12
               test "$(node -p '\''process.versions.node.split(".")[0]'\'')" = 22
               python3 -m pip --version
-              npm --version
+              test "$(npm --version)" = 11.19.0
+              test "$(node -p '\''require("/usr/local/lib/node_modules/npm/node_modules/balanced-match/package.json").version'\'')" = 4.0.4
+              test "$(node -p '\''require("/usr/local/lib/node_modules/npm/node_modules/brace-expansion/package.json").version'\'')" = 5.0.9
+              test "$(node -p '\''require("/usr/local/lib/node_modules/npm/node_modules/ip-address/package.json").version'\'')" = 10.3.1
+              test "$(node -p '\''require("/usr/local/lib/node_modules/npm/node_modules/tinyglobby/node_modules/picomatch/package.json").version'\'')" = 4.0.4
+              test "$(node -p '\''require("/usr/local/lib/node_modules/npm/node_modules/sigstore/package.json").version'\'')" = 4.1.1
+              test "$(node -p '\''require("/usr/local/lib/node_modules/npm/node_modules/tar/package.json").version'\'')" = 7.5.19
               npx --version
               git --version
               curl --version
@@ -128,7 +134,13 @@ jobs:
               test "$(python3 -c '\''import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'\'')" = 3.12
               test "$(node -p '\''process.versions.node.split(".")[0]'\'')" = 22
               python3 -m pip --version
-              npm --version
+              test "$(npm --version)" = 11.19.0
+              test "$(node -p '\''require("/usr/local/lib/node_modules/npm/node_modules/balanced-match/package.json").version'\'')" = 4.0.4
+              test "$(node -p '\''require("/usr/local/lib/node_modules/npm/node_modules/brace-expansion/package.json").version'\'')" = 5.0.9
+              test "$(node -p '\''require("/usr/local/lib/node_modules/npm/node_modules/ip-address/package.json").version'\'')" = 10.3.1
+              test "$(node -p '\''require("/usr/local/lib/node_modules/npm/node_modules/tinyglobby/node_modules/picomatch/package.json").version'\'')" = 4.0.4
+              test "$(node -p '\''require("/usr/local/lib/node_modules/npm/node_modules/sigstore/package.json").version'\'')" = 4.1.1
+              test "$(node -p '\''require("/usr/local/lib/node_modules/npm/node_modules/tar/package.json").version'\'')" = 7.5.19
               npx --version
               git --version
               curl --version

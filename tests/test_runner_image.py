@@ -28,9 +28,34 @@ class RunnerImageTests(unittest.TestCase):
                     r"(?: AS [a-z_]+)?$"
                 ),
             )
-        self.assertIn("node:22.23.1-trixie-slim@sha256:", from_lines[0])
-        self.assertIn("python:3.12.13-slim-trixie@sha256:", from_lines[1])
+        self.assertIn("node:22.23.2-trixie-slim@sha256:", from_lines[0])
+        self.assertIn("python:3.12.14-slim-trixie@sha256:", from_lines[1])
+        for pinned_npm_input in (
+            "npm@11.19.0",
+            "brace-expansion@5.0.9",
+            "ip-address@10.3.1",
+        ):
+            self.assertIn(pinned_npm_input, dockerfile)
+        for verified_npm_version in (
+            "balanced-match/package.json\").version')\" = 4.0.4",
+            "brace-expansion/package.json\").version')\" = 5.0.9",
+            "ip-address/package.json\").version')\" = 10.3.1",
+            "tinyglobby/node_modules/picomatch/package.json\").version')\" = 4.0.4",
+            "sigstore/package.json\").version')\" = 4.1.1",
+            "tar/package.json\").version')\" = 7.5.19",
+        ):
+            self.assertIn(verified_npm_version, dockerfile)
+        self.assertIn("--prefix=/tmp/npm-hotfix", dockerfile)
+        self.assertIn("rm -rf /tmp/npm-cache /tmp/npm-hotfix", dockerfile)
+        self.assertEqual(2, dockerfile.count('npm --version)" = 11.19.0'))
+        self.assertNotIn("npm@latest", dockerfile)
         self.assertIn("apt-get install -y --no-install-recommends", dockerfile)
+        self.assertIn("https://deb.debian.org", dockerfile)
+        self.assertIn(
+            "sed -i 's|http://deb.debian.org|https://deb.debian.org|g'",
+            dockerfile,
+        )
+        self.assertIn("! grep -F 'URIs: http://'", dockerfile)
         self.assertIn("rm -rf /var/lib/apt/lists/* /tmp/npm-cache", dockerfile)
         for required in (
             "curl",
@@ -71,6 +96,9 @@ class RunnerImageTests(unittest.TestCase):
             "docker image rm",
             "Never use `docker system prune`",
             "must fail closed",
+            "npm 11.19.0",
+            "`brace-expansion@5.0.9`",
+            "`ip-address@10.3.1`",
         ):
             self.assertIn(required, normalized)
 
@@ -95,6 +123,7 @@ class RunnerImageTests(unittest.TestCase):
             "--security-opt=no-new-privileges=true",
             "--pull=never",
             "deploy/runner/image/Dockerfile",
+            "node -p '\\''require(\"/usr/local/lib/node_modules/npm/",
         ):
             self.assertIn(required, workflow)
         for prohibited in (
