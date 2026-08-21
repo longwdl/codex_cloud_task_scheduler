@@ -102,6 +102,7 @@ class RunnerEgressDeploymentTests(unittest.TestCase):
         self.assertIn("rotate 30", rotation)
         self.assertIn("maxsize 100M", rotation)
         self.assertIn("create 0640 proxy proxy", rotation)
+        self.assertNotIn("su proxy proxy", rotation)
         self.assertNotIn("|| true", rotation)
         self.assertIn(
             "f /var/log/squid/codex-egress-access.log 0640 proxy proxy -",

@@ -62,7 +62,8 @@ Prompt, TLS content or full Codex output. Plain HTTP is denied before use, and T
 Keep 30 daily compressed rotations, mode `0640`, writable only by the proxy service and readable by
 root for audit. A root-only tmpfiles rule creates both logs without truncating existing audit data;
 the worker can append to the files but cannot replace them because the log directory remains
-root-owned and non-writable to `proxy`. The proxy log is operational evidence, not a replay source. Correlate it to the
+root-owned and non-writable to `proxy`. Logrotate therefore performs the rename as root and creates
+each replacement as `proxy:proxy 0640`. The proxy log is operational evidence, not a replay source. Correlate it to the
 globally single active Turn by timestamp and durable Turn ID in the Runner/Dispatcher stores; never
 place a WorkItem ID, Turn ID or Prompt in the proxy URL or authentication fields.
 

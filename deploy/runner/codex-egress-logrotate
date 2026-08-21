@@ -7,7 +7,6 @@
     missingok
     notifempty
     create 0640 proxy proxy
-    su proxy proxy
     sharedscripts
     postrotate
         /usr/sbin/squid -f /etc/squid/codex-egress.conf -k rotate >/dev/null 2>&1
