@@ -52,7 +52,8 @@ class LinuxRunnerService:
         try:
             if request.operation is RunnerOperation.PREPARE:
                 assert source_artifact is not None
-                ack = self._workspace.prepare(request, source_artifact)
+                with self._active_turn_lock():
+                    ack = self._workspace.prepare(request, source_artifact)
                 output = RunnerWireOutput(ack.to_json().encode("utf-8"))
             elif request.operation in {RunnerOperation.START, RunnerOperation.RESUME}:
                 with self._active_turn_lock():

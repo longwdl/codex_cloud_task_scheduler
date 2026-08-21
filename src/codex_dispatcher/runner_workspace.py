@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from codex_dispatcher.command_runner import CommandResult, run_command
+from codex_dispatcher.runner_disk import FusedWorkItemDisk, RunnerDiskError
 from codex_dispatcher.runner_protocol import RunnerOperation, RunnerRequest
 from codex_dispatcher.runner_transport import (
     MAX_ARTIFACT_BYTES,
@@ -68,6 +69,7 @@ class RunnerWorkspace:
         git_path: str | Path,
         work_items_root: Path,
         timeout_seconds: float = 120.0,
+        work_item_disk: FusedWorkItemDisk | None = None,
     ) -> None:
         executable = str(git_path)
         if not executable or not Path(executable).is_absolute():
@@ -83,6 +85,7 @@ class RunnerWorkspace:
         self._git_path = executable
         self._root = work_items_root
         self._timeout_seconds = timeout_seconds
+        self._work_item_disk = work_item_disk
 
     def prepare(self, request: RunnerRequest, source_bundle: bytes) -> RunnerAck:
         if request.operation is not RunnerOperation.PREPARE:
@@ -110,6 +113,8 @@ class RunnerWorkspace:
         self._prepare_root()
         if paths.root.is_symlink():
             raise RunnerWorkspaceError("WorkItem directory must not be a symbolic link")
+        if self._work_item_disk is not None:
+            return self._prepare_bounded(request, source_bundle, metadata, paths)
         existing = self._read_registry(request.work_item_id, required=False)
         if existing is not None:
             if existing != metadata:
@@ -168,6 +173,7 @@ class RunnerWorkspace:
         metadata = self._read_registry(validate_work_item_id(work_item_id), required=True)
         assert metadata is not None
         paths = self._paths_for_metadata(metadata)
+        self._ensure_bounded_mount(metadata.work_item_id, paths.root)
         self._validate_directory_identity(paths, metadata)
         return paths
 
@@ -180,12 +186,14 @@ class RunnerWorkspace:
         input_head_sha = validate_git_sha(input_head_sha, "input_head_sha")
         metadata = self.metadata(work_item_id)
         paths = self._paths_for_metadata(metadata)
+        self._ensure_bounded_mount(metadata.work_item_id, paths.root)
         self._validate_prepared(paths, metadata, expected_head=input_head_sha)
         return paths
 
     def current_head(self, work_item_id: str, *, require_clean: bool = True) -> str:
         metadata = self.metadata(work_item_id)
         paths = self._paths_for_metadata(metadata)
+        self._ensure_bounded_mount(metadata.work_item_id, paths.root)
         self._validate_directory_identity(paths, metadata)
         branch = self._run(
             paths.repository,
@@ -259,6 +267,76 @@ class RunnerWorkspace:
             size_bytes=len(artifact),
         )
         return RunnerWireOutput(manifest.to_json().encode("utf-8"), artifact)
+
+    def _prepare_bounded(
+        self,
+        request: RunnerRequest,
+        source_bundle: bytes,
+        metadata: RunnerWorkspaceMetadata,
+        paths: RunnerWorkspacePaths,
+    ) -> RunnerAck:
+        assert self._work_item_disk is not None
+        existing = self._read_registry(request.work_item_id, required=False)
+        if existing is not None:
+            if existing != metadata:
+                raise RunnerWorkspaceError("WorkItem registry identity conflicts with PREPARE")
+            self._ensure_bounded_mount(request.work_item_id, paths.root)
+            self._validate_prepared(paths, metadata, expected_head=metadata.base_sha)
+            return RunnerAck(RunnerOperation.PREPARE, request.work_item_id)
+        try:
+            final_image_exists = self._work_item_disk.final_image_exists(
+                request.work_item_id
+            )
+        except RunnerDiskError as exc:
+            raise RunnerWorkspaceError("WorkItem disk state is ambiguous") from exc
+        if final_image_exists:
+            self._ensure_bounded_mount(request.work_item_id, paths.root)
+            recovered = self._read_metadata(paths.state / "workspace.json")
+            if recovered != metadata:
+                raise RunnerWorkspaceError("existing WorkItem disk identity conflicts")
+            self._validate_prepared(paths, metadata, expected_head=metadata.base_sha)
+            self._write_registry(metadata)
+            return RunnerAck(RunnerOperation.PREPARE, request.work_item_id)
+        try:
+            with self._work_item_disk.provision(
+                request.work_item_id, paths.root
+            ) as staging:
+                staging_paths = RunnerWorkspacePaths(
+                    staging,
+                    staging / "repo",
+                    staging / "runner-state",
+                )
+                staging_paths.repository.mkdir(mode=0o700)
+                staging_paths.state.mkdir(mode=0o700)
+                bundle_path = staging_paths.state / "source.bundle"
+                self._write_bytes(bundle_path, source_bundle)
+                try:
+                    self._initialize_repository(
+                        staging_paths.repository, bundle_path, metadata
+                    )
+                    self._write_json(
+                        staging_paths.state / "workspace.json",
+                        metadata.to_mapping(),
+                    )
+                    bundle_path.unlink()
+                finally:
+                    try:
+                        bundle_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        except RunnerDiskError as exc:
+            raise RunnerWorkspaceError("WorkItem disk provisioning failed") from exc
+        self._validate_prepared(paths, metadata, expected_head=metadata.base_sha)
+        self._write_registry(metadata)
+        return RunnerAck(RunnerOperation.PREPARE, request.work_item_id)
+
+    def _ensure_bounded_mount(self, work_item_id: str, mountpoint: Path) -> None:
+        if self._work_item_disk is None:
+            return
+        try:
+            self._work_item_disk.ensure_mounted(work_item_id, mountpoint)
+        except RunnerDiskError as exc:
+            raise RunnerWorkspaceError("WorkItem disk boundary is unavailable") from exc
 
     def _initialize_repository(
         self,

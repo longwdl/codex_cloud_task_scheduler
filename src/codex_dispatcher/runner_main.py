@@ -17,6 +17,10 @@ from codex_dispatcher.executors.codex_docker import (
     ROOTLESS_HOST_PROXY_URL,
     DockerCodexRuntime,
 )
+from codex_dispatcher.runner_disk import (
+    FusedWorkItemDisk,
+    WorkItemDiskRuntime,
+)
 from codex_dispatcher.runner_protocol import RunnerProtocolError
 from codex_dispatcher.runner_service import LinuxRunnerService, serve_one
 from codex_dispatcher.runner_transport import RunnerTransportRejected
@@ -46,15 +50,22 @@ class RunnerConfiguration:
     egress_proxy_url: str | None
     execution_mode: str = "direct"
     docker_runtime: DockerCodexRuntime | None = None
+    work_item_disk: WorkItemDiskRuntime | None = None
 
     def __post_init__(self) -> None:
-        if self.execution_mode == "direct" and self.docker_runtime is None:
-            return
-        if self.execution_mode == "rootless_docker" and isinstance(
-            self.docker_runtime, DockerCodexRuntime
+        if (
+            self.execution_mode == "direct"
+            and self.docker_runtime is None
+            and self.work_item_disk is None
         ):
             return
-        raise ValueError("execution_mode and docker_runtime are inconsistent")
+        if (
+            self.execution_mode == "rootless_docker"
+            and isinstance(self.docker_runtime, DockerCodexRuntime)
+            and isinstance(self.work_item_disk, WorkItemDiskRuntime)
+        ):
+            return
+        raise ValueError("execution mode, Docker, and WorkItem disk are inconsistent")
 
 
 def load_runner_configuration(path: Path) -> RunnerConfiguration:
@@ -144,8 +155,12 @@ def load_runner_configuration(path: Path) -> RunnerConfiguration:
                 "docker_runtime requires rootless_docker execution_mode"
             )
         docker_runtime = None
+        work_item_disk = None
     else:
-        docker_runtime = _load_docker_runtime(docker_payload)
+        docker_runtime, work_item_disk = _load_docker_runtime(
+            docker_payload,
+            work_items_root=work_items_root,
+        )
     return RunnerConfiguration(
         git_path=git_path,
         codex_path=codex_path,
@@ -158,6 +173,7 @@ def load_runner_configuration(path: Path) -> RunnerConfiguration:
         egress_proxy_url=egress_proxy_url,
         execution_mode=execution_mode,
         docker_runtime=docker_runtime,
+        work_item_disk=work_item_disk,
     )
 
 
@@ -168,6 +184,14 @@ def build_runner_service(configuration: RunnerConfiguration) -> LinuxRunnerServi
         git_path=configuration.git_path,
         work_items_root=configuration.work_items_root,
         timeout_seconds=configuration.git_timeout_seconds,
+        work_item_disk=(
+            FusedWorkItemDisk(
+                configuration.work_item_disk,
+                work_items_root=configuration.work_items_root,
+            )
+            if configuration.work_item_disk is not None
+            else None
+        ),
     )
     turns = RunnerTurnExecutor(
         workspace=workspace,
@@ -328,13 +352,19 @@ def _positive_number(value: Any, field: str) -> float:
     return float(value)
 
 
-def _load_docker_runtime(payload: Any) -> DockerCodexRuntime:
+def _load_docker_runtime(
+    payload: Any,
+    *,
+    work_items_root: Path,
+) -> tuple[DockerCodexRuntime, WorkItemDiskRuntime]:
     expected = {
         "docker_path",
         "docker_host",
         "cli_config_directory",
         "image",
+        "codex_sha256",
         "egress_proxy_url",
+        "work_item_disk",
     }
     if not isinstance(payload, dict) or set(payload) != expected:
         raise RunnerConfigurationError("docker_runtime fields are invalid")
@@ -348,15 +378,70 @@ def _load_docker_runtime(payload: Any) -> DockerCodexRuntime:
     if payload["egress_proxy_url"] != ROOTLESS_HOST_PROXY_URL:
         raise RunnerConfigurationError("Docker egress_proxy_url is invalid")
     try:
-        return DockerCodexRuntime(
+        docker_runtime = DockerCodexRuntime(
             docker_path=docker_path,
             docker_host=payload["docker_host"],
             cli_config_directory=cli_config_directory,
             image=payload["image"],
+            codex_sha256=payload["codex_sha256"],
             egress_proxy_url=payload["egress_proxy_url"],
         )
     except (TypeError, ValueError) as exc:
         raise RunnerConfigurationError("docker_runtime values are invalid") from exc
+    disk = _load_work_item_disk(
+        payload["work_item_disk"],
+        work_items_root=work_items_root,
+    )
+    return docker_runtime, disk
+
+
+def _load_work_item_disk(
+    payload: Any,
+    *,
+    work_items_root: Path,
+) -> WorkItemDiskRuntime:
+    expected = {
+        "image_directory",
+        "image_size_bytes",
+        "host_reserve_bytes",
+        "mkfs_ext4_path",
+        "fuse2fs_path",
+        "fusermount_path",
+        "e2fsck_path",
+        "findmnt_path",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected:
+        raise RunnerConfigurationError("work_item_disk fields are invalid")
+    image_directory = _protected_directory(
+        payload["image_directory"], "work_item_disk image_directory"
+    )
+    try:
+        image_directory.relative_to(work_items_root)
+    except ValueError:
+        pass
+    else:
+        raise RunnerConfigurationError(
+            "work_item_disk images must remain outside work_items_root"
+        )
+    executables = {
+        field: _protected_executable(payload[field], f"work_item_disk {field}")
+        for field in (
+            "mkfs_ext4_path",
+            "fuse2fs_path",
+            "fusermount_path",
+            "e2fsck_path",
+            "findmnt_path",
+        )
+    }
+    try:
+        return WorkItemDiskRuntime(
+            image_directory=image_directory,
+            image_size_bytes=payload["image_size_bytes"],
+            host_reserve_bytes=payload["host_reserve_bytes"],
+            **executables,
+        )
+    except (TypeError, ValueError) as exc:
+        raise RunnerConfigurationError("work_item_disk values are invalid") from exc
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

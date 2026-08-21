@@ -87,6 +87,8 @@ class RunnerMainTests(unittest.TestCase):
             path = config(root)
             docker_config = root / "docker-config"
             docker_config.mkdir(mode=0o700)
+            disk_images = root / "disk-images"
+            disk_images.mkdir(mode=0o700)
             payload = json.loads(path.read_text(encoding="utf-8"))
             payload["execution_mode"] = "rootless_docker"
             payload["docker_runtime"] = {
@@ -94,7 +96,18 @@ class RunnerMainTests(unittest.TestCase):
                 "docker_host": f"unix:///run/user/{os.geteuid()}/docker.sock",
                 "cli_config_directory": str(docker_config),
                 "image": "registry.example.invalid/codex-runner@sha256:" + "a" * 64,
+                "codex_sha256": "b" * 64,
                 "egress_proxy_url": ROOTLESS_HOST_PROXY_URL,
+                "work_item_disk": {
+                    "image_directory": str(disk_images),
+                    "image_size_bytes": 64 * 1024 * 1024,
+                    "host_reserve_bytes": 64 * 1024 * 1024,
+                    "mkfs_ext4_path": str(root / "git"),
+                    "fuse2fs_path": str(root / "git"),
+                    "fusermount_path": str(root / "git"),
+                    "e2fsck_path": str(root / "git"),
+                    "findmnt_path": str(root / "git"),
+                },
             }
             path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -102,6 +115,7 @@ class RunnerMainTests(unittest.TestCase):
 
             self.assertEqual("rootless_docker", loaded.execution_mode)
             self.assertIsNotNone(loaded.docker_runtime)
+            self.assertIsNotNone(loaded.work_item_disk)
             self.assertIsNotNone(build_runner_service(loaded))
 
     def test_rejects_implicit_partial_or_wrong_rootless_docker_configuration(self) -> None:
@@ -112,12 +126,25 @@ class RunnerMainTests(unittest.TestCase):
                 path = config(root)
                 docker_config = root / "docker-config"
                 docker_config.mkdir(mode=0o700)
+                disk_images = root / "disk-images"
+                disk_images.mkdir(mode=0o700)
                 runtime = {
                     "docker_path": str(root / "git"),
                     "docker_host": f"unix:///run/user/{os.geteuid()}/docker.sock",
                     "cli_config_directory": str(docker_config),
                     "image": "registry.example.invalid/codex-runner@sha256:" + "a" * 64,
+                    "codex_sha256": "b" * 64,
                     "egress_proxy_url": ROOTLESS_HOST_PROXY_URL,
+                    "work_item_disk": {
+                        "image_directory": str(disk_images),
+                        "image_size_bytes": 64 * 1024 * 1024,
+                        "host_reserve_bytes": 64 * 1024 * 1024,
+                        "mkfs_ext4_path": str(root / "git"),
+                        "fuse2fs_path": str(root / "git"),
+                        "fusermount_path": str(root / "git"),
+                        "e2fsck_path": str(root / "git"),
+                        "findmnt_path": str(root / "git"),
+                    },
                 }
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 payload["docker_runtime"] = runtime

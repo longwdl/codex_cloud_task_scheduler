@@ -23,6 +23,8 @@ CONTAINER_TIMEOUT_PATH = Path("/usr/bin/timeout")
 CONTAINER_REPOSITORY = Path("/workspace")
 CONTAINER_SCHEMA = Path("/runner-contract/agent-result.schema.json")
 DOCKER_NETWORK = "codex-egress"
+DOCKER_NETWORK_SUBNET = "172.30.0.0/24"
+DOCKER_NETWORK_GATEWAY = "172.30.0.1"
 ROOTLESS_HOST_PROXY_URL = "http://10.0.2.2:3128"
 CPU_LIMIT = "2.0"
 MEMORY_LIMIT_BYTES = 8 * 1024 * 1024 * 1024
@@ -32,6 +34,7 @@ AUTH_TIMEOUT_SECONDS = 20
 CONTAINER_KILL_GRACE_SECONDS = 5
 
 _IMAGE_RE = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +45,7 @@ class DockerCodexRuntime:
     docker_host: str
     cli_config_directory: Path
     image: str
+    codex_sha256: str
     egress_proxy_url: str | None = None
 
     def __post_init__(self) -> None:
@@ -58,6 +62,11 @@ class DockerCodexRuntime:
         _absolute_host_path(socket_path, "docker_host socket")
         if not isinstance(self.image, str) or not _IMAGE_RE.fullmatch(self.image):
             raise ValueError("image must be a lowercase digest-pinned reference")
+        if (
+            not isinstance(self.codex_sha256, str)
+            or not _SHA256_RE.fullmatch(self.codex_sha256)
+        ):
+            raise ValueError("codex_sha256 must be a lowercase SHA-256 digest")
         if self.egress_proxy_url is not None:
             validate_egress_proxy_url(self.egress_proxy_url)
 
@@ -73,12 +82,14 @@ def build_docker_login_status_plan(
     *,
     runtime: DockerCodexRuntime,
     work_item_id: str,
+    codex_path: Path,
     codex_home: Path,
     auth_file: Path,
 ) -> DockerCodexPlan:
     """Run only the fixed ChatGPT login-status check in one WorkItem boundary."""
     proxy_url = _required_proxy_url(runtime)
     work_item_id = validate_work_item_id(work_item_id)
+    codex_path = _mount_source(codex_path, "codex_path")
     codex_home = _mount_source(codex_home, "codex_home")
     auth_file = _mount_source(auth_file, "auth_file")
     _validate_codex_home(codex_home)
@@ -91,6 +102,7 @@ def build_docker_login_status_plan(
     )
     argv = (
         *_docker_prefix(runtime, f"codex-auth-{work_item_id}"),
+        _mount(codex_path, CONTAINER_CODEX_PATH, readonly=True),
         _mount(codex_home, CONTAINER_CODEX_HOME),
         _mount(auth_file, CONTAINER_CODEX_HOME / "auth.json", readonly=True),
         *_container_environment(inner.environment),
@@ -111,6 +123,7 @@ def build_docker_codex_plan(
     runtime: DockerCodexRuntime,
     work_item_id: str,
     turn_id: str,
+    codex_path: Path,
     repository: Path,
     codex_home: Path,
     auth_file: Path,
@@ -122,6 +135,7 @@ def build_docker_codex_plan(
     proxy_url = _required_proxy_url(runtime)
     validate_work_item_id(work_item_id)
     turn_id = validate_turn_id(turn_id)
+    codex_path = _mount_source(codex_path, "codex_path")
     repository = _mount_source(repository, "repository")
     codex_home = _mount_source(codex_home, "codex_home")
     auth_file = _mount_source(auth_file, "auth_file")
@@ -147,6 +161,7 @@ def build_docker_codex_plan(
     )
     argv = (
         *_docker_prefix(runtime, f"codex-{turn_id}"),
+        _mount(codex_path, CONTAINER_CODEX_PATH, readonly=True),
         _mount(repository, CONTAINER_REPOSITORY),
         _mount(codex_home, CONTAINER_CODEX_HOME),
         _mount(auth_file, CONTAINER_CODEX_HOME / "auth.json", readonly=True),
@@ -176,6 +191,7 @@ def _docker_prefix(runtime: DockerCodexRuntime, name: str) -> tuple[str, ...]:
         f"--name={name}",
         "--interactive",
         "--init",
+        "--entrypoint=",
         "--user=0:0",
         "--read-only",
         f"--network={DOCKER_NETWORK}",

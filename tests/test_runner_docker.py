@@ -10,10 +10,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from codex_dispatcher.executors.codex_docker import (
+    DOCKER_NETWORK,
+    DOCKER_NETWORK_GATEWAY,
+    DOCKER_NETWORK_SUBNET,
     ROOTLESS_HOST_PROXY_URL,
     DockerCodexRuntime,
 )
-from codex_dispatcher.command_runner import BinaryCommandResult
+from codex_dispatcher.command_runner import BinaryCommandResult, CommandResult
 from codex_dispatcher.runner_protocol import RunnerOperation, RunnerRequest
 from codex_dispatcher.runner_transport import RunnerTurnRemoteState
 from codex_dispatcher.runner_turns import RunnerTurnError, RunnerTurnExecutor
@@ -39,8 +42,33 @@ from pathlib import Path
 assert os.environ.get("DOCKER_CONFIG") == {str(docker_config)!r}
 assert "HOME" not in os.environ
 args = sys.argv[1:]
+command = args[1:]
+if command[:3] == ["image", "inspect", {IMAGE!r}]:
+    print(json.dumps({{"Os":"linux","Architecture":"amd64","RepoDigests":[{IMAGE!r}]}}))
+    raise SystemExit(0)
+if command[:3] == ["network", "inspect", {DOCKER_NETWORK!r}]:
+    print(json.dumps({{
+        "Name": {DOCKER_NETWORK!r},
+        "Driver": "bridge",
+        "Scope": "local",
+        "Internal": False,
+        "Attachable": False,
+        "Ingress": False,
+        "EnableIPv6": False,
+        "Containers": {{}},
+        "IPAM": {{"Driver":"default","Config":[{{
+            "Subnet": {DOCKER_NETWORK_SUBNET!r},
+            "Gateway": {DOCKER_NETWORK_GATEWAY!r},
+        }}]}},
+        "Options": {{
+            "com.docker.network.bridge.enable_icc": "false",
+            "com.docker.network.bridge.enable_ip_masquerade": "true",
+        }},
+    }}))
+    raise SystemExit(0)
 assert "--user=0:0" in args
 assert "--network=codex-egress" in args
+assert "--entrypoint=" in args
 assert "--env=HTTP_PROXY={ROOTLESS_HOST_PROXY_URL}" in args
 image_index = args.index({IMAGE!r})
 inner = args[image_index + 1:]
@@ -55,6 +83,8 @@ def mount_source(target):
                 if field.startswith("source="):
                     return Path(field.removeprefix("source="))
     raise AssertionError(f"missing mount {{target}}")
+
+assert mount_source("/usr/local/bin/codex").is_file()
 
 if codex[-2:] == ["login", "status"]:
     with Path({str(call_log)!r}).open("a", encoding="utf-8") as stream:
@@ -147,11 +177,15 @@ class RunnerDockerExecutionTests(unittest.TestCase):
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             listener.bind(str(socket_path))
             socket_path.chmod(0o600)
+        codex = root / "unused-codex"
+        codex.write_bytes(b"fixture-codex-binary")
+        codex.chmod(0o700)
         runtime = DockerCodexRuntime(
             docker_path=docker,
             docker_host=f"unix://{socket_path}",
             cli_config_directory=docker_config,
             image=IMAGE,
+            codex_sha256=sha256(codex.read_bytes()).hexdigest(),
             egress_proxy_url=ROOTLESS_HOST_PROXY_URL,
         )
         shared_home = root / "shared-codex-home"
@@ -164,7 +198,7 @@ class RunnerDockerExecutionTests(unittest.TestCase):
         schema.chmod(0o600)
         turns = RunnerTurnExecutor(
             workspace=workspace,
-            codex_path=root / "unused-codex",
+            codex_path=codex,
             codex_home=shared_home,
             output_schema=schema,
             timeout_seconds=10,
@@ -221,6 +255,10 @@ class RunnerDockerExecutionTests(unittest.TestCase):
             self.assertEqual(WORK_ITEM, binding["work_item_id"])
             self.assertEqual(SESSION, binding["session_id"])
             self.assertEqual(IMAGE, binding["image"])
+            self.assertEqual(
+                sha256((root / "unused-codex").read_bytes()).hexdigest(),
+                binding["codex_sha256"],
+            )
             self.assertTrue((paths.state / "codex-home").is_dir())
             self.assertEqual(
                 ["auth", "turn", "auth", "turn"],
@@ -296,6 +334,72 @@ class RunnerDockerExecutionTests(unittest.TestCase):
                             prompt,
                             base_sha,
                         ),
+                        prompt,
+                    )
+            finally:
+                listener.close()
+
+            self.assertEqual(RunnerTurnRemoteState.FAILED, reply.state)
+            self.assertEqual("docker_boundary_invalid", reply.error_code)
+            self.assertFalse(call_log.exists())
+
+    def test_changed_host_codex_binary_fails_before_docker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _, turns, base_sha, call_log, socket_path, listener = self._setup(root)
+            assert listener is not None
+            (root / "unused-codex").write_bytes(b"changed-after-runtime-binding")
+            prompt = b"must not expose a changed tool"
+            try:
+                with patch(
+                    "codex_dispatcher.runner_docker._expected_rootless_socket",
+                    return_value=socket_path,
+                ):
+                    reply = turns.execute(
+                        _request(
+                            RunnerOperation.START,
+                            TURN_ONE,
+                            prompt,
+                            base_sha,
+                        ),
+                        prompt,
+                    )
+            finally:
+                listener.close()
+
+            self.assertEqual(RunnerTurnRemoteState.FAILED, reply.state)
+            self.assertEqual("docker_boundary_invalid", reply.error_code)
+            self.assertFalse(call_log.exists())
+
+    def test_drifted_image_or_network_fails_before_docker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _, turns, base_sha, call_log, socket_path, listener = self._setup(root)
+            assert listener is not None
+            prompt = b"must not use drifted Docker assets"
+            try:
+                with (
+                    patch(
+                        "codex_dispatcher.runner_docker._expected_rootless_socket",
+                        return_value=socket_path,
+                    ),
+                    patch(
+                        "codex_dispatcher.runner_docker.run_command",
+                        return_value=CommandResult(
+                            0,
+                            json.dumps(
+                                {
+                                    "Os": "linux",
+                                    "Architecture": "amd64",
+                                    "RepoDigests": ["registry.invalid/other@sha256:" + "f" * 64],
+                                }
+                            ),
+                            "",
+                        ),
+                    ),
+                ):
+                    reply = turns.execute(
+                        _request(RunnerOperation.START, TURN_ONE, prompt, base_sha),
                         prompt,
                     )
             finally:

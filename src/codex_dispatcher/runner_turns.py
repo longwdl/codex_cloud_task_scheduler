@@ -268,6 +268,7 @@ class RunnerTurnExecutor:
             validate_docker_command_boundary(
                 runtime=self._docker_runtime,
                 context=context,
+                codex_path=self._codex_path,
                 auth_file=auth_file,
                 output_schema=self._output_schema,
             )
@@ -275,6 +276,7 @@ class RunnerTurnExecutor:
                 runtime=self._docker_runtime,
                 work_item_id=request.work_item_id,
                 turn_id=request.turn_id,
+                codex_path=self._codex_path,
                 repository=context.repository,
                 codex_home=context.codex_home,
                 auth_file=auth_file,
@@ -369,12 +371,14 @@ class RunnerTurnExecutor:
         validate_docker_command_boundary(
             runtime=self._docker_runtime,
             context=context,
+            codex_path=self._codex_path,
             auth_file=auth_file,
             output_schema=self._output_schema,
         )
         plan = build_docker_login_status_plan(
             runtime=self._docker_runtime,
             work_item_id=request.work_item_id,
+            codex_path=self._codex_path,
             codex_home=context.codex_home,
             auth_file=auth_file,
         )

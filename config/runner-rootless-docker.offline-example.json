@@ -15,6 +15,17 @@
     "docker_host": "unix:///run/user/1002/docker.sock",
     "cli_config_directory": "/srv/codex-runner/run/docker-cli",
     "image": "replace.invalid/codex-runner@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-    "egress_proxy_url": "http://10.0.2.2:3128"
+    "codex_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "egress_proxy_url": "http://10.0.2.2:3128",
+    "work_item_disk": {
+      "image_directory": "/srv/codex-runner/work-item-images",
+      "image_size_bytes": 8589934592,
+      "host_reserve_bytes": 17179869184,
+      "mkfs_ext4_path": "/usr/sbin/mkfs.ext4",
+      "fuse2fs_path": "/usr/bin/fuse2fs",
+      "fusermount_path": "/usr/bin/fusermount3",
+      "e2fsck_path": "/usr/sbin/e2fsck",
+      "findmnt_path": "/usr/bin/findmnt"
+    }
   }
 }

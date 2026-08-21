@@ -16,6 +16,8 @@ WORK_ITEM = "wi_" + "1" * 24
 TURN = "turn_" + "2" * 32
 SESSION = "123e4567-e89b-12d3-a456-426614174000"
 IMAGE = "registry.example.invalid/codex-runner@sha256:" + "a" * 64
+CODEX_SHA256 = "b" * 64
+CODEX_PATH = Path("/srv/codex-runner/tools/codex/0.147.0/bin/codex")
 PROXY_URL = "http://codex-egress-proxy:3128"
 DOCKER_CONFIG = Path("/srv/codex-runner/run/docker-cli")
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +29,7 @@ def runtime() -> DockerCodexRuntime:
         docker_host="unix:///run/user/998/docker.sock",
         cli_config_directory=DOCKER_CONFIG,
         image=IMAGE,
+        codex_sha256=CODEX_SHA256,
         egress_proxy_url=PROXY_URL,
     )
 
@@ -58,6 +61,7 @@ class DockerCodexPlanTests(unittest.TestCase):
             runtime=runtime(),
             work_item_id=WORK_ITEM,
             turn_id=TURN,
+            codex_path=CODEX_PATH,
             repository=Path("/srv/codex-runner/work-items/owner__repo/issue-42/repo"),
             codex_home=Path(
                 "/srv/codex-runner/work-items/owner__repo/issue-42/runner-state/codex-home"
@@ -78,6 +82,7 @@ class DockerCodexPlanTests(unittest.TestCase):
             "--log-driver=none",
             "--interactive",
             "--init",
+            "--entrypoint=",
             "--user=0:0",
             "--read-only",
             "--network=codex-egress",
@@ -137,6 +142,7 @@ class DockerCodexPlanTests(unittest.TestCase):
             runtime=runtime(),
             work_item_id=WORK_ITEM,
             turn_id=TURN,
+            codex_path=CODEX_PATH,
             repository=repository,
             codex_home=codex_home,
             auth_file=auth_file,
@@ -145,17 +151,21 @@ class DockerCodexPlanTests(unittest.TestCase):
         )
         mounts = tuple(item for item in plan.argv if item.startswith("--mount="))
 
-        self.assertEqual(4, len(mounts))
-        self.assertIn(f"source={repository},target=/workspace", mounts[0])
-        self.assertIn(f"source={codex_home},target=/codex-home", mounts[1])
+        self.assertEqual(5, len(mounts))
+        self.assertEqual(
+            f"--mount=type=bind,source={CODEX_PATH},target=/usr/local/bin/codex,readonly",
+            mounts[0],
+        )
+        self.assertIn(f"source={repository},target=/workspace", mounts[1])
+        self.assertIn(f"source={codex_home},target=/codex-home", mounts[2])
         self.assertEqual(
             f"--mount=type=bind,source={auth_file},target=/codex-home/auth.json,readonly",
-            mounts[2],
+            mounts[3],
         )
         self.assertEqual(
             f"--mount=type=bind,source={schema},"
             "target=/runner-contract/agent-result.schema.json,readonly",
-            mounts[3],
+            mounts[4],
         )
         self.assertFalse(any("target=/srv" in item for item in mounts))
         self.assertFalse(any("source=/srv/codex-runner/app,target=" in item for item in mounts))
@@ -165,6 +175,7 @@ class DockerCodexPlanTests(unittest.TestCase):
         plan = build_docker_login_status_plan(
             runtime=runtime(),
             work_item_id=WORK_ITEM,
+            codex_path=CODEX_PATH,
             codex_home=Path(
                 "/srv/codex-runner/work-items/owner__repo/issue-42/runner-state/codex-home"
             ),
@@ -173,7 +184,8 @@ class DockerCodexPlanTests(unittest.TestCase):
         mounts = tuple(item for item in plan.argv if item.startswith("--mount="))
 
         self.assertFalse(plan.reads_prompt_from_stdin)
-        self.assertEqual(2, len(mounts))
+        self.assertEqual(3, len(mounts))
+        self.assertIn("target=/usr/local/bin/codex,readonly", mounts[0])
         self.assertEqual(("login", "status"), plan.argv[-2:])
         self.assertFalse(any("/workspace" in item for item in plan.argv))
         self.assertFalse(any("agent-result.schema" in item for item in plan.argv))
@@ -184,11 +196,13 @@ class DockerCodexPlanTests(unittest.TestCase):
             "unix:///run/user/998/docker.sock",
             DOCKER_CONFIG,
             IMAGE,
+            CODEX_SHA256,
         )
         with self.assertRaisesRegex(ValueError, "audited egress proxy"):
             build_docker_login_status_plan(
                 runtime=compatible_runtime,
                 work_item_id=WORK_ITEM,
+                codex_path=CODEX_PATH,
                 codex_home=Path(
                     "/srv/codex-runner/work-items/owner__repo/issue-42/runner-state/codex-home"
                 ),
@@ -200,6 +214,16 @@ class DockerCodexPlanTests(unittest.TestCase):
                 "unix:///run/user/998/docker.sock",
                 DOCKER_CONFIG,
                 "registry.example.invalid/codex-runner:latest",
+                CODEX_SHA256,
+                PROXY_URL,
+            )
+        with self.assertRaisesRegex(ValueError, "codex_sha256"):
+            DockerCodexRuntime(
+                Path("/usr/bin/docker"),
+                "unix:///run/user/998/docker.sock",
+                DOCKER_CONFIG,
+                IMAGE,
+                "not-a-digest",
                 PROXY_URL,
             )
         with self.assertRaisesRegex(ValueError, "Unix socket"):
@@ -208,6 +232,7 @@ class DockerCodexPlanTests(unittest.TestCase):
                 "tcp://127.0.0.1:2375",
                 DOCKER_CONFIG,
                 IMAGE,
+                CODEX_SHA256,
                 PROXY_URL,
             )
         with self.assertRaisesRegex(ValueError, "egress_proxy_url"):
@@ -216,12 +241,14 @@ class DockerCodexPlanTests(unittest.TestCase):
                 "unix:///run/user/998/docker.sock",
                 DOCKER_CONFIG,
                 IMAGE,
+                CODEX_SHA256,
                 "http://user:secret@codex-egress-proxy:3128",
             )
         with self.assertRaisesRegex(ValueError, "comma"):
             build_docker_login_status_plan(
                 runtime=runtime(),
                 work_item_id=WORK_ITEM,
+                codex_path=CODEX_PATH,
                 codex_home=Path("/srv/codex-runner/unsafe,home"),
                 auth_file=Path("/srv/codex-runner/app/auth.json"),
             )
@@ -230,6 +257,7 @@ class DockerCodexPlanTests(unittest.TestCase):
                 runtime=runtime(),
                 work_item_id=WORK_ITEM,
                 turn_id=TURN,
+                codex_path=CODEX_PATH,
                 repository=Path("/etc"),
                 codex_home=Path("/srv/codex-runner/arbitrary"),
                 auth_file=Path("/srv/codex-runner/app/auth.json"),

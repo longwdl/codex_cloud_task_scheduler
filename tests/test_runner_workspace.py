@@ -3,8 +3,10 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import unittest
+from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
+from typing import Iterator
 
 from codex_dispatcher.runner_protocol import RunnerOperation, RunnerRequest
 from codex_dispatcher.runner_transport import parse_runner_export_reply
@@ -152,6 +154,55 @@ class RunnerWorkspaceTests(unittest.TestCase):
             with self.assertRaisesRegex(RunnerWorkspaceError, "attribute"):
                 workspace.prepare(prepare_request(artifact, base_sha), artifact)
             self.assertFalse((root / "runner" / ".registry" / f"{WORK_ITEM}.json").exists())
+
+    def test_bounded_prepare_uses_one_committed_work_item_filesystem(self) -> None:
+        class FakeBoundedDisk:
+            def __init__(self, root: Path) -> None:
+                self.root = root
+                self.committed: set[str] = set()
+                self.ensure_calls: list[tuple[str, Path]] = []
+
+            def final_image_exists(self, work_item_id: str) -> bool:
+                return work_item_id in self.committed
+
+            @contextmanager
+            def provision(
+                self, work_item_id: str, mountpoint: Path
+            ) -> Iterator[Path]:
+                staging = self.root / ".bounded-staging" / work_item_id
+                staging.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                staging.mkdir(mode=0o700)
+                yield staging
+                mountpoint.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                staging.rename(mountpoint)
+                self.committed.add(work_item_id)
+
+            def ensure_mounted(self, work_item_id: str, mountpoint: Path) -> None:
+                if work_item_id not in self.committed or not mountpoint.is_dir():
+                    raise AssertionError("bounded disk was not committed")
+                self.ensure_calls.append((work_item_id, mountpoint))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact, base_sha = fixture(root)
+            disk = FakeBoundedDisk(root)
+            workspace = RunnerWorkspace(
+                git_path=GIT,
+                work_items_root=root / "runner",
+                work_item_disk=disk,  # type: ignore[arg-type]
+            )
+            request = prepare_request(artifact, base_sha)
+
+            first = workspace.prepare(request, artifact)
+            second = workspace.prepare(request, artifact)
+            paths = workspace.paths(WORK_ITEM)
+
+            self.assertEqual(first, second)
+            self.assertIn(WORK_ITEM, disk.committed)
+            self.assertEqual(base_sha, workspace.current_head(WORK_ITEM))
+            self.assertTrue(paths.repository.is_dir())
+            self.assertTrue(paths.state.is_dir())
+            self.assertGreaterEqual(len(disk.ensure_calls), 3)
 
 
 if __name__ == "__main__":

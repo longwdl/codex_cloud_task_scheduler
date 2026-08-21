@@ -40,9 +40,9 @@ Every Turn plan uses:
   clean failure;
 - the dedicated `codex-egress` network, which is only a name until live inspection proves its
   firewall behavior;
-- only four bind mounts for a Turn: that WorkItem's `repo/` read-write, that WorkItem's dedicated
-  Codex session home read-write, the protected Runner auth file read-only, and the root-owned output
-  Schema read-only;
+- only five bind mounts for a Turn: the root-owned digest-verified Codex executable read-only, that
+  WorkItem's `repo/` read-write, that WorkItem's dedicated Codex session home read-write, the
+  protected Runner auth file read-only, and the root-owned output Schema read-only;
 - the Prompt only on standard input and no Docker or Codex argv derived from Issue text.
 
 The authentication check receives only the WorkItem session home and read-only auth file; it does
@@ -70,11 +70,11 @@ and all existing session state. Mounting that complete directory into every cont
 behavior but would not isolate WorkItems, so it is forbidden.
 
 The container layout gives each WorkItem a separate protected `runner-state/codex-home`. Its exact
-WorkItem/session/image binding is stored in `runner-state/codex-session.json`, which is never mounted
-into the container. START requires an absent binding and an absent or empty session home. RESUME
-requires the exact protected session and image binding; legacy shared-home state is therefore
-blocked rather than silently replaced. Only the minimum auth file is supplied read-only for the
-duration of the container.
+WorkItem/session/image/Codex-binary-digest binding is stored in
+`runner-state/codex-session.json`, which is never mounted into the container. START requires an
+absent binding and an absent or empty session home. RESUME requires the exact protected session,
+image, and binary binding; legacy shared-home state is therefore blocked rather than silently
+replaced. Only the minimum auth file is supplied read-only for the duration of the container.
 Offline fake execution now proves the START/RESUME identity and failure boundary. A live
 credential-safe fixture must still prove:
 
@@ -107,11 +107,29 @@ container-visible `http://10.0.2.2:3128` endpoint and the exact
 `unix:///run/user/<runner-uid>/docker.sock`; these structural checks are not substitutes for the
 live probes.
 
-The current `s3` root filesystem is ext4 without project quotas. CPU, memory, PID, tmpfs, and timeout
-limits therefore do not provide a per-WorkItem aggregate disk limit for the bind-mounted repository.
-Do not claim Phase F complete until a separately reviewed loopback filesystem, project-quota-capable
-filesystem, or equivalent hard byte limit is created and tested for exhaustion, cleanup, restart,
-and recovery. A free-space preflight alone is only an admission/alert control, not isolation.
+Immediately before each authentication or Turn container, the Runner reads back both Docker assets
+through the exact rootless socket and empty CLI configuration. The image must expose only the exact
+configured RepoDigest and report `linux/amd64`. The `codex-egress` network must be a local bridge on
+`172.30.0.0/24` with gateway `172.30.0.1`, IPv6/internal/attachable/ingress disabled, inter-container
+communication disabled, masquerading enabled, and no already attached container. Any missing,
+additional, or drifted identity fails before the Prompt enters Docker. These structural checks still
+require the live proxy, direct-bypass, private/metadata, and second-container probes below.
+
+The current `s3` root filesystem is ext4 without project quotas. Rootless mode therefore provisions
+one preallocated ext4 image per new WorkItem outside `work_items_root` and mounts it with `fuse2fs`.
+The protected configuration fixes the image byte limit, a separate host-free-space reserve, and all
+filesystem helper paths. PREPARE holds the global Runner lock; a new image is formatted and populated
+only through a deterministic staging mount, cleanly unmounted and checked before atomic publication,
+then remounted at the exact WorkItem root. Every later operation verifies the image is a single-link,
+fully allocated, owned mode-`0600` regular file of the exact size and verifies the live mount's exact
+source, target, `fuse.ext4` type, Runner UID/GID, `rw`, `nosuid`, `nodev`, and bounded capacity.
+Incomplete staging state is preserved and blocks retry rather than being deleted or guessed. A
+legacy direct-mode WorkItem has no matching image and is therefore not silently admitted or migrated.
+
+The image-size check is a real per-WorkItem hard byte limit; the separately preallocated host reserve
+prevents admission from intentionally consuming the final protected capacity. Neither replaces live
+exhaustion, clean-unmount, filesystem-check, remount, restart, and recovery acceptance on the target.
+A free-space preflight alone remains only an admission/alert control, not isolation.
 
 ## Live acceptance boundary
 
