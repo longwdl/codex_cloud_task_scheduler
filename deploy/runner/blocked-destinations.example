@@ -1,0 +1,4 @@
+# Install a non-empty reviewed copy as
+# /etc/squid/codex-egress-blocked-destinations.conf.
+# Add the exact Runner host, Control Host, VPC service, metadata, container and gateway addresses.
+192.0.2.1/32

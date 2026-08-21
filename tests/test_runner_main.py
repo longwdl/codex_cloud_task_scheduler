@@ -48,6 +48,7 @@ def config(root: Path) -> Path:
                 "output_schema": str(schema),
                 "work_items_root": str(work_items),
                 "active_lock_path": str(run / "active.lock"),
+                "egress_proxy_url": "http://127.0.0.1:3128",
                 "git_timeout_seconds": 10,
                 "codex_timeout_seconds": 20,
             }
@@ -65,7 +66,37 @@ class RunnerMainTests(unittest.TestCase):
             self.assertEqual((root / "codex-home").resolve(), loaded.codex_home)
             self.assertEqual((root / "work-items").resolve(), loaded.work_items_root)
             self.assertEqual(20.0, loaded.codex_timeout_seconds)
+            self.assertEqual("http://127.0.0.1:3128", loaded.egress_proxy_url)
             self.assertIsNotNone(build_runner_service(loaded))
+
+    def test_legacy_configuration_without_proxy_remains_loadable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = config(root)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            del payload["egress_proxy_url"]
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            self.assertIsNone(load_runner_configuration(path).egress_proxy_url)
+
+    def test_rejects_proxy_credentials_and_non_http_endpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = config(root)
+            for proxy_url in (
+                "https://127.0.0.1:3128",
+                "http://user:secret@127.0.0.1:3128",
+                "http://127.0.0.1:3128/path",
+            ):
+                with self.subTest(proxy_url=proxy_url):
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    payload["egress_proxy_url"] = proxy_url
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        RunnerConfigurationError, "egress_proxy_url"
+                    ):
+                        load_runner_configuration(path)
+                    path = config(root)
 
     def test_rejects_writable_duplicate_and_relative_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

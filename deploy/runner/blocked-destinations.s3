@@ -1,0 +1,9 @@
+# Current Runner, Control Host, gateway, resolver and provider-service addresses.
+# The permanent CIDR ACLs also block these; exact entries make deployment drift explicit.
+8.210.180.114/32
+47.79.99.219/32
+100.100.2.136/32
+100.100.2.138/32
+100.100.88.88/32
+172.19.1.2/32
+172.19.63.253/32

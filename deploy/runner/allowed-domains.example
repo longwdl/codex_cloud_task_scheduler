@@ -1,0 +1,4 @@
+# Install a reviewed copy as /etc/squid/codex-egress-allowed-domains.conf.
+# Prefer exact lowercase FQDNs. A leading dot authorizes every subdomain.
+# Never use *, a URL, an IP literal, a port, a top-level domain or a public suffix.
+example.invalid

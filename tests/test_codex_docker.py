@@ -15,6 +15,7 @@ WORK_ITEM = "wi_" + "1" * 24
 TURN = "turn_" + "2" * 32
 SESSION = "123e4567-e89b-12d3-a456-426614174000"
 IMAGE = "registry.example.invalid/codex-runner@sha256:" + "a" * 64
+PROXY_URL = "http://codex-egress-proxy:3128"
 
 
 def runtime() -> DockerCodexRuntime:
@@ -22,6 +23,7 @@ def runtime() -> DockerCodexRuntime:
         docker_path=Path("/usr/bin/docker"),
         docker_host="unix:///run/user/998/docker.sock",
         image=IMAGE,
+        egress_proxy_url=PROXY_URL,
     )
 
 
@@ -65,6 +67,17 @@ class DockerCodexPlanTests(unittest.TestCase):
             self.assertIn(fixed, plan.argv)
         self.assertEqual(IMAGE, plan.argv[plan.argv.index(IMAGE)])
         self.assertIn(f"--env=CODEX_HOME={CONTAINER_CODEX_HOME}", plan.argv)
+        for name in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ):
+            self.assertIn(f"--env={name}={PROXY_URL}", plan.argv)
+        self.assertIn("--env=NO_PROXY=", plan.argv)
+        self.assertIn("--env=no_proxy=", plan.argv)
         self.assertIn("resume", plan.argv)
         self.assertIn(SESSION, plan.argv)
         self.assertNotIn("Prompt contents", " ".join(plan.argv))
@@ -128,17 +141,40 @@ class DockerCodexPlanTests(unittest.TestCase):
         self.assertFalse(any("agent-result.schema" in item for item in plan.argv))
 
     def test_rejects_unpinned_images_nonunix_daemons_and_unsafe_mounts(self) -> None:
+        compatible_runtime = DockerCodexRuntime(
+            Path("/usr/bin/docker"),
+            "unix:///run/user/998/docker.sock",
+            IMAGE,
+        )
+        with self.assertRaisesRegex(ValueError, "audited egress proxy"):
+            build_docker_login_status_plan(
+                runtime=compatible_runtime,
+                work_item_id=WORK_ITEM,
+                codex_home=Path(
+                    "/srv/codex-runner/work-items/owner__repo/issue-42/runner-state/codex-home"
+                ),
+                auth_file=Path("/srv/codex-runner/app/auth.json"),
+            )
         with self.assertRaisesRegex(ValueError, "digest-pinned"):
             DockerCodexRuntime(
                 Path("/usr/bin/docker"),
                 "unix:///run/user/998/docker.sock",
                 "registry.example.invalid/codex-runner:latest",
+                PROXY_URL,
             )
         with self.assertRaisesRegex(ValueError, "Unix socket"):
             DockerCodexRuntime(
                 Path("/usr/bin/docker"),
                 "tcp://127.0.0.1:2375",
                 IMAGE,
+                PROXY_URL,
+            )
+        with self.assertRaisesRegex(ValueError, "egress_proxy_url"):
+            DockerCodexRuntime(
+                Path("/usr/bin/docker"),
+                "unix:///run/user/998/docker.sock",
+                IMAGE,
+                "http://user:secret@codex-egress-proxy:3128",
             )
         with self.assertRaisesRegex(ValueError, "comma"):
             build_docker_login_status_plan(

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
 
+from codex_dispatcher.executors.codex_cli import validate_egress_proxy_url
 from codex_dispatcher.runner_protocol import RunnerProtocolError
 from codex_dispatcher.runner_service import LinuxRunnerService, serve_one
 from codex_dispatcher.runner_transport import RunnerTransportRejected
@@ -37,6 +38,7 @@ class RunnerConfiguration:
     active_lock_path: Path
     git_timeout_seconds: float
     codex_timeout_seconds: float
+    egress_proxy_url: str | None
 
 
 def load_runner_configuration(path: Path) -> RunnerConfiguration:
@@ -61,7 +63,7 @@ def load_runner_configuration(path: Path) -> RunnerConfiguration:
         payload = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise RunnerConfigurationError("Runner config is malformed") from exc
-    expected = {
+    required = {
         "version",
         "git_path",
         "codex_path",
@@ -72,7 +74,12 @@ def load_runner_configuration(path: Path) -> RunnerConfiguration:
         "git_timeout_seconds",
         "codex_timeout_seconds",
     }
-    if not isinstance(payload, dict) or set(payload) != expected:
+    optional = {"egress_proxy_url"}
+    if (
+        not isinstance(payload, dict)
+        or not required.issubset(payload)
+        or set(payload) - required - optional
+    ):
         raise RunnerConfigurationError("Runner config fields are invalid")
     if payload["version"] != _CONFIG_VERSION:
         raise RunnerConfigurationError("Runner config version is unsupported")
@@ -103,6 +110,14 @@ def load_runner_configuration(path: Path) -> RunnerConfiguration:
     codex_timeout = _positive_number(
         payload["codex_timeout_seconds"], "codex_timeout_seconds"
     )
+    try:
+        egress_proxy_url = (
+            validate_egress_proxy_url(payload["egress_proxy_url"])
+            if "egress_proxy_url" in payload
+            else None
+        )
+    except ValueError as exc:
+        raise RunnerConfigurationError("egress_proxy_url is invalid") from exc
     return RunnerConfiguration(
         git_path,
         codex_path,
@@ -112,6 +127,7 @@ def load_runner_configuration(path: Path) -> RunnerConfiguration:
         active_lock_path,
         git_timeout,
         codex_timeout,
+        egress_proxy_url,
     )
 
 
@@ -129,6 +145,7 @@ def build_runner_service(configuration: RunnerConfiguration) -> LinuxRunnerServi
         codex_home=configuration.codex_home,
         output_schema=configuration.output_schema,
         timeout_seconds=configuration.codex_timeout_seconds,
+        egress_proxy_url=configuration.egress_proxy_url,
     )
     return LinuxRunnerService(
         workspace=workspace,

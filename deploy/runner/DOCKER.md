@@ -82,6 +82,10 @@ denies host loopback, RFC1918/ULA, link-local, cloud metadata, Control Host, Doc
 containers. Docker's [`none` network](https://docs.docker.com/engine/network/drivers/none/) is the
 safe negative-control test but cannot run Codex by itself. Firewall, routing, DNS proxy, and metadata
 rules are separate host infrastructure changes and require exact-command approval and rollback.
+The selected unified HTTP CONNECT proxy, protected allowlist, metadata-only audit format, Runner-UID
+firewall boundary, and guarded rollback are specified in [EGRESS.md](EGRESS.md). That offline
+contract does not count as live network isolation until the native proxy parser and every negative
+probe pass.
 
 The current `s3` root filesystem is ext4 without project quotas. CPU, memory, PID, tmpfs, and timeout
 limits therefore do not provide a per-WorkItem aggregate disk limit for the bind-mounted repository.

@@ -11,6 +11,7 @@ from codex_dispatcher.executors.codex_cli import (
 
 SESSION = "123e4567-e89b-12d3-a456-426614174000"
 CODEX_HOME = Path("/srv/codex-runner/app")
+PROXY_URL = "http://127.0.0.1:3128"
 
 
 class CodexCliInvocationTests(unittest.TestCase):
@@ -64,6 +65,47 @@ class CodexCliInvocationTests(unittest.TestCase):
         self.assertEqual(SESSION, plan.argv[resume_index + 1])
         self.assertNotIn("--last", plan.argv)
         self.assertNotIn("--ephemeral", plan.argv)
+
+    def test_proxy_plan_sets_only_one_fixed_credential_free_endpoint(self) -> None:
+        plan = build_codex_invocation(
+            codex_path=Path("/usr/local/bin/codex"),
+            repository_directory=Path("/srv/tasks/issue-1/repo"),
+            codex_home=CODEX_HOME,
+            output_schema=Path("/srv/codex-runner/etc/result.schema.json"),
+            egress_proxy_url=PROXY_URL,
+        )
+
+        for name in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ):
+            self.assertEqual(PROXY_URL, plan.environment[name])
+        self.assertEqual("", plan.environment["NO_PROXY"])
+        self.assertEqual("", plan.environment["no_proxy"])
+        self.assertFalse(any("TOKEN" in name or "AUTH" in name for name in plan.environment))
+
+    def test_proxy_plan_rejects_credentials_paths_and_noncanonical_urls(self) -> None:
+        for proxy_url in (
+            "https://127.0.0.1:3128",
+            "http://user:secret@127.0.0.1:3128",
+            "http://127.0.0.1:3128/path",
+            "http://127.0.0.1",
+            "http://127.0.0.1:0",
+            "http://PROXY.invalid:3128",
+            "http://[::1]:3128",
+        ):
+            with self.subTest(proxy_url=proxy_url), self.assertRaisesRegex(
+                ValueError, "egress_proxy_url"
+            ):
+                build_codex_login_status_invocation(
+                    codex_path=Path("/usr/local/bin/codex"),
+                    codex_home=CODEX_HOME,
+                    egress_proxy_url=proxy_url,
+                )
 
     def test_rejects_relative_paths_and_noncanonical_session(self) -> None:
         with self.assertRaisesRegex(ValueError, "absolute path"):

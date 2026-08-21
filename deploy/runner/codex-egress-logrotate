@@ -1,0 +1,15 @@
+/var/log/squid/codex-egress-access.log /var/log/squid/codex-egress-cache.log {
+    daily
+    maxsize 100M
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 proxy proxy
+    su proxy proxy
+    sharedscripts
+    postrotate
+        /usr/sbin/squid -f /etc/squid/codex-egress.conf -k rotate >/dev/null 2>&1
+    endscript
+}

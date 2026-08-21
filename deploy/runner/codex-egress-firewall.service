@@ -1,0 +1,36 @@
+[Unit]
+Description=Codex Runner egress enforcement
+Documentation=file:///srv/codex-runner/current/deploy/runner/EGRESS.md
+After=local-fs.target
+Before=codex-egress-proxy.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f /etc/codex-egress-firewall.nft
+ExecReload=/usr/sbin/nft -f /etc/codex-egress-firewall.nft
+ExecStop=/usr/sbin/nft delete table inet codex_egress
+RemainAfterExit=yes
+TimeoutStartSec=15s
+TimeoutStopSec=15s
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

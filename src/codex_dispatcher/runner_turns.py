@@ -19,6 +19,7 @@ from codex_dispatcher.command_runner import run_binary_command
 from codex_dispatcher.executors.codex_cli import (
     build_codex_invocation,
     build_codex_login_status_invocation,
+    validate_egress_proxy_url,
 )
 from codex_dispatcher.runner_protocol import (
     RunnerOperation,
@@ -63,6 +64,7 @@ class RunnerTurnExecutor:
         codex_home: Path,
         output_schema: Path,
         timeout_seconds: float = 3600.0,
+        egress_proxy_url: str | None = None,
     ) -> None:
         for path, field in (
             (codex_path, "codex_path"),
@@ -78,6 +80,11 @@ class RunnerTurnExecutor:
         self._codex_home = codex_home
         self._output_schema = output_schema
         self._timeout_seconds = timeout_seconds
+        self._egress_proxy_url = (
+            validate_egress_proxy_url(egress_proxy_url)
+            if egress_proxy_url is not None
+            else None
+        )
 
     def execute(self, request: RunnerRequest, prompt: bytes) -> RunnerTurnReply:
         if request.operation not in {RunnerOperation.START, RunnerOperation.RESUME}:
@@ -149,6 +156,7 @@ class RunnerTurnExecutor:
             codex_home=self._codex_home,
             output_schema=self._output_schema,
             session_id=request.session_id,
+            egress_proxy_url=self._egress_proxy_url,
         )
         command = run_binary_command(
             plan.argv,
@@ -215,6 +223,7 @@ class RunnerTurnExecutor:
         plan = build_codex_login_status_invocation(
             codex_path=self._codex_path,
             codex_home=self._codex_home,
+            egress_proxy_url=self._egress_proxy_url,
         )
         command = run_binary_command(
             plan.argv,

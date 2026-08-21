@@ -11,6 +11,7 @@ from typing import Mapping
 from codex_dispatcher.executors.codex_cli import (
     build_codex_invocation,
     build_codex_login_status_invocation,
+    validate_egress_proxy_url,
 )
 from codex_dispatcher.work_items import validate_turn_id, validate_work_item_id
 
@@ -35,6 +36,7 @@ class DockerCodexRuntime:
     docker_path: Path
     docker_host: str
     image: str
+    egress_proxy_url: str | None = None
 
     def __post_init__(self) -> None:
         _absolute_host_path(self.docker_path, "docker_path")
@@ -49,6 +51,8 @@ class DockerCodexRuntime:
         _absolute_host_path(socket_path, "docker_host socket")
         if not isinstance(self.image, str) or not _IMAGE_RE.fullmatch(self.image):
             raise ValueError("image must be a lowercase digest-pinned reference")
+        if self.egress_proxy_url is not None:
+            validate_egress_proxy_url(self.egress_proxy_url)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +70,7 @@ def build_docker_login_status_plan(
     auth_file: Path,
 ) -> DockerCodexPlan:
     """Run only the fixed ChatGPT login-status check in one WorkItem boundary."""
+    proxy_url = _required_proxy_url(runtime)
     work_item_id = validate_work_item_id(work_item_id)
     codex_home = _mount_source(codex_home, "codex_home")
     auth_file = _mount_source(auth_file, "auth_file")
@@ -75,6 +80,7 @@ def build_docker_login_status_plan(
     inner = build_codex_login_status_invocation(
         codex_path=CONTAINER_CODEX_PATH,
         codex_home=CONTAINER_CODEX_HOME,
+        egress_proxy_url=proxy_url,
     )
     argv = (
         *_docker_prefix(runtime, f"codex-auth-{work_item_id}"),
@@ -100,6 +106,7 @@ def build_docker_codex_plan(
     session_id: str | None,
 ) -> DockerCodexPlan:
     """Build a fixed Docker invocation; the Prompt remains standard-input only."""
+    proxy_url = _required_proxy_url(runtime)
     validate_work_item_id(work_item_id)
     turn_id = validate_turn_id(turn_id)
     repository = _mount_source(repository, "repository")
@@ -117,6 +124,7 @@ def build_docker_codex_plan(
         codex_home=CONTAINER_CODEX_HOME,
         output_schema=CONTAINER_SCHEMA,
         session_id=session_id,
+        egress_proxy_url=proxy_url,
     )
     argv = (
         *_docker_prefix(runtime, f"codex-{turn_id}"),
@@ -159,6 +167,12 @@ def _docker_prefix(runtime: DockerCodexRuntime, name: str) -> tuple[str, ...]:
             f"size={TMPFS_LIMIT_BYTES}"
         ),
     )
+
+
+def _required_proxy_url(runtime: DockerCodexRuntime) -> str:
+    if runtime.egress_proxy_url is None:
+        raise ValueError("Docker Codex plans require an audited egress proxy")
+    return runtime.egress_proxy_url
 
 
 def _container_environment(environment: Mapping[str, str]) -> tuple[str, ...]:

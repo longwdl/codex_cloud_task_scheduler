@@ -1,0 +1,51 @@
+[Unit]
+Description=Audited Codex Runner egress proxy
+Requires=codex-egress-firewall.service
+After=network-online.target codex-egress-firewall.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=proxy
+Group=proxy
+RuntimeDirectory=squid
+RuntimeDirectoryMode=0750
+LogsDirectory=squid
+LogsDirectoryMode=0750
+UMask=0027
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=/srv/codex-runner/current/src
+ExecStartPre=/usr/bin/python3 -m codex_dispatcher.egress_policy --allowlist /etc/squid/codex-egress-allowed-domains.conf --blocklist /etc/squid/codex-egress-blocked-destinations.conf
+ExecStartPre=/usr/sbin/squid -f /etc/squid/codex-egress.conf -k parse
+ExecStart=/usr/sbin/squid --foreground -f /etc/squid/codex-egress.conf
+ExecReload=/usr/bin/python3 -m codex_dispatcher.egress_policy --allowlist /etc/squid/codex-egress-allowed-domains.conf --blocklist /etc/squid/codex-egress-blocked-destinations.conf
+ExecReload=/usr/sbin/squid -f /etc/squid/codex-egress.conf -k parse
+ExecReload=/usr/sbin/squid -f /etc/squid/codex-egress.conf -k reconfigure
+Restart=on-failure
+RestartSec=5s
+NotifyAccess=all
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/run/squid /var/log/squid
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

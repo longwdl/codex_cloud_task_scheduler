@@ -1,0 +1,16 @@
+# Version-specific broad bootstrap set extracted from the installed Codex 0.147.0 binary.
+# This is not an upstream compatibility guarantee. Review denied audit records before additions.
+ab.chatgpt.com
+api.openai.com
+auth.openai.com
+chat.openai.com
+chatgpt.com
+community.openai.com
+developers.openai.com
+help.openai.com
+learn.chatgpt.com
+openai.com
+persistent.oaistatic.com
+platform.openai.com
+serpi.openai.com
+www.openai.com

@@ -34,18 +34,33 @@ def fake_codex(
     *,
     valid_result: bool = True,
     login_method: str = "ChatGPT",
+    expected_proxy_url: str | None = None,
 ) -> None:
     result_expression = (
         "json.dumps(result, sort_keys=True, separators=(',', ':'))"
         if valid_result
         else "'not-json'"
     )
+    proxy_check = ""
+    if expected_proxy_url is not None:
+        proxy_check = f"""
+proxy = {expected_proxy_url!r}
+for name in (
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "all_proxy",
+):
+    assert os.environ.get(name) == proxy
+assert os.environ.get("NO_PROXY") == ""
+assert os.environ.get("no_proxy") == ""
+"""
     path.write_text(
         f"""#!{sys.executable}
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+{proxy_check}
 
 if sys.argv[-2:] == ["login", "status"]:
     sys.stderr.write("Logged in using {login_method}\\n")
@@ -99,6 +114,7 @@ class RunnerTurnExecutorTests(unittest.TestCase):
         *,
         valid_result: bool = True,
         login_method: str = "ChatGPT",
+        egress_proxy_url: str | None = None,
     ) -> tuple[bytes, str, RunnerWorkspace, RunnerTurnExecutor]:
         artifact, base_sha = fixture(root)
         workspace = RunnerWorkspace(git_path=GIT, work_items_root=root / "runner")
@@ -108,6 +124,7 @@ class RunnerTurnExecutorTests(unittest.TestCase):
             codex,
             valid_result=valid_result,
             login_method=login_method,
+            expected_proxy_url=egress_proxy_url,
         )
         schema = root / "schema.json"
         schema.write_text("{}\n", encoding="utf-8")
@@ -119,6 +136,7 @@ class RunnerTurnExecutorTests(unittest.TestCase):
             codex_home=codex_home,
             output_schema=schema,
             timeout_seconds=10,
+            egress_proxy_url=egress_proxy_url,
         )
         return artifact, base_sha, workspace, turns
 
@@ -198,6 +216,19 @@ class RunnerTurnExecutorTests(unittest.TestCase):
             self.assertEqual(RunnerTurnRemoteState.FAILED, reply.state)
             self.assertEqual("codex_auth_invalid", reply.error_code)
             self.assertEqual(base_sha, workspace.current_head(WORK_ITEM))
+
+    def test_fixed_proxy_reaches_auth_preflight_and_turn_process(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _, base_sha, _, turns = self.setUpRunner(
+                root,
+                egress_proxy_url="http://127.0.0.1:3128",
+            )
+            prompt = b"readonly"
+
+            reply = turns.execute(start_request(TURN_ONE, prompt, base_sha), prompt)
+
+            self.assertEqual(RunnerTurnRemoteState.FINISHED, reply.state)
 
     def test_forced_command_service_roundtrips_prepare_and_turn_frames(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
