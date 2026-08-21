@@ -56,6 +56,13 @@ Runner already captures it through a bounded pipe and reduces it to the strict A
 The host Docker CLI receives an explicit empty, protected `DOCKER_CONFIG`; ambient `HOME`, Docker
 contexts, client proxy configuration, credential helpers, and a user-selected daemon are absent.
 
+The reviewed production image must match the allowed repository workload rather than inherit the
+broad universal development image indefinitely. The current Python/npm Web baseline is defined in
+[`image/Dockerfile`](image/Dockerfile): Python 3.12, Node.js 22/npm, and a small fixed set of shell,
+Git, HTTP, search, patch, and timeout tools. Other language runtimes, build systems, browsers,
+privilege tools, and Docker clients are absent. Projects that need native compilation require a
+separately reviewed image variant; they must not install an unbounded toolchain into this baseline.
+
 Docker bind mounts are writable by default and directly expose host paths, so every source must be
 an owned, protected, non-symlink path derived from the durable WorkItem registry. The planner's four
 mounts are necessary but not sufficient: runtime integration must freshly validate source ownership,
