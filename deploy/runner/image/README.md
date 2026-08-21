@@ -50,6 +50,14 @@ Push the candidate to the dedicated private GHCR package, pull it by RepoDigest,
 that lowercase `name@sha256:<digest>` identity. A locally built tag or image ID is insufficient
 because the Runner requires exactly one matching `RepoDigests` entry.
 
+The Fixture workflow separates review builds from publication. Pull requests receive only
+`contents: read`; they never receive package write permission. Publication is a manual dispatch from
+`main` and requires the operator to enter the exact 40-character commit. It grants `packages: write`
+only to the publication job, publishes only `sha-<commit>` (never `latest`), pulls back the exact
+RepoDigest, and removes its ephemeral registry configuration in an `always()` step. The first GHCR
+version is expected to remain private. Publishing a candidate does not admit it to the Runner: the
+vulnerability, fixed-argv isolation, storage, recovery, and live Fixture gates above still apply.
+
 Keep the current `codex-universal` digest throughout credential-free probes, the dedicated private
 Fixture Turn, STATUS/recovery, SQLite/GitHub/Runner/Slack/Actions readback, and repeated idle sweep.
 Only after those checks pass may an explicitly approved `docker image rm` target the exact old

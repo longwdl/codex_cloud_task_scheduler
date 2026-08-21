@@ -68,12 +68,13 @@ class RunnerImageTests(unittest.TestCase):
         ):
             self.assertIn(required, normalized)
 
-    def test_fixture_workflow_builds_without_publish_authority(self) -> None:
+    def test_fixture_workflow_keeps_pull_requests_unprivileged(self) -> None:
         workflow = FIXTURE_WORKFLOW.read_text(encoding="utf-8")
 
         for required in (
             "pull_request:",
             "contents: read",
+            "if: github.event_name == 'pull_request'",
             "ubuntu-24.04",
             "timeout-minutes: 20",
             "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
@@ -90,15 +91,43 @@ class RunnerImageTests(unittest.TestCase):
         ):
             self.assertIn(required, workflow)
         for prohibited in (
-            "packages: write",
-            "docker login",
-            "docker push",
             "build-push-action",
             "secrets.",
             "GITHUB_TOKEN",
-            "workflow_dispatch",
+            "pull_request_target",
+            "latest",
         ):
             self.assertNotIn(prohibited, workflow)
+
+    def test_manual_publisher_is_exact_commit_only_and_self_cleans(self) -> None:
+        workflow = FIXTURE_WORKFLOW.read_text(encoding="utf-8")
+
+        for required in (
+            "workflow_dispatch:",
+            "expected_commit:",
+            "if: github.event_name == 'workflow_dispatch'",
+            "packages: write",
+            "group: runner-image-publication",
+            "test \"$ACTUAL_REF\" = refs/heads/main",
+            "test \"$EXPECTED_COMMIT\" = \"$ACTUAL_COMMIT\"",
+            "persist-credentials: false",
+            "ghcr.io/longwdl/codex-runner-web",
+            'image_ref="$IMAGE_REPOSITORY:sha-$ACTUAL_COMMIT"',
+            "GHCR_TOKEN: ${{ github.token }}",
+            "--password-stdin",
+            'docker push "$image_ref"',
+            "test \"${#repo_digests[@]}\" -eq 1",
+            'docker pull --platform=linux/amd64 "$repo_digest"',
+            'test "${pulled_digests[0]}" = "$repo_digest"',
+            'echo "repo_digest=$repo_digest"',
+            "if: always()",
+            'rm -rf -- "$DOCKER_CONFIG"',
+        ):
+            self.assertIn(required, workflow)
+
+        self.assertEqual(1, workflow.count("packages: write"))
+        self.assertNotIn("push:\n", workflow)
+        self.assertNotIn("schedule:", workflow)
 
 
 if __name__ == "__main__":
