@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = ROOT / "deploy" / "runner" / "image" / "Dockerfile"
 README = ROOT / "deploy" / "runner" / "image" / "README.md"
+FIXTURE_WORKFLOW = ROOT / "deploy" / "runner" / "image" / "fixture-workflow.yml"
 
 
 class RunnerImageTests(unittest.TestCase):
@@ -66,6 +67,35 @@ class RunnerImageTests(unittest.TestCase):
             "must fail closed",
         ):
             self.assertIn(required, normalized)
+
+    def test_fixture_workflow_builds_without_publish_authority(self) -> None:
+        workflow = FIXTURE_WORKFLOW.read_text(encoding="utf-8")
+
+        for required in (
+            "pull_request:",
+            "contents: read",
+            "ubuntu-24.04",
+            "timeout-minutes: 20",
+            "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+            "--platform=linux/amd64",
+            "test \"$size\" -le 1073741824",
+            "--network=none",
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges=true",
+            "--pull=never",
+        ):
+            self.assertIn(required, workflow)
+        for prohibited in (
+            "packages: write",
+            "docker login",
+            "docker push",
+            "build-push-action",
+            "secrets.",
+            "GITHUB_TOKEN",
+            "workflow_dispatch",
+        ):
+            self.assertNotIn(prohibited, workflow)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,58 @@
+name: runner-image-candidate
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/runner-image.yml
+      - runner-image/**
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build minimal linux-amd64 image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the candidate commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build the digest-pinned candidate
+        run: >-
+          docker build
+          --platform=linux/amd64
+          --tag=codex-runner-web:candidate
+          --file=runner-image/Dockerfile
+          runner-image
+      - name: Verify identity, size, and fixed tool boundary
+        run: |
+          set -eu
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' codex-runner-web:candidate)" = linux/amd64
+          size="$(docker image inspect --format '{{.Size}}' codex-runner-web:candidate)"
+          test "$size" -le 1073741824
+          docker run --rm --pull=never \
+            --network=none \
+            --read-only \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges=true \
+            --pids-limit=128 \
+            --memory=536870912 \
+            --memory-swap=536870912 \
+            --cpus=1.0 \
+            --tmpfs=/tmp:rw,nosuid,nodev,mode=1777,size=67108864 \
+            --entrypoint=/bin/sh \
+            codex-runner-web:candidate -ceu '
+              test "$(python3 -c '\''import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'\'')" = 3.12
+              test "$(node -p '\''process.versions.node.split(".")[0]'\'')" = 22
+              python3 -m pip --version
+              npm --version
+              npx --version
+              git --version
+              curl --version
+              rg --version
+              patch --version
+              timeout --version
+              for forbidden in bun cargo docker dotnet gcc g++ go gradle java javac make mvn php ruby rustc sudo swift; do
+                ! command -v "$forbidden"
+              done
+            '
