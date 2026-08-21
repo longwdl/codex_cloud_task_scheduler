@@ -1,9 +1,11 @@
 # Rootless Docker per-WorkItem execution contract
 
-This document records the next Runner isolation boundary. The repository currently contains only
-the pure fixed-argv planner and offline invariants; it does not yet switch `RunnerTurnExecutor` to
-Docker, install an engine, build an image, migrate existing Codex sessions, or authorize a live
-container Turn.
+This document records the next Runner isolation boundary. The repository contains a fail-closed,
+explicit `rootless_docker` configuration path, fixed-argv planner, per-WorkItem session binding, and
+offline fake-Docker integration tests. Production remains in `direct` mode: this work does not
+install an engine, build or approve an image, migrate an existing Codex session, satisfy the disk
+quota gate, or authorize a live container Turn. The offline example configuration is deliberately
+non-deployable until its zero digest is replaced by an independently reviewed image digest.
 
 Rootless Docker is preferred over a rootful daemon because both the daemon and containers run in a
 user namespace without host root privileges. The target account must never join a `docker` group or
@@ -25,21 +27,29 @@ Every Turn plan uses:
 - one deterministic container name bound to the validated Turn ID;
 - `--rm`, `--log-driver=none`, interactive standard input without a TTY, and no detached or restart
   mode;
+- explicit container UID/GID `0:0`; under the dedicated rootless daemon this maps to the
+  `codex-runner` host UID/GID and prevents an image-level `USER` from selecting a subordinate host
+  UID outside the existing Runner-UID firewall rule;
 - a read-only root filesystem and a bounded mode-`1777`, `nosuid`, `nodev` `/tmp` tmpfs;
 - `--cap-drop=ALL`, `no-new-privileges=true`, Docker's default seccomp profile, no privileged mode,
   no host PID/network/user namespace, no devices, and no added capabilities;
 - hard limits of 2 CPUs, 8 GiB memory with no extra swap, 512 PIDs, bounded file descriptors,
-  processes, core files, and the existing application timeout;
+  processes, core files, and the existing application timeout. A fixed in-container GNU `timeout`
+  kills Codex before the longer host-side Docker-client deadline; if the host deadline is ever hit,
+  the durable Turn remains `executing`/unknown for STATUS reconciliation rather than claiming a
+  clean failure;
 - the dedicated `codex-egress` network, which is only a name until live inspection proves its
   firewall behavior;
 - only four bind mounts for a Turn: that WorkItem's `repo/` read-write, that WorkItem's dedicated
-  Codex session home read-write, the root-owned Runner auth file read-only, and the root-owned output
+  Codex session home read-write, the protected Runner auth file read-only, and the root-owned output
   Schema read-only;
 - the Prompt only on standard input and no Docker or Codex argv derived from Issue text.
 
 The authentication check receives only the WorkItem session home and read-only auth file; it does
 not receive the repository or Schema. Docker output is never persisted by the daemon because the
 Runner already captures it through a bounded pipe and reduces it to the strict Agent result.
+The host Docker CLI receives an explicit empty, protected `DOCKER_CONFIG`; ambient `HOME`, Docker
+contexts, client proxy configuration, credential helpers, and a user-selected daemon are absent.
 
 Docker bind mounts are writable by default and directly expose host paths, so every source must be
 an owned, protected, non-symlink path derived from the durable WorkItem registry. The planner's four
@@ -59,17 +69,22 @@ The current direct Runner has one shared `/srv/codex-runner/app` containing Chat
 and all existing session state. Mounting that complete directory into every container would preserve
 behavior but would not isolate WorkItems, so it is forbidden.
 
-The intended container layout gives each WorkItem a separate protected session home below its own
-`runner-state/`. Only the minimum auth file is supplied read-only for the duration of the container.
-Before wiring this mode, an offline fake and a live credential-safe fixture must prove:
+The container layout gives each WorkItem a separate protected `runner-state/codex-home`. Its exact
+WorkItem/session/image binding is stored in `runner-state/codex-session.json`, which is never mounted
+into the container. START requires an absent binding and an absent or empty session home. RESUME
+requires the exact protected session and image binding; legacy shared-home state is therefore
+blocked rather than silently replaced. Only the minimum auth file is supplied read-only for the
+duration of the container.
+Offline fake execution now proves the START/RESUME identity and failure boundary. A live
+credential-safe fixture must still prove:
 
-1. `codex login status` succeeds without mutating the root-owned auth source;
+1. `codex login status` succeeds without mutating the protected auth source;
 2. token refresh does not require a writable shared auth file or silently invalidate the source;
 3. a new session persists only in the selected WorkItem home and resumes there by exact session ID;
 4. one container cannot enumerate, read, modify, or delete another WorkItem home;
-5. existing direct-mode WorkItems either migrate their exact session state with independently
-   verified counts and IDs or remain explicitly blocked; they must never receive a replacement
-   session automatically.
+5. existing direct-mode WorkItems migrate their exact session state only after independently
+   verified counts and IDs, followed by an exact host-side binding record; without both, RESUME is
+   rejected and must never create a replacement session.
 
 No credential value, session content, Prompt, raw JSONL stream, or full container output may be
 printed, logged, copied to GitHub/Slack, or committed during these proofs.
@@ -87,7 +102,10 @@ firewall boundary, and guarded rollback are specified in [EGRESS.md](EGRESS.md).
 Runner path on `s3` has passed the native parser, allow/deny, direct-egress, private/metadata,
 fail-closed, audit, and rotation probes. That result does not prove the future rootless container
 path: its container-visible proxy endpoint and no-bypass firewall behavior still require separate
-live acceptance with a credential-free image.
+live acceptance with a credential-free image. The protected Docker config accepts only the intended
+container-visible `http://10.0.2.2:3128` endpoint and the exact
+`unix:///run/user/<runner-uid>/docker.sock`; these structural checks are not substitutes for the
+live probes.
 
 The current `s3` root filesystem is ext4 without project quotas. CPU, memory, PID, tmpfs, and timeout
 limits therefore do not provide a per-WorkItem aggregate disk limit for the bind-mounted repository.

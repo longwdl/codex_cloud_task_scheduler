@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import signal
 import stat
@@ -12,6 +13,10 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from codex_dispatcher.executors.codex_cli import validate_egress_proxy_url
+from codex_dispatcher.executors.codex_docker import (
+    ROOTLESS_HOST_PROXY_URL,
+    DockerCodexRuntime,
+)
 from codex_dispatcher.runner_protocol import RunnerProtocolError
 from codex_dispatcher.runner_service import LinuxRunnerService, serve_one
 from codex_dispatcher.runner_transport import RunnerTransportRejected
@@ -39,6 +44,17 @@ class RunnerConfiguration:
     git_timeout_seconds: float
     codex_timeout_seconds: float
     egress_proxy_url: str | None
+    execution_mode: str = "direct"
+    docker_runtime: DockerCodexRuntime | None = None
+
+    def __post_init__(self) -> None:
+        if self.execution_mode == "direct" and self.docker_runtime is None:
+            return
+        if self.execution_mode == "rootless_docker" and isinstance(
+            self.docker_runtime, DockerCodexRuntime
+        ):
+            return
+        raise ValueError("execution_mode and docker_runtime are inconsistent")
 
 
 def load_runner_configuration(path: Path) -> RunnerConfiguration:
@@ -74,7 +90,7 @@ def load_runner_configuration(path: Path) -> RunnerConfiguration:
         "git_timeout_seconds",
         "codex_timeout_seconds",
     }
-    optional = {"egress_proxy_url"}
+    optional = {"egress_proxy_url", "execution_mode", "docker_runtime"}
     if (
         not isinstance(payload, dict)
         or not required.issubset(payload)
@@ -118,16 +134,30 @@ def load_runner_configuration(path: Path) -> RunnerConfiguration:
         )
     except ValueError as exc:
         raise RunnerConfigurationError("egress_proxy_url is invalid") from exc
+    execution_mode = payload.get("execution_mode", "direct")
+    if execution_mode not in {"direct", "rootless_docker"}:
+        raise RunnerConfigurationError("execution_mode is invalid")
+    docker_payload = payload.get("docker_runtime")
+    if execution_mode == "direct":
+        if "docker_runtime" in payload:
+            raise RunnerConfigurationError(
+                "docker_runtime requires rootless_docker execution_mode"
+            )
+        docker_runtime = None
+    else:
+        docker_runtime = _load_docker_runtime(docker_payload)
     return RunnerConfiguration(
-        git_path,
-        codex_path,
-        codex_home,
-        output_schema,
-        work_items_root,
-        active_lock_path,
-        git_timeout,
-        codex_timeout,
-        egress_proxy_url,
+        git_path=git_path,
+        codex_path=codex_path,
+        codex_home=codex_home,
+        output_schema=output_schema,
+        work_items_root=work_items_root,
+        active_lock_path=active_lock_path,
+        git_timeout_seconds=git_timeout,
+        codex_timeout_seconds=codex_timeout,
+        egress_proxy_url=egress_proxy_url,
+        execution_mode=execution_mode,
+        docker_runtime=docker_runtime,
     )
 
 
@@ -146,6 +176,7 @@ def build_runner_service(configuration: RunnerConfiguration) -> LinuxRunnerServi
         output_schema=configuration.output_schema,
         timeout_seconds=configuration.codex_timeout_seconds,
         egress_proxy_url=configuration.egress_proxy_url,
+        docker_runtime=configuration.docker_runtime,
     )
     return LinuxRunnerService(
         workspace=workspace,
@@ -287,9 +318,45 @@ def _validate_trusted_parents(path: Path, field: str) -> None:
 
 
 def _positive_number(value: Any, field: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
         raise RunnerConfigurationError(f"{field} must be positive")
     return float(value)
+
+
+def _load_docker_runtime(payload: Any) -> DockerCodexRuntime:
+    expected = {
+        "docker_path",
+        "docker_host",
+        "cli_config_directory",
+        "image",
+        "egress_proxy_url",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected:
+        raise RunnerConfigurationError("docker_runtime fields are invalid")
+    docker_path = _protected_executable(payload["docker_path"], "docker_path")
+    cli_config_directory = _protected_directory(
+        payload["cli_config_directory"], "cli_config_directory"
+    )
+    expected_host = f"unix:///run/user/{os.geteuid()}/docker.sock"
+    if payload["docker_host"] != expected_host:
+        raise RunnerConfigurationError("docker_host is not the rootless user socket")
+    if payload["egress_proxy_url"] != ROOTLESS_HOST_PROXY_URL:
+        raise RunnerConfigurationError("Docker egress_proxy_url is invalid")
+    try:
+        return DockerCodexRuntime(
+            docker_path=docker_path,
+            docker_host=payload["docker_host"],
+            cli_config_directory=cli_config_directory,
+            image=payload["image"],
+            egress_proxy_url=payload["egress_proxy_url"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise RunnerConfigurationError("docker_runtime values are invalid") from exc
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "git_path": "/usr/bin/git",
+  "codex_path": "/srv/codex-runner/tools/codex/0.147.0/bin/codex",
+  "codex_home": "/srv/codex-runner/app",
+  "output_schema": "/srv/codex-runner/etc/agent-result.schema.json",
+  "work_items_root": "/srv/codex-runner/work-items",
+  "active_lock_path": "/srv/codex-runner/run/active.lock",
+  "egress_proxy_url": "http://127.0.0.1:3128",
+  "git_timeout_seconds": 120,
+  "codex_timeout_seconds": 3600,
+  "execution_mode": "rootless_docker",
+  "docker_runtime": {
+    "docker_path": "/usr/bin/docker",
+    "docker_host": "unix:///run/user/1002/docker.sock",
+    "cli_config_directory": "/srv/codex-runner/run/docker-cli",
+    "image": "replace.invalid/codex-runner@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "egress_proxy_url": "http://10.0.2.2:3128"
+  }
+}

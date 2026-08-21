@@ -21,6 +21,19 @@ from codex_dispatcher.executors.codex_cli import (
     build_codex_login_status_invocation,
     validate_egress_proxy_url,
 )
+from codex_dispatcher.executors.codex_docker import (
+    AUTH_TIMEOUT_SECONDS,
+    DockerCodexRuntime,
+    build_docker_codex_plan,
+    build_docker_login_status_plan,
+)
+from codex_dispatcher.runner_docker import (
+    DockerWorkItemContext,
+    RunnerDockerError,
+    bind_docker_session,
+    prepare_docker_work_item,
+    validate_docker_command_boundary,
+)
 from codex_dispatcher.runner_protocol import (
     RunnerOperation,
     RunnerProtocolError,
@@ -34,7 +47,11 @@ from codex_dispatcher.runner_transport import (
     RunnerTurnReply,
     parse_runner_turn_reply,
 )
-from codex_dispatcher.runner_workspace import RunnerWorkspace, RunnerWorkspaceError
+from codex_dispatcher.runner_workspace import (
+    RunnerWorkspace,
+    RunnerWorkspaceError,
+    RunnerWorkspacePaths,
+)
 
 
 _TURN_RECORD_VERSION = 1
@@ -65,6 +82,7 @@ class RunnerTurnExecutor:
         output_schema: Path,
         timeout_seconds: float = 3600.0,
         egress_proxy_url: str | None = None,
+        docker_runtime: DockerCodexRuntime | None = None,
     ) -> None:
         for path, field in (
             (codex_path, "codex_path"),
@@ -85,6 +103,11 @@ class RunnerTurnExecutor:
             if egress_proxy_url is not None
             else None
         )
+        if docker_runtime is not None and not isinstance(
+            docker_runtime, DockerCodexRuntime
+        ):
+            raise TypeError("docker_runtime must be a DockerCodexRuntime or None")
+        self._docker_runtime = docker_runtime
 
     def execute(self, request: RunnerRequest, prompt: bytes) -> RunnerTurnReply:
         if request.operation not in {RunnerOperation.START, RunnerOperation.RESUME}:
@@ -110,7 +133,7 @@ class RunnerTurnExecutor:
             request.work_item_id, request.input_head_sha
         )
         self._write_record(record_path, _TurnRecord(request, "executing", None))
-        reply = self._run_codex(request, prompt, paths.repository)
+        reply = self._run_codex(request, prompt, paths)
         self._write_record(record_path, _TurnRecord(request, "finished", reply))
         return reply
 
@@ -145,14 +168,16 @@ class RunnerTurnExecutor:
         self,
         request: RunnerRequest,
         prompt: bytes,
-        repository: Path,
+        paths: RunnerWorkspacePaths,
     ) -> RunnerTurnReply:
         assert request.turn_id is not None
+        if self._docker_runtime is not None:
+            return self._run_codex_in_docker(request, prompt, paths)
         if not self._chatgpt_authentication_is_ready():
             return self._failed_reply(request, "codex_auth_invalid")
         plan = build_codex_invocation(
             codex_path=self._codex_path,
-            repository_directory=repository,
+            repository_directory=paths.repository,
             codex_home=self._codex_home,
             output_schema=self._output_schema,
             session_id=request.session_id,
@@ -217,6 +242,160 @@ class RunnerTurnExecutor:
             head_sha=head_sha,
             output_sha256=sha256(canonical.encode("utf-8")).hexdigest(),
             result=result,
+        )
+
+    def _run_codex_in_docker(
+        self,
+        request: RunnerRequest,
+        prompt: bytes,
+        paths: RunnerWorkspacePaths,
+    ) -> RunnerTurnReply:
+        assert self._docker_runtime is not None
+        assert request.turn_id is not None
+        auth_file = self._codex_home / "auth.json"
+        try:
+            context = prepare_docker_work_item(
+                runtime=self._docker_runtime,
+                paths=paths,
+                request=request,
+                auth_file=auth_file,
+                output_schema=self._output_schema,
+            )
+            if not self._docker_authentication_is_ready(
+                request, context, auth_file=auth_file
+            ):
+                return self._failed_reply(request, "codex_auth_invalid")
+            validate_docker_command_boundary(
+                runtime=self._docker_runtime,
+                context=context,
+                auth_file=auth_file,
+                output_schema=self._output_schema,
+            )
+            plan = build_docker_codex_plan(
+                runtime=self._docker_runtime,
+                work_item_id=request.work_item_id,
+                turn_id=request.turn_id,
+                repository=context.repository,
+                codex_home=context.codex_home,
+                auth_file=auth_file,
+                output_schema=self._output_schema,
+                session_id=request.session_id,
+                timeout_seconds=self._timeout_seconds,
+            )
+            command = run_binary_command(
+                plan.argv,
+                timeout_seconds=self._timeout_seconds + 15.0,
+                max_output_bytes=4 * 1024 * 1024,
+                max_stderr_bytes=256 * 1024,
+                env=plan.environment,
+                input_bytes=prompt,
+                cwd=str(context.state),
+            )
+        except (RunnerDockerError, OSError, ValueError):
+            return self._failed_reply(request, "docker_boundary_invalid")
+        if command.timed_out:
+            raise RunnerTurnError("Docker Turn outcome is unresolved")
+        if (
+            command.error is not None
+            or command.stdout_truncated
+            or command.stderr_truncated
+            or command.returncode is None
+        ):
+            return self._failed_reply(request, "codex_process_failed")
+        try:
+            summary = parse_codex_jsonl(
+                command.stdout,
+                expected_session_id=request.session_id,
+            )
+        except CodexJsonlError as exc:
+            return self._failed_reply(request, f"codex_output_{exc.code}")
+        try:
+            bind_docker_session(
+                context,
+                work_item_id=request.work_item_id,
+                session_id=summary.session_id,
+            )
+        except RunnerDockerError:
+            return self._failed_reply(
+                request,
+                "codex_session_binding_failed",
+                session_id=summary.session_id,
+            )
+        if command.returncode != 0 or summary.status is not CodexTerminalStatus.COMPLETED:
+            return self._failed_reply(
+                request,
+                "codex_turn_failed",
+                session_id=summary.session_id,
+            )
+        assert summary.final_message is not None
+        try:
+            result = parse_agent_result(summary.final_message)
+        except RunnerProtocolError:
+            return self._failed_reply(
+                request,
+                "agent_result_invalid",
+                session_id=summary.session_id,
+            )
+        try:
+            head_sha = self._workspace.current_head(
+                request.work_item_id, require_clean=True
+            )
+        except RunnerWorkspaceError:
+            return self._failed_reply(
+                request,
+                "checkpoint_invalid",
+                session_id=summary.session_id,
+            )
+        canonical = agent_result_to_json(result)
+        return RunnerTurnReply(
+            request.operation,
+            request.work_item_id,
+            request.turn_id,
+            RunnerTurnRemoteState.FINISHED,
+            session_id=summary.session_id,
+            head_sha=head_sha,
+            output_sha256=sha256(canonical.encode("utf-8")).hexdigest(),
+            result=result,
+        )
+
+    def _docker_authentication_is_ready(
+        self,
+        request: RunnerRequest,
+        context: DockerWorkItemContext,
+        *,
+        auth_file: Path,
+    ) -> bool:
+        assert self._docker_runtime is not None
+        validate_docker_command_boundary(
+            runtime=self._docker_runtime,
+            context=context,
+            auth_file=auth_file,
+            output_schema=self._output_schema,
+        )
+        plan = build_docker_login_status_plan(
+            runtime=self._docker_runtime,
+            work_item_id=request.work_item_id,
+            codex_home=context.codex_home,
+            auth_file=auth_file,
+        )
+        command = run_binary_command(
+            plan.argv,
+            timeout_seconds=AUTH_TIMEOUT_SECONDS + 10.0,
+            max_output_bytes=4096,
+            max_stderr_bytes=4096,
+            env=plan.environment,
+            cwd=str(context.state),
+        )
+        if command.timed_out:
+            raise RunnerTurnError("Docker authentication outcome is unresolved")
+        return (
+            not command.timed_out
+            and command.error is None
+            and not command.stdout_truncated
+            and not command.stderr_truncated
+            and command.returncode == 0
+            and command.stdout == b""
+            and command.stderr == _CHATGPT_LOGIN_STATUS
         )
 
     def _chatgpt_authentication_is_ready(self) -> bool:

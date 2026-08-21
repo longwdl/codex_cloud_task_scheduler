@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ from codex_dispatcher.runner_main import (
     load_runner_configuration,
     run,
 )
+from codex_dispatcher.executors.codex_docker import ROOTLESS_HOST_PROXY_URL
 
 
 def protected_file(path: Path, content: str, *, executable: bool = False) -> None:
@@ -78,6 +80,61 @@ class RunnerMainTests(unittest.TestCase):
             path.write_text(json.dumps(payload), encoding="utf-8")
 
             self.assertIsNone(load_runner_configuration(path).egress_proxy_url)
+
+    def test_explicit_rootless_docker_configuration_is_strict_and_wired(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = config(root)
+            docker_config = root / "docker-config"
+            docker_config.mkdir(mode=0o700)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["execution_mode"] = "rootless_docker"
+            payload["docker_runtime"] = {
+                "docker_path": str(root / "git"),
+                "docker_host": f"unix:///run/user/{os.geteuid()}/docker.sock",
+                "cli_config_directory": str(docker_config),
+                "image": "registry.example.invalid/codex-runner@sha256:" + "a" * 64,
+                "egress_proxy_url": ROOTLESS_HOST_PROXY_URL,
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            loaded = load_runner_configuration(path)
+
+            self.assertEqual("rootless_docker", loaded.execution_mode)
+            self.assertIsNotNone(loaded.docker_runtime)
+            self.assertIsNotNone(build_runner_service(loaded))
+
+    def test_rejects_implicit_partial_or_wrong_rootless_docker_configuration(self) -> None:
+        cases = ("implicit", "partial", "socket", "proxy", "unknown")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                path = config(root)
+                docker_config = root / "docker-config"
+                docker_config.mkdir(mode=0o700)
+                runtime = {
+                    "docker_path": str(root / "git"),
+                    "docker_host": f"unix:///run/user/{os.geteuid()}/docker.sock",
+                    "cli_config_directory": str(docker_config),
+                    "image": "registry.example.invalid/codex-runner@sha256:" + "a" * 64,
+                    "egress_proxy_url": ROOTLESS_HOST_PROXY_URL,
+                }
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["docker_runtime"] = runtime
+                if case != "implicit":
+                    payload["execution_mode"] = "rootless_docker"
+                if case == "partial":
+                    del runtime["image"]
+                elif case == "socket":
+                    runtime["docker_host"] = "unix:///var/run/docker.sock"
+                elif case == "proxy":
+                    runtime["egress_proxy_url"] = "http://127.0.0.1:3128"
+                elif case == "unknown":
+                    runtime["extra"] = True
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+                with self.assertRaises(RunnerConfigurationError):
+                    load_runner_configuration(path)
 
     def test_rejects_proxy_credentials_and_non_http_endpoints(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

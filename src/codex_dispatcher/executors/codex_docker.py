@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,13 +19,17 @@ from codex_dispatcher.work_items import validate_turn_id, validate_work_item_id
 
 CONTAINER_CODEX_HOME = Path("/codex-home")
 CONTAINER_CODEX_PATH = Path("/usr/local/bin/codex")
+CONTAINER_TIMEOUT_PATH = Path("/usr/bin/timeout")
 CONTAINER_REPOSITORY = Path("/workspace")
 CONTAINER_SCHEMA = Path("/runner-contract/agent-result.schema.json")
 DOCKER_NETWORK = "codex-egress"
+ROOTLESS_HOST_PROXY_URL = "http://10.0.2.2:3128"
 CPU_LIMIT = "2.0"
 MEMORY_LIMIT_BYTES = 8 * 1024 * 1024 * 1024
 PIDS_LIMIT = 512
 TMPFS_LIMIT_BYTES = 1024 * 1024 * 1024
+AUTH_TIMEOUT_SECONDS = 20
+CONTAINER_KILL_GRACE_SECONDS = 5
 
 _IMAGE_RE = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
 
@@ -35,11 +40,13 @@ class DockerCodexRuntime:
 
     docker_path: Path
     docker_host: str
+    cli_config_directory: Path
     image: str
     egress_proxy_url: str | None = None
 
     def __post_init__(self) -> None:
         _absolute_host_path(self.docker_path, "docker_path")
+        _absolute_host_path(self.cli_config_directory, "cli_config_directory")
         if (
             not isinstance(self.docker_host, str)
             or not self.docker_host.startswith("unix:///")
@@ -89,9 +96,14 @@ def build_docker_login_status_plan(
         *_container_environment(inner.environment),
         f"--workdir={CONTAINER_CODEX_HOME}",
         runtime.image,
+        *_container_timeout(AUTH_TIMEOUT_SECONDS),
         *inner.argv,
     )
-    return DockerCodexPlan(argv, MappingProxyType({}), False)
+    return DockerCodexPlan(
+        argv,
+        MappingProxyType({"DOCKER_CONFIG": str(runtime.cli_config_directory)}),
+        False,
+    )
 
 
 def build_docker_codex_plan(
@@ -104,6 +116,7 @@ def build_docker_codex_plan(
     auth_file: Path,
     output_schema: Path,
     session_id: str | None,
+    timeout_seconds: float = 3600.0,
 ) -> DockerCodexPlan:
     """Build a fixed Docker invocation; the Prompt remains standard-input only."""
     proxy_url = _required_proxy_url(runtime)
@@ -113,6 +126,12 @@ def build_docker_codex_plan(
     codex_home = _mount_source(codex_home, "codex_home")
     auth_file = _mount_source(auth_file, "auth_file")
     output_schema = _mount_source(output_schema, "output_schema")
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or timeout_seconds <= 0
+    ):
+        raise ValueError("timeout_seconds must be positive")
     _validate_work_item_mounts(repository, codex_home)
     if auth_file.name != "auth.json":
         raise ValueError("auth_file must name auth.json")
@@ -135,9 +154,14 @@ def build_docker_codex_plan(
         *_container_environment(inner.environment),
         f"--workdir={CONTAINER_REPOSITORY}",
         runtime.image,
+        *_container_timeout(timeout_seconds),
         *inner.argv,
     )
-    return DockerCodexPlan(argv, MappingProxyType({}), True)
+    return DockerCodexPlan(
+        argv,
+        MappingProxyType({"DOCKER_CONFIG": str(runtime.cli_config_directory)}),
+        True,
+    )
 
 
 def _docker_prefix(runtime: DockerCodexRuntime, name: str) -> tuple[str, ...]:
@@ -146,11 +170,13 @@ def _docker_prefix(runtime: DockerCodexRuntime, name: str) -> tuple[str, ...]:
         f"--host={runtime.docker_host}",
         "run",
         "--rm",
+        f"--stop-timeout={CONTAINER_KILL_GRACE_SECONDS}",
         "--pull=never",
         "--log-driver=none",
         f"--name={name}",
         "--interactive",
         "--init",
+        "--user=0:0",
         "--read-only",
         f"--network={DOCKER_NETWORK}",
         "--cap-drop=ALL",
@@ -166,6 +192,15 @@ def _docker_prefix(runtime: DockerCodexRuntime, name: str) -> tuple[str, ...]:
             "--tmpfs=/tmp:rw,nosuid,nodev,mode=1777,"
             f"size={TMPFS_LIMIT_BYTES}"
         ),
+    )
+
+
+def _container_timeout(timeout_seconds: float) -> tuple[str, ...]:
+    return (
+        str(CONTAINER_TIMEOUT_PATH),
+        "--signal=KILL",
+        f"--kill-after={CONTAINER_KILL_GRACE_SECONDS}s",
+        f"{math.ceil(timeout_seconds)}s",
     )
 
 
