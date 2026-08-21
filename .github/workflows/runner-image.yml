@@ -23,7 +23,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out the candidate commit
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Build the digest-pinned candidate
         run: >-
           docker build
@@ -93,7 +95,7 @@ jobs:
           printf '%s\n' "$EXPECTED_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
           test "$EXPECTED_COMMIT" = "$ACTUAL_COMMIT"
       - name: Check out the exact main commit without persisted credentials
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -164,6 +166,8 @@ jobs:
         run: |
           set -euo pipefail
           image_ref="$IMAGE_REPOSITORY:sha-$ACTUAL_COMMIT"
+          docker image rm "$image_ref"
+          docker pull --platform=linux/amd64 "$image_ref"
           mapfile -t repo_digests < <(
             docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image_ref" | sort -u
           )
@@ -172,7 +176,6 @@ jobs:
           digest="${repo_digest#"$IMAGE_REPOSITORY@sha256:"}"
           test "$digest" != "$repo_digest"
           printf '%s\n' "$digest" | grep -Eq '^[0-9a-f]{64}$'
-          docker image rm "$image_ref"
           docker pull --platform=linux/amd64 "$repo_digest"
           mapfile -t pulled_digests < <(
             docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$repo_digest" | sort -u

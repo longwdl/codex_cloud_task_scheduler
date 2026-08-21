@@ -83,7 +83,7 @@ class RunnerImageTests(unittest.TestCase):
             "if: github.event_name == 'pull_request'",
             "ubuntu-24.04",
             "timeout-minutes: 20",
-            "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
             "--platform=linux/amd64",
             "test \"$size\" -le 1073741824",
             "image_id=",
@@ -148,6 +148,20 @@ class RunnerImageTests(unittest.TestCase):
         self.assertNotIn("push:\n", workflow)
         self.assertNotIn("schedule:", workflow)
         self.assertNotIn("codex-dispatcher-fixture", workflow)
+        self.assertEqual(2, workflow.count("persist-credentials: false"))
+
+        pullback = workflow.split(
+            "      - name: Pull back and record the exact RepoDigest\n", 1
+        )[1].split("      - name: Remove registry credentials\n", 1)[0]
+        first_readback = (
+            '          docker image rm "$image_ref"\n'
+            '          docker pull --platform=linux/amd64 "$image_ref"\n'
+        )
+        digest_readback = '          docker pull --platform=linux/amd64 "$repo_digest"\n'
+        self.assertIn(first_readback, pullback)
+        self.assertIn(digest_readback, pullback)
+        self.assertEqual(1, pullback.count('docker image rm "$image_ref"'))
+        self.assertNotIn('docker image rm "$repo_digest"', pullback)
 
 
 if __name__ == "__main__":
