@@ -84,9 +84,10 @@ Prepare a rebuildable Linux host with:
 - no GitHub write credential;
 - no Control Host login key, SSH agent, production secret, personal data, or host filesystem mount.
 
-The first fixture intentionally runs without Docker or per-task operating-system restrictions. The
-owner accepts loss or corruption of Runner-local task directories and Codex session state. Do not
-place a higher-value repository on this Runner until the Docker hardening phase is complete.
+The original fixture-stage deployment intentionally ran without Docker or per-task operating-system
+restrictions. The current `s3` Fixture path uses the reviewed rootless per-WorkItem container
+boundary, but higher-value repositories remain prohibited until the outstanding attack and recovery
+acceptance in `deploy/runner/DOCKER.md` is complete.
 
 Return later, without secrets:
 

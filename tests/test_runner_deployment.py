@@ -69,7 +69,9 @@ class RunnerDeploymentTests(unittest.TestCase):
         self.assertIn("Reload rather than restart sshd", documentation)
         self.assertIn("wrapper discards the inherited environment", documentation)
         self.assertIn("Keep the Dispatcher timer disabled", documentation)
-        self.assertIn("Container boundary still required", documentation)
+        self.assertIn("Container boundary status", documentation)
+        self.assertIn("successful container RESUME Turn", documentation)
+        self.assertIn("does not authorize\nhigher-value repositories", documentation)
         self.assertIn("do not move or\nrewrite their contents", documentation)
 
 

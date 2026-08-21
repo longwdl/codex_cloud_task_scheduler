@@ -132,11 +132,11 @@ remove only the new sshd drop-in and external authorized-key file, validate `ssh
 sshd. Do not delete the new account, any WorkItem, session, turn record, lock file, branch, or backup
 until the old forced-command path has passed a read-only `STATUS` check.
 
-## Container boundary still required
+## Container boundary status
 
-The dedicated account and root-owned inputs prevent Codex from rewriting the Runner service or SSH
-authorization after the later container boundary is active. They do not yet stop a directly
-executed Codex process from reading or damaging another WorkItem or the shared `CODEX_HOME`.
-Higher-value repositories remain prohibited until per-WorkItem container storage, session/auth
-handling, resource controls, and internal-network/metadata denial are implemented and live-tested.
-The staged fixed-argv contract and its remaining gates are documented in [DOCKER.md](DOCKER.md).
+The dedicated account and root-owned inputs are now combined with rootless per-WorkItem container
+storage, isolated session homes, fixed resource controls, and proxy-only egress. A dedicated private
+Fixture has passed one successful container RESUME Turn and recovery read-back. This removes the
+original direct-execution boundary for configured Fixture work, but it does not authorize
+higher-value repositories: the remaining attack and recovery gates, operational exceptions, and
+rollback rules are documented in [DOCKER.md](DOCKER.md).

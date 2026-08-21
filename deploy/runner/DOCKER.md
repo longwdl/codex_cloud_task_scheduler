@@ -3,9 +3,11 @@
 This document records the Runner isolation boundary. The repository contains a fail-closed,
 explicit `rootless_docker` configuration path, fixed-argv planner, per-WorkItem session binding, and
 offline fake-Docker integration tests. The dedicated Fixture Runner has been switched to this mode,
-but live admission remains incomplete and the Dispatcher timer remains disabled until one successful
-container Turn and its recovery checks pass. The offline example configuration is deliberately
-non-deployable until its zero digest is replaced by an independently reviewed image digest.
+and a dedicated private Fixture has now passed one successful container RESUME Turn plus independent
+SQLite, Runner, GitHub, Slack, Actions, and repeated-idle read-back. The Dispatcher timer remains
+disabled and higher-value repositories remain prohibited until the remaining attack and recovery
+acceptance is complete. The offline example configuration is deliberately non-deployable until its
+zero digest is replaced by an independently reviewed image digest.
 
 Rootless Docker is preferred over a rootful daemon because both the daemon and containers run in a
 user namespace without host root privileges. The target account must never join a `docker` group or
@@ -45,14 +47,16 @@ Every Turn plan uses:
   clean failure;
 - the dedicated `codex-egress` network, which is only a name until live inspection proves its
   firewall behavior;
-- only five bind mounts for a Turn: the root-owned digest-verified Codex executable read-only, that
-  WorkItem's `repo/` read-write, that WorkItem's dedicated Codex session home read-write, the
-  protected Runner auth file read-only, and the root-owned output Schema read-only;
+- only six bind mounts for a Turn: the independently digest-verified root-owned `codex` and
+  `codex-code-mode-host` executables read-only, that WorkItem's `repo/` read-write, that WorkItem's
+  dedicated Codex session home read-write, the protected Runner auth file read-only, and the
+  root-owned output Schema read-only;
 - the Prompt only on standard input and no Docker or Codex argv derived from Issue text.
 
-The authentication check receives only the WorkItem session home and read-only auth file; it does
-not receive the repository or Schema. Docker output is never persisted by the daemon because the
-Runner already captures it through a bounded pipe and reduces it to the strict Agent result.
+The authentication check receives the two read-only executables, the WorkItem session home, and the
+read-only auth file; it does not receive the repository or Schema. Docker output is never persisted
+by the daemon because the Runner already captures it through a bounded pipe and reduces it to the
+strict Agent result.
 The host Docker CLI receives an explicit empty, protected `DOCKER_CONFIG`; ambient `HOME`, Docker
 contexts, client proxy configuration, credential helpers, and a user-selected daemon are absent.
 
@@ -93,8 +97,8 @@ their protected-path and configured-digest checks. The original version-1 bindin
 so a Runner code rollback can still read it; conflicting sidecars and other legacy or shared-home
 state remain blocked. Only the minimum auth file is supplied read-only for the duration of the
 container.
-Offline fake execution now proves the START/RESUME identity and failure boundary. A live
-credential-safe fixture must still prove:
+Offline fake execution proves the START/RESUME identity and failure boundary. Live acceptance must
+prove:
 
 1. `codex login status` succeeds without mutating the protected auth source;
 2. token refresh does not require a writable shared auth file or silently invalidate the source;
@@ -103,6 +107,13 @@ credential-safe fixture must still prove:
 5. existing direct-mode WorkItems migrate their exact session state only after independently
    verified counts and IDs, followed by an exact host-side binding record; without both, RESUME is
    rejected and must never create a replacement session.
+
+The dedicated Issue `#24` recovery fixture proved items 1, 3, and 5 for one existing isolated
+session: the original version-1 binding remained byte-identical, the companion sidecar was added
+only after authentication and executable validation, and Turn 2 resumed the same session and
+produced one checkpoint. It did not intentionally force a token refresh, so item 2 remains a
+version-specific operational risk. Cross-WorkItem denial and the network/disk boundaries were
+proved separately with credential-free probes; repeat them whenever those boundaries change.
 
 No credential value, session content, Prompt, raw JSONL stream, or full container output may be
 printed, logged, copied to GitHub/Slack, or committed during these proofs.
@@ -116,12 +127,11 @@ containers. Docker's [`none` network](https://docs.docker.com/engine/network/dri
 safe negative-control test but cannot run Codex by itself. Firewall, routing, DNS proxy, and metadata
 rules are separate host infrastructure changes and require exact-command approval and rollback.
 The selected unified HTTP CONNECT proxy, protected allowlist, metadata-only audit format, Runner-UID
-firewall boundary, and guarded rollback are specified in [EGRESS.md](EGRESS.md). The host-level
-Runner path on `s3` has passed the native parser, allow/deny, direct-egress, private/metadata,
-fail-closed, audit, and rotation probes. That result does not prove the future rootless container
-path: its container-visible proxy endpoint and no-bypass firewall behavior still require separate
-live acceptance with a credential-free image. The protected Docker config accepts only the intended
-container-visible `http://10.0.2.2:3128` endpoint and the exact
+firewall boundary, and guarded rollback are specified in [EGRESS.md](EGRESS.md). The host and
+rootless-container paths on `s3` have passed the credential-free parser, allow/deny, direct-bypass,
+private/metadata, fail-closed, audit, and rotation probes. Those observations are version-specific
+and must be repeated after proxy, firewall, Docker, image, or network changes. The protected Docker
+config accepts only the intended container-visible `http://10.0.2.2:3128` endpoint and the exact
 `unix:///run/user/<runner-uid>/docker.sock`; these structural checks are not substitutes for the
 live probes.
 
@@ -152,7 +162,7 @@ prevents admission from intentionally consuming the final protected capacity. Ne
 exhaustion, clean-unmount, filesystem-check, remount, restart, and recovery acceptance on the target.
 A free-space preflight alone remains only an admission/alert control, not isolation.
 
-## Live acceptance boundary
+## Live acceptance boundary and current status
 
 Before the first container Turn:
 
@@ -167,6 +177,11 @@ Before the first container Turn:
 6. run one dedicated private Fixture WorkItem, read back SQLite/GitHub/Runner/Slack/Actions, and prove
    an immediate repeated sweep is idle;
 7. keep higher-value repositories prohibited until attack and recovery acceptance is complete.
+
+Items 1 through 6 have passed for the dedicated private Fixture, including the successful Issue
+`#24` RESUME recorded in `docs/live-test-evidence.md`. Item 7 remains in force. The Dispatcher timer
+is intentionally disabled while the operator reviews this checkpoint; successful Fixture admission
+does not authorize unattended use for another repository class.
 
 Rollback keeps the Dispatcher timer disabled, stops the rootless user daemon, restores the previous
 Runner release/config/account binding, and uses read-only STATUS reconciliation. Preserve every

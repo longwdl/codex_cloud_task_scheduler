@@ -276,22 +276,18 @@ shell fragment from the runner or issue.
 - Slack is never an input or control channel.
 - Unknown external state is never success and is never resolved by blind replay.
 
-## First-phase runner risk acceptance
+## Runner isolation status
 
-The initial Linux SSH Runner runs directly on a dedicated host without Docker restrictions. This is
-an explicit fixture-stage risk acceptance:
+The initial dedicated Linux SSH Runner used direct host execution as an explicit Fixture-stage risk
+acceptance. The configured `s3` Fixture path now executes Codex in a rootless per-WorkItem container
+with bounded disk, resources, mounts, capabilities, session home, and proxy-only network access.
+The host Docker socket is never mounted and containers never run with `--privileged`.
 
-- a malicious or defective task may corrupt the runner, fill its disk, or delete any task data the
-  runner account can access, including the shared Codex auth/session directory;
-- the runner must contain no production secrets, personal data, deployment credentials, inbound
-  SSH key to the control host, or mounted control-host filesystem;
-- loss of uncheckpointed code or local Codex session context is accepted;
-- published commits, GitHub issue state, control-host SQLite, and Slack metadata remain outside the
-  runner failure domain.
-
-Before using the runner for higher-value repositories, execute Codex inside a per-task Docker
-container with explicit resource, filesystem, network, capability, and secret boundaries. Docker
-must not mount the host Docker socket or run with `--privileged`.
+The runner still contains no production secrets, personal data, deployment credentials, inbound
+SSH key to the Control Host, or mounted Control Host filesystem. Published commits, GitHub state,
+Control Host SQLite, and Slack metadata remain outside its failure domain. Higher-value repositories
+remain prohibited until the outstanding attack and recovery acceptance in
+`deploy/runner/DOCKER.md` is complete; a successful private Fixture Turn is not a general admission.
 
 ## Dependency policy
 

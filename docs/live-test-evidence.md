@@ -324,6 +324,76 @@ deleted. The Dispatcher timer therefore remains disabled and temporary administr
 in place pending an explicit capacity decision. No secret, Prompt, private key, complete Runner
 output, merge, deployment, release, tag, or push was produced by this checkpoint.
 
+## Runner companion recovery and successful container fixture — 2026-08-21
+
+This later checkpoint supersedes the admission shortage above for the dedicated private Fixture.
+The broad `codex-universal` image was replaced by the reviewed Python/npm Web baseline, and the
+active Runner image was pinned to
+`ghcr.io/longwdl/codex-cloud-task-scheduler-runner@sha256:da3662343e86ebeeba97f54f1c7f03faf03b988e07677cbd171a80d9903c772d`.
+Private Fixture Issue [`#24`](https://github.com/longwdl/codex-dispatcher-fixture/issues/24)
+then created exactly one 8 GiB WorkItem image and reached Codex, but Turn 1 deterministically blocked
+before repository changes because the container mounted `/usr/local/bin/codex` without its required
+`/usr/local/bin/codex-code-mode-host` sibling. The blocked checkpoint preserved one WorkItem, one
+session, one Turn, the original branch and directory, one Slack root plus one failure reply, no
+published SHA, and no PR.
+
+Commit `df1654b280011e0a0696f598af66c4c0d8f195fd` added an independently configured and freshly
+verified companion digest, a sixth read-only Turn mount, and a backward-compatible protected
+`codex-session-tools.json` sidecar. The original version-1 `codex-session.json` is never rewritten,
+so the previous Runner can still read it after restoring the previous configuration. All 390 tests,
+`compileall`, and `git diff --check` passed locally. The exact root-owned candidate passed the same
+390 tests and `compileall` on `s3` under the production `codex-runner` account and `umask 077`.
+
+Before switching, the Dispatcher timer was disabled, its service was inactive, SQLite had no active
+Turn and passed `integrity_check`, read-only preflight was strictly idle, the Runner lock was
+acquirable, and Docker had no container. One mode-`0600` Online Backup was created before the Runner
+switch and another immediately before the GitHub writes. The root-owned Runner `current` symlink moved from release
+`d7753fbbe2bae2ea3a16fa08c6114ad0b6c91ba8` to the exact commit above, and the protected config
+added only companion SHA-256
+`00ecf5d040865b97884c488883abd342581c2a432debe7a54e4646bceee3d2d6`. The prior config remains at
+`/srv/codex-runner/etc/config.json.pre-code-mode-host-d7753fb-to-df1654b`. No image rebuild or pull,
+sshd, firewall, proxy, network, Docker daemon, or Control Host release change was required.
+
+A credential-free `--network=none`, read-only-rootfs probe mounted only the two executables, checked
+both hashes, executed `codex --version` and the companion help path, removed its container, and left
+no Docker state. A configuration-derived STATUS then returned the original Turn 1 as the same
+`finished/blocked` record with session `01a0255f-2cec-79e3-a892-3fab14e584db` and unchanged base
+SHA `6bea603ab3eb0fc29f678fe069273565b602bc57`.
+
+One marker-bounded maintainer comment re-enabled Issue `#24`. Read-only planning selected exactly
+that Issue, and an additional pure resolution proof required `action=reactivate`, `is_new=false`,
+the original WorkItem `wi_59089b353ecda298b262a063`, branch
+`codex/issue-24-59089b353ecd`, directory, session, and next Turn number `2`. The only write-enabled
+sweep created Turn `turn_5f3e0ff91d694653b02a21ee937bfcb5` and used RESUME. It did not PREPARE,
+START a replacement session, or create a second WorkItem.
+
+Turn 2 finished `completed` at checkpoint `acb03e63f045ec5642d9e19fe44b659b53834284`.
+Independent read-back proved:
+
+- SQLite remained `integrity=ok`, contained exactly the original WorkItem and two ordered Turns for
+  Issue `#24`, bound Draft PR
+  [`#25`](https://github.com/longwdl/codex-dispatcher-fixture/pull/25), and had no active Turn;
+- the original session file remained byte-identical at SHA-256
+  `a30e7387694a0f5d37bf0cad41b26480984369c4311a2efb68ad156f9097cee5`; the new mode-`0600`
+  sidecar bound the same WorkItem, session, image, primary Codex hash, and companion hash;
+- strict Runner STATUS returned Turn 2 as `finished/completed` with the same session and checkpoint,
+  while the worktree retained the same branch, exactly one new commit, and only `README.md` changed;
+- Issue `#24` had `agent:review`, exactly the original fixed status comment plus the maintainer
+  context, and exactly one open Draft PR with base `main`, the deterministic head branch, one commit,
+  and a one-file README-only diff;
+- GitHub Actions run
+  [`32512672458`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32512672458)
+  completed successfully on attempt 1 for the exact PR head;
+- Slack contained exactly three messages in the original thread: one root, the retained Turn 1
+  failure, and one Turn 2 result. The root was not duplicated.
+
+An immediate read-only preflight was idle, one manually observed repeated sweep returned idle, and a
+final preflight was again idle with an unchanged database. Final backup
+`state-20260821T182235.215407Z.db` is mode `0600`, passed `integrity_check`, and contains the review
+WorkItem, PR binding, blocked Turn 1, and completed Turn 2. The Dispatcher timer remains disabled;
+PR `#25` remains unmerged. No credential, Prompt, private key, full Runner output, merge, deployment,
+release, tag, force-push, branch deletion, sshd change, or network-policy change was produced.
+
 ## Slack Web API exact-retry fixture — 2026-08-20
 
 This fixture proves the provider-side contract required before enabling the real outbound Slack
