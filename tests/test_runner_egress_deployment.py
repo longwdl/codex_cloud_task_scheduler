@@ -42,6 +42,8 @@ class RunnerEgressDeploymentTests(unittest.TestCase):
         self.assertNotIn("http_port 0.0.0.0", configuration)
         self.assertNotIn("ssl_bump", configuration)
         self.assertNotIn("https_port", configuration)
+        self.assertNotIn("::ffff:0:0/96", configuration)
+        self.assertNotIn("via off", configuration)
 
     def test_private_metadata_and_site_blocks_precede_domain_allow(self) -> None:
         configuration = SQUID_CONFIG.read_text(encoding="utf-8")
