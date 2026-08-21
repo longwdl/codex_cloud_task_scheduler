@@ -169,6 +169,60 @@ credential-pattern diff scan also passed. A final read-only Dispatcher `ssh-pref
 `ok=true`, `status=idle`, and `external_writes=false` with no selected Issue, WorkItem, Turn, or
 recovery action.
 
+## Runner audited egress production activation — 2026-08-21
+
+The dedicated `s3` Runner now enforces audited outbound access for the host-level `codex-runner`
+account. Before mutation, the `s2` Dispatcher timer and service were inactive, the backup timer
+remained active, a new mode-`0600` SQLite Online Backup returned `integrity_check=ok`, and a
+transient service-account `ssh-preflight` returned strict `idle` without external writes. The
+Runner had no exact Runner/Codex process or pre-existing outbound socket, its global lock was
+acquirable, port 3128 was unused, UFW was inactive, and the existing nftables/iptables/ip6tables
+state plus Runner configuration and release target were copied into the checksummed root-only
+rollback directory.
+
+Commits `66c271d` through `e44b66b` added the standard-library policy validator, canonical
+credential-free proxy configuration, complete Squid policy, metadata-only audit format, protected
+tmpfiles/logrotate rules, and the host-specific nftables OUTPUT table. Every checkpoint passed all
+363 offline tests, `compileall`, and `git diff --check`; the final immutable release passed the same
+363 tests and `compileall` on both Linux hosts. Ubuntu Squid `6.14-0ubuntu0.24.04.4` was installed
+with its distribution service masked before package installation, and its package AppArmor profile
+remained loaded in enforce mode.
+
+The dedicated `inet codex_egress` table changes only OUTPUT handling. UID 1002 can open new TCP
+connections only to `127.0.0.1:3128`; UID 13 can use the local resolved stub and public TCP/443 but
+is rejected from private, metadata, site-blocked, non-443, and other destinations. Other local UIDs
+cannot connect to the proxy. The proxy listens only on IPv4 loopback. Squid's required coordinator
+runs as root with only `CAP_SETUID` and `CAP_SETGID`; its UID-13 worker owns the listener and has an
+empty effective capability set. The coordinator had no TCP socket, the package default listener
+never appeared, INPUT/FORWARD remained unchanged, and administrator SSH survived every step.
+
+Credential-free probes produced one exact audit record per accepted or denied CONNECT request. An
+allowlisted `api.openai.com` TLS tunnel reached the origin and returned HTTP 421 without credentials;
+`example.com`, private space, metadata, and the public Control Host address were denied. Direct
+Runner TCP/443, DNS, UDP/443, and non-proxy loopback connections failed, while another unprivileged
+UID was rejected before Squid. Stopping the proxy failed closed and restarting restored the UID-13
+listener. A forced real log rotation preserved the original audit inode as the rotated file,
+created `proxy:proxy 0640` replacements below a root-owned non-writable directory, and the next
+denied request was recorded exactly once. Every access-log line matched the fixed metadata-only
+schema, and no Squid AppArmor denial was recorded.
+
+Only after those probes passed was `/srv/codex-runner/etc/config.json` atomically changed to the
+fixed `http://127.0.0.1:3128` endpoint. The real Runner configuration loader accepted it as the
+locked `codex-runner` account. Both `s2` and `s3` then switched atomically to immutable release
+`e44b66bddeda415267674a0590423187fcc45fe4`; two post-switch read-only preflights returned strict
+idle. Restoring the Dispatcher timer produced four observed successful idle sweeps with no selected
+Issue, WorkItem, or Turn. A final read-only Fixture snapshot found six open pull requests, no active
+Actions run, and unchanged `main` SHA `f5037925502905fd3d22a807df7291ba1004bab9`.
+
+No Fixture GitHub, Slack, branch, pull-request, merge, release, tag, or application-data write was
+performed by this infrastructure activation. The temporary `s3` sudoers grant was moved into the root-only rollback
+directory at mode `0600`, and a new SSH session proved passwordless sudo unavailable. The Dispatcher
+and backup timers, proxy, firewall, AppArmor policy, audit retention, previous releases, original
+Runner configuration, and SQLite backup remain independently recoverable. The 14-domain bootstrap
+allowlist is version-specific evidence from Codex CLI 0.147.0, not an upstream compatibility
+guarantee. Container-visible proxy routing and aggregate per-WorkItem disk isolation remain required
+before rootless container activation.
+
 ## Slack Web API exact-retry fixture — 2026-08-20
 
 This fixture proves the provider-side contract required before enabling the real outbound Slack

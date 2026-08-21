@@ -59,6 +59,11 @@ uses the dedicated locked `codex-runner` account, root-owned release/configurati
 external root-owned authorized-key file, and an sshd-enforced fixed command. Existing WorkItems and
 sessions were retained and a completed Turn was read back through STATUS after migration. This
 ownership boundary is not a substitute for the later per-WorkItem container boundary.
+The same host account is now forced through a loopback-only Squid CONNECT proxy plus a dedicated
+nftables OUTPUT table. Live probes proved exact OpenAI-domain allow, public-domain deny, direct
+TCP/DNS/UDP and private/metadata denial, metadata-only audit, fail-closed restart, and safe log
+rotation. This is host-level egress enforcement; container-visible routing and hard aggregate disk
+limits are still deferred.
 
 The write-enabled dependency assembly has now completed one bounded happy-path run against Fixture
 Issue `#2`: it claimed one SSH-labelled Issue, created one persistent Codex session, published the

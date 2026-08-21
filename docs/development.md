@@ -115,6 +115,11 @@ Publisher, and Slack Publisher calls and required the exact merged PR binding. F
 two ordinary sweeps were idle with the original identities preserved.
 The Runner must not receive GitHub write or production credentials.
 
+The host-level Runner egress boundary is active on `s3`: the `codex-runner` UID can create new
+connections only to the audited loopback proxy, the unprivileged proxy worker is restricted to
+reviewed public TLS destinations, and private/metadata/direct paths fail closed. This does not yet
+authorize a container Turn; container-visible proxy routing and aggregate disk limits remain open.
+
 Explicitly deferred:
 
 - Docker isolation on the Runner;

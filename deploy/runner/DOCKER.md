@@ -83,9 +83,11 @@ containers. Docker's [`none` network](https://docs.docker.com/engine/network/dri
 safe negative-control test but cannot run Codex by itself. Firewall, routing, DNS proxy, and metadata
 rules are separate host infrastructure changes and require exact-command approval and rollback.
 The selected unified HTTP CONNECT proxy, protected allowlist, metadata-only audit format, Runner-UID
-firewall boundary, and guarded rollback are specified in [EGRESS.md](EGRESS.md). That offline
-contract does not count as live network isolation until the native proxy parser and every negative
-probe pass.
+firewall boundary, and guarded rollback are specified in [EGRESS.md](EGRESS.md). The host-level
+Runner path on `s3` has passed the native parser, allow/deny, direct-egress, private/metadata,
+fail-closed, audit, and rotation probes. That result does not prove the future rootless container
+path: its container-visible proxy endpoint and no-bypass firewall behavior still require separate
+live acceptance with a credential-free image.
 
 The current `s3` root filesystem is ext4 without project quotas. CPU, memory, PID, tmpfs, and timeout
 limits therefore do not provide a per-WorkItem aggregate disk limit for the bind-mounted repository.
