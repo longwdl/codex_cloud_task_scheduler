@@ -30,6 +30,9 @@ jobs:
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' codex-runner-web:candidate)" = linux/amd64
           size="$(docker image inspect --format '{{.Size}}' codex-runner-web:candidate)"
           test "$size" -le 1073741824
+          echo "image_id=$(docker image inspect --format '{{.Id}}' codex-runner-web:candidate)"
+          echo "image_size_bytes=$size"
+          echo "image_layer_count=$(docker image inspect --format '{{len .RootFS.Layers}}' codex-runner-web:candidate)"
           docker run --rm --pull=never \
             --network=none \
             --read-only \
