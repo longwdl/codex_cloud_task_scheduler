@@ -172,11 +172,19 @@ class SlackDeliveryCoordinator:
             TaskState.NEEDS_INPUT: (TurnState.NEEDS_INPUT, "needs_input"),
             TaskState.BLOCKED: (TurnState.BLOCKED, "blocked"),
         }[desired_task_state]
-        if (
-            turn.state is not expected_turn[0]
-            or turn.result_status != expected_turn[1]
-            or turn.result_summary is None
-        ):
+        result_matches = (
+            turn.state is expected_turn[0]
+            and turn.result_status == expected_turn[1]
+            and turn.result_summary is not None
+        )
+        execution_error_matches = (
+            desired_task_state is TaskState.BLOCKED
+            and turn.state is TurnState.BLOCKED
+            and turn.result_status is None
+            and turn.result_summary is None
+            and turn.error_code is not None
+        )
+        if not result_matches and not execution_error_matches:
             raise SlackDeliveryRejected(
                 "Slack terminal projection conflicts with the recorded Turn result"
             )
@@ -203,11 +211,16 @@ class SlackDeliveryCoordinator:
         turn: Turn,
         desired_task_state: TaskState,
     ) -> str:
+        summary = turn.result_summary
+        if summary is None:
+            assert desired_task_state is TaskState.BLOCKED
+            assert turn.error_code is not None
+            summary = f"Runner error code: {turn.error_code}"
         lines = [
             f"Codex Turn {turn.turn_number}",
             "",
             f"- Dispatcher state: `agent:{desired_task_state.value}`",
-            f"- Summary: {turn.result_summary}",
+            f"- Summary: {summary}",
             f"- Task branch: `{work_item.task_branch}`",
         ]
         if work_item.last_published_sha is not None:

@@ -124,6 +124,25 @@ class SlackDeliveryCoordinatorTests(unittest.TestCase):
         item = self.store.bind_draft_pr(item.work_item_id, 9)
         return item, turn
 
+    def _finalize_execution_error(self) -> tuple[WorkItem, Turn]:
+        _, turn = self.store.begin_turn(
+            self.item.work_item_id,
+            turn_id=TURN_ID,
+            issue_revision="revision-1",
+            prompt_sha256="b" * 64,
+            input_head_sha="a" * 40,
+        )
+        self.store.update_turn_state(turn.turn_id, TurnState.STARTING)
+        self.store.record_turn_error(
+            turn.turn_id,
+            error_code="docker_boundary_invalid",
+        )
+        return self.store.finalize_turn(
+            turn.turn_id,
+            turn_state=TurnState.BLOCKED,
+            work_item_state=WorkItemState.BLOCKED,
+        )
+
     def test_lost_root_receipt_reuses_one_remote_message_and_binds_atomically(self) -> None:
         publisher = _IdempotentSlackPublisher(
             interrupt_kind_once=SlackReportKind.ROOT
@@ -190,6 +209,44 @@ class SlackDeliveryCoordinatorTests(unittest.TestCase):
         self.assertIn("token=[REDACTED]", result_report.text)
         self.assertIn("https://github.com/owner/repo/pull/9", result_report.text)
         self.assertNotIn("secret-value", result_report.text)
+
+    def test_blocked_execution_error_uses_bounded_code_without_agent_result(self) -> None:
+        publisher = _IdempotentSlackPublisher()
+        coordinator = SlackDeliveryCoordinator(
+            store=self.store,
+            publisher=publisher,
+            channel_id=CHANNEL,
+        )
+        item, turn = self._finalize_execution_error()
+
+        with self.assertRaisesRegex(SlackDeliveryRejected, "recorded Turn result"):
+            coordinator.reconcile_terminal(
+                self.task,
+                work_item=item,
+                desired_task_state=TaskState.BLOCKED,
+                turn=replace(turn, error_code=None),
+            )
+        first = coordinator.reconcile_terminal(
+            self.task,
+            work_item=item,
+            desired_task_state=TaskState.BLOCKED,
+            turn=turn,
+        )
+        second = coordinator.reconcile_terminal(
+            self.task,
+            work_item=first.work_item,
+            desired_task_state=TaskState.BLOCKED,
+            turn=turn,
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(2, len(publisher.messages))
+        failure = next(
+            report
+            for report in publisher.calls
+            if report.kind is SlackReportKind.FAILURE
+        )
+        self.assertIn("Runner error code: docker_boundary_invalid", failure.text)
 
     def test_lost_terminal_receipt_retries_without_another_thread_or_message(self) -> None:
         publisher = _IdempotentSlackPublisher(
