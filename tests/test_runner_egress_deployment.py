@@ -107,6 +107,8 @@ class RunnerEgressDeploymentTests(unittest.TestCase):
 
         self.assertIn("User=proxy", service)
         self.assertIn("Group=proxy", service)
+        self.assertIn("Type=simple", service)
+        self.assertNotIn("NotifyAccess", service)
         self.assertNotIn("User=codex-runner", service)
         self.assertIn("-m codex_dispatcher.egress_policy", service)
         self.assertIn("-k parse", service)

@@ -5,7 +5,7 @@ After=network-online.target codex-egress-firewall.service
 Wants=network-online.target
 
 [Service]
-Type=notify
+Type=simple
 User=proxy
 Group=proxy
 RuntimeDirectory=squid
@@ -23,7 +23,6 @@ ExecReload=/usr/sbin/squid -f /etc/squid/codex-egress.conf -k parse
 ExecReload=/usr/sbin/squid -f /etc/squid/codex-egress.conf -k reconfigure
 Restart=on-failure
 RestartSec=5s
-NotifyAccess=all
 TimeoutStartSec=30s
 TimeoutStopSec=30s
 CapabilityBoundingSet=
