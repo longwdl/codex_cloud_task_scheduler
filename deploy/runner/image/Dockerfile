@@ -2,9 +2,9 @@ FROM --platform=linux/amd64 docker.io/library/node:22.23.1-trixie-slim@sha256:e6
 
 FROM --platform=linux/amd64 docker.io/library/python:3.12.13-slim-trixie@sha256:646fb0bca3dd3ea1bcc6feb72c17ed16eed6e10cffc732fcc1478bd3e7f02d7b
 
-LABEL org.opencontainers.image.title="codex-runner-web" \
+LABEL org.opencontainers.image.title="codex-cloud-task-scheduler-runner" \
       org.opencontainers.image.description="Minimal Python and npm environment for the isolated Codex Runner" \
-      org.opencontainers.image.source="https://github.com/longwdl/codex-dispatcher-fixture"
+      org.opencontainers.image.source="https://github.com/longwdl/codex_cloud_task_scheduler"
 
 ENV LANG=C.UTF-8 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \

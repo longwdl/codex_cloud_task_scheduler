@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = ROOT / "deploy" / "runner" / "image" / "Dockerfile"
 README = ROOT / "deploy" / "runner" / "image" / "README.md"
-FIXTURE_WORKFLOW = ROOT / "deploy" / "runner" / "image" / "fixture-workflow.yml"
+WORKFLOW = ROOT / ".github" / "workflows" / "runner-image.yml"
 
 
 class RunnerImageTests(unittest.TestCase):
@@ -49,6 +49,12 @@ class RunnerImageTests(unittest.TestCase):
         self.assertNotIn("ARG ", dockerfile)
         self.assertNotIn("/var/run/docker.sock", dockerfile)
         self.assertNotRegex(dockerfile.lower(), r"(token|password|private[_ -]?key)")
+        self.assertIn(
+            'org.opencontainers.image.source="https://github.com/longwdl/'
+            'codex_cloud_task_scheduler"',
+            dockerfile,
+        )
+        self.assertNotIn("codex-dispatcher-fixture", dockerfile)
 
     def test_documentation_preserves_digest_and_retirement_gates(self) -> None:
         readme = README.read_text(encoding="utf-8")
@@ -68,8 +74,8 @@ class RunnerImageTests(unittest.TestCase):
         ):
             self.assertIn(required, normalized)
 
-    def test_fixture_workflow_keeps_pull_requests_unprivileged(self) -> None:
-        workflow = FIXTURE_WORKFLOW.read_text(encoding="utf-8")
+    def test_repository_workflow_keeps_pull_requests_unprivileged(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
 
         for required in (
             "pull_request:",
@@ -88,6 +94,7 @@ class RunnerImageTests(unittest.TestCase):
             "--cap-drop=ALL",
             "--security-opt=no-new-privileges=true",
             "--pull=never",
+            "deploy/runner/image/Dockerfile",
         ):
             self.assertIn(required, workflow)
         for prohibited in (
@@ -100,7 +107,7 @@ class RunnerImageTests(unittest.TestCase):
             self.assertNotIn(prohibited, workflow)
 
     def test_manual_publisher_is_exact_commit_only_and_self_cleans(self) -> None:
-        workflow = FIXTURE_WORKFLOW.read_text(encoding="utf-8")
+        workflow = WORKFLOW.read_text(encoding="utf-8")
 
         for required in (
             "workflow_dispatch:",
@@ -111,7 +118,7 @@ class RunnerImageTests(unittest.TestCase):
             "test \"$ACTUAL_REF\" = refs/heads/main",
             "test \"$EXPECTED_COMMIT\" = \"$ACTUAL_COMMIT\"",
             "persist-credentials: false",
-            "ghcr.io/longwdl/codex-runner-web",
+            "ghcr.io/longwdl/codex-cloud-task-scheduler-runner",
             'image_ref="$IMAGE_REPOSITORY:sha-$ACTUAL_COMMIT"',
             "GHCR_TOKEN: ${{ github.token }}",
             "--password-stdin",
@@ -133,12 +140,14 @@ class RunnerImageTests(unittest.TestCase):
             ),
         )
         self.assertNotIn(
-            "env:\n      IMAGE_REPOSITORY: ghcr.io/longwdl/codex-runner-web\n"
+            "env:\n      IMAGE_REPOSITORY: "
+            "ghcr.io/longwdl/codex-cloud-task-scheduler-runner\n"
             "      DOCKER_CONFIG:",
             workflow,
         )
         self.assertNotIn("push:\n", workflow)
         self.assertNotIn("schedule:", workflow)
+        self.assertNotIn("codex-dispatcher-fixture", workflow)
 
 
 if __name__ == "__main__":

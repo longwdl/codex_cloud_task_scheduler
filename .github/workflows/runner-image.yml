@@ -4,7 +4,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/runner-image.yml
-      - runner-image/**
+      - deploy/runner/image/**
   workflow_dispatch:
     inputs:
       expected_commit:
@@ -28,18 +28,18 @@ jobs:
         run: >-
           docker build
           --platform=linux/amd64
-          --tag=codex-runner-web:candidate
-          --file=runner-image/Dockerfile
-          runner-image
+          --tag=codex-cloud-task-scheduler-runner:candidate
+          --file=deploy/runner/image/Dockerfile
+          deploy/runner/image
       - name: Verify identity, size, and fixed tool boundary
         run: |
           set -eu
-          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' codex-runner-web:candidate)" = linux/amd64
-          size="$(docker image inspect --format '{{.Size}}' codex-runner-web:candidate)"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' codex-cloud-task-scheduler-runner:candidate)" = linux/amd64
+          size="$(docker image inspect --format '{{.Size}}' codex-cloud-task-scheduler-runner:candidate)"
           test "$size" -le 1073741824
-          echo "image_id=$(docker image inspect --format '{{.Id}}' codex-runner-web:candidate)"
+          echo "image_id=$(docker image inspect --format '{{.Id}}' codex-cloud-task-scheduler-runner:candidate)"
           echo "image_size_bytes=$size"
-          echo "image_layer_count=$(docker image inspect --format '{{len .RootFS.Layers}}' codex-runner-web:candidate)"
+          echo "image_layer_count=$(docker image inspect --format '{{len .RootFS.Layers}}' codex-cloud-task-scheduler-runner:candidate)"
           docker run --rm --pull=never \
             --network=none \
             --read-only \
@@ -51,7 +51,7 @@ jobs:
             --cpus=1.0 \
             --tmpfs=/tmp:rw,nosuid,nodev,mode=1777,size=67108864 \
             --entrypoint=/bin/sh \
-            codex-runner-web:candidate -ceu '
+            codex-cloud-task-scheduler-runner:candidate -ceu '
               test "$(python3 -c '\''import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'\'')" = 3.12
               test "$(node -p '\''process.versions.node.split(".")[0]'\'')" = 22
               python3 -m pip --version
@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
-      IMAGE_REPOSITORY: ghcr.io/longwdl/codex-runner-web
+      IMAGE_REPOSITORY: ghcr.io/longwdl/codex-cloud-task-scheduler-runner
     steps:
       - name: Validate exact default-branch request
         env:
@@ -106,8 +106,8 @@ jobs:
           docker build \
             --platform=linux/amd64 \
             --tag="$image_ref" \
-            --file=runner-image/Dockerfile \
-            runner-image
+            --file=deploy/runner/image/Dockerfile \
+            deploy/runner/image
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image_ref")" = linux/amd64
           size="$(docker image inspect --format '{{.Size}}' "$image_ref")"
           test "$size" -le 1073741824

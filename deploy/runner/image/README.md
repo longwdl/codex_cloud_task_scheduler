@@ -50,7 +50,7 @@ Push the candidate to the dedicated private GHCR package, pull it by RepoDigest,
 that lowercase `name@sha256:<digest>` identity. A locally built tag or image ID is insufficient
 because the Runner requires exactly one matching `RepoDigests` entry.
 
-The Fixture workflow separates review builds from publication. Pull requests receive only
+The repository workflow separates review builds from publication. Pull requests receive only
 `contents: read`; they never receive package write permission. Publication is a manual dispatch from
 `main` and requires the operator to enter the exact 40-character commit. It grants `packages: write`
 only to the publication job, publishes only `sha-<commit>` (never `latest`), pulls back the exact
