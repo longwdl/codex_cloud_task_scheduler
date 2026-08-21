@@ -223,6 +223,51 @@ allowlist is version-specific evidence from Codex CLI 0.147.0, not an upstream c
 guarantee. Container-visible proxy routing and aggregate per-WorkItem disk isolation remain required
 before rootless container activation.
 
+## Runner rootless Docker host bootstrap — 2026-08-21
+
+The dedicated `s3` Runner now has an initialized but not yet admitted rootless Docker engine. Before
+the host change, the `s2` Dispatcher timer was disabled, the service was inactive, a new protected
+SQLite Online Backup returned `integrity_check=ok`, local status had no active run, and a read-only
+`ssh-preflight` returned strict `idle` without external writes. The Runner global lock was
+acquirable, no exact Runner/Codex/Docker process existed, and the existing Runner configuration,
+package inventory, and nftables state were copied into a checksummed root-only rollback directory.
+
+The official Docker Ubuntu repository key was verified by its full fingerprint before the exact
+Ubuntu 24.04 packages were installed. Docker Engine, CLI, and rootless extras are pinned at
+`5:29.7.2-1~ubuntu.24.04~noble`; `containerd.io` is pinned at
+`2.3.3-1~ubuntu.24.04~noble`. The four packages are held. The root-owned system-level
+`docker.service`, `docker.socket`, and `containerd.service` remained masked throughout installation,
+stayed inactive afterward, and exposed no rootful socket.
+
+Linger and the user manager were enabled only for the locked `codex-runner` account. Its rootless
+`docker.service` is active and enabled on the mode-`0700` runtime directory, with the API socket
+owned by that account. The daemon reports Docker 29.7.2, `overlayfs`, cgroup v2, and the `rootless`,
+`seccomp`, and `cgroupns` security options. A root-owned drop-in fixes `slirp4netns` and explicitly
+permits the RootlessKit host-loopback path required by the future container-visible proxy endpoint;
+the protected empty Docker CLI configuration prevents inherited user contexts or credentials from
+selecting another daemon.
+
+No image was pulled or built, no container was created, and no non-default Docker network exists.
+The Runner remained on immutable release `e44b66bddeda415267674a0590423187fcc45fe4` with the legacy
+direct execution mode and the existing audited loopback proxy. The new offline rootless execution
+implementation at commit `ec34b19` passed all 371 unit tests, `compileall`, and `git diff --check`,
+but was not deployed and was not enabled in production.
+
+After initialization, the Runner lock was still idle and the rootless daemon still had zero images
+and zero containers. The existing proxy and nftables services remained active, a normal timer sweep
+exited successfully with no active run, and a second read-only `ssh-preflight` again returned
+`idle`, `external_writes=false`, and `authorizes_apply=false`. The Dispatcher timer was restored.
+No GitHub, Slack, WorkItem, Turn, branch, pull request, Action, merge, deployment, release, or tag
+write was performed by this bootstrap.
+
+This checkpoint proves only package provenance, rootless daemon ownership, rootful exclusion, and
+safe coexistence with the direct Runner. It does not admit container Turns. The next separately
+authorized gates are an aggregate disk-limit/FUSE proof, immutable image acquisition and digest
+verification, dedicated proxy-only Docker networking, and one disposable container boundary test
+before any Runner configuration switch. Rollback is to freeze the Dispatcher timer, stop and
+disable the user `docker.service`, disable linger, and retain the masked rootful units and persistent
+Runner state for reconciliation.
+
 ## Slack Web API exact-retry fixture — 2026-08-20
 
 This fixture proves the provider-side contract required before enabling the real outbound Slack
