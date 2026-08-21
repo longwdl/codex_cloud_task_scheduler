@@ -11,6 +11,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from codex_dispatcher.command_runner import CommandResult, run_command
@@ -406,17 +407,21 @@ class GitHubCliTracker:
         return self._command(argv).stdout
 
     def _command(self, argv: tuple[str, ...]) -> CommandResult:
-        command_env = {"GH_PROMPT_DISABLED": "1"}
-        secrets: tuple[str, ...] = ()
-        if self._token is not None:
-            command_env["GH_TOKEN"] = self._token
-            secrets = (self._token,)
-        result = run_command(
-            argv,
-            timeout_seconds=self._timeout_seconds,
-            env=command_env,
-            secrets=secrets,
-        )
+        with TemporaryDirectory(prefix="codex-dispatcher-gh-") as config_directory:
+            command_env = {
+                "GH_CONFIG_DIR": config_directory,
+                "GH_PROMPT_DISABLED": "1",
+            }
+            secrets: tuple[str, ...] = ()
+            if self._token is not None:
+                command_env["GH_TOKEN"] = self._token
+                secrets = (self._token,)
+            result = run_command(
+                argv,
+                timeout_seconds=self._timeout_seconds,
+                env=command_env,
+                secrets=secrets,
+            )
         if (
             result.returncode != 0
             or result.timed_out

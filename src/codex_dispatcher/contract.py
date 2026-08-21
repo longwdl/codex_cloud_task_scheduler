@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from codex_dispatcher.config import ToolPins
 from codex_dispatcher.executors.codex_cloud_cli import CodexCloudCliExecutor
@@ -101,7 +102,18 @@ def _version_check(
 ) -> ContractCheck:
     from codex_dispatcher.command_runner import run_command
 
-    result = run_command((str(executable), *arguments), timeout_seconds=10.0)
+    if name == "gh":
+        # Recent gh releases require a configuration root even for --version.
+        # Give the process a private, empty directory instead of exposing the
+        # dispatcher's ambient HOME or persistent gh configuration.
+        with TemporaryDirectory(prefix="codex-dispatcher-gh-") as config_directory:
+            result = run_command(
+                (str(executable), *arguments),
+                timeout_seconds=10.0,
+                env={"GH_CONFIG_DIR": config_directory},
+            )
+    else:
+        result = run_command((str(executable), *arguments), timeout_seconds=10.0)
     if result.returncode != 0 or result.error is not None or result.timed_out:
         return ContractCheck(name, False, "version command failed")
     output = result.stderr if output_field == "stderr" else result.stdout

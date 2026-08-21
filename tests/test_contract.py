@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -21,7 +22,17 @@ class ContractTests(unittest.TestCase):
             "/usr/bin/ssh": "OpenSSH_9.6p1 Linux fixture\n",
         }
 
-        def fake_run(argv: tuple[str, ...], **_: object) -> CommandResult:
+        gh_config_directories: list[str] = []
+
+        def fake_run(argv: tuple[str, ...], **kwargs: object) -> CommandResult:
+            if argv[0] == "/usr/bin/gh":
+                environment = kwargs["env"]
+                assert isinstance(environment, dict)
+                config_directory = environment["GH_CONFIG_DIR"]
+                assert isinstance(config_directory, str)
+                self.assertTrue(Path(config_directory).is_dir())
+                self.assertEqual(0o700, os.stat(config_directory).st_mode & 0o777)
+                gh_config_directories.append(config_directory)
             output = outputs[argv[0]]
             return (
                 CommandResult(0, "", output)
@@ -44,6 +55,8 @@ class ContractTests(unittest.TestCase):
 
         self.assertTrue(all(check.ok for check in checks))
         self.assertEqual(["git", "gh", "ssh"], [check.name for check in checks])
+        self.assertEqual(1, len(gh_config_directories))
+        self.assertFalse(Path(gh_config_directories[0]).exists())
         preflight.assert_not_called()
 
     def test_versions_and_environment_are_read_only_and_exact(self) -> None:

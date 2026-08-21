@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -66,10 +67,18 @@ class GitHubCliTrackerTests(unittest.TestCase):
     def test_list_ready_tasks_reads_fixed_argv_and_audits_latest_label_actor(self) -> None:
         calls: list[tuple[str, ...]] = []
         keyword_arguments: list[dict[str, object]] = []
+        config_directories: list[str] = []
 
         def fake_run(argv: tuple[str, ...], **kwargs: object) -> CommandResult:
             calls.append(argv)
             keyword_arguments.append(kwargs)
+            environment = kwargs["env"]
+            assert isinstance(environment, dict)
+            config_directory = environment["GH_CONFIG_DIR"]
+            assert isinstance(config_directory, str)
+            self.assertTrue(Path(config_directory).is_dir())
+            self.assertEqual(0o700, os.stat(config_directory).st_mode & 0o777)
+            config_directories.append(config_directory)
             if argv[1:3] == ("issue", "list"):
                 return result([issue()])
             return result(
@@ -103,11 +112,13 @@ class GitHubCliTrackerTests(unittest.TestCase):
         self.assertEqual("api", calls[1][1])
         self.assertEqual("GET", calls[1][3])
         self.assertIn("/repos/owner/repo/issues/12/timeline?per_page=100", calls[1])
-        self.assertEqual(
-            {"GH_PROMPT_DISABLED": "1", "GH_TOKEN": "test-token"},
-            keyword_arguments[0]["env"],
-        )
+        environment = keyword_arguments[0]["env"]
+        assert isinstance(environment, dict)
+        self.assertEqual("1", environment["GH_PROMPT_DISABLED"])
+        self.assertEqual("test-token", environment["GH_TOKEN"])
         self.assertEqual(("test-token",), keyword_arguments[0]["secrets"])
+        self.assertTrue(config_directories)
+        self.assertTrue(all(not Path(path).exists() for path in config_directories))
 
     def test_list_open_tasks_reads_a_requested_recovery_state(self) -> None:
         dispatching = issue(
@@ -439,10 +450,10 @@ class GitHubCliTrackerTests(unittest.TestCase):
         self.assertIn("--draft", argv)
         self.assertIn("--no-maintainer-edit", argv)
         self.assertNotIn("--fill", argv)
-        self.assertEqual(
-            {"GH_PROMPT_DISABLED": "1", "GH_TOKEN": "github_pat_fixture_only"},
-            runner.call_args.kwargs["env"],
-        )
+        environment = runner.call_args.kwargs["env"]
+        self.assertEqual("1", environment["GH_PROMPT_DISABLED"])
+        self.assertEqual("github_pat_fixture_only", environment["GH_TOKEN"])
+        self.assertIn("GH_CONFIG_DIR", environment)
 
     def test_draft_pr_creation_rejects_protected_head_before_write(self) -> None:
         tracker = GitHubCliTracker(gh_path=GH)
