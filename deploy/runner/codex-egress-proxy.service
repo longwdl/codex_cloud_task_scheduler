@@ -6,12 +6,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=proxy
 Group=proxy
 RuntimeDirectory=squid
-RuntimeDirectoryMode=0750
+RuntimeDirectoryMode=0770
 LogsDirectory=squid
-LogsDirectoryMode=0750
+LogsDirectoryMode=0770
 UMask=0027
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONPATH=/srv/codex-runner/current/src
@@ -25,7 +24,7 @@ Restart=on-failure
 RestartSec=5s
 TimeoutStartSec=30s
 TimeoutStopSec=30s
-CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_SETGID CAP_SETUID
 AmbientCapabilities=
 NoNewPrivileges=true
 PrivateDevices=true

@@ -102,14 +102,17 @@ class RunnerEgressDeploymentTests(unittest.TestCase):
         self.assertIn("create 0640 proxy proxy", rotation)
         self.assertNotIn("|| true", rotation)
 
-    def test_service_uses_independent_unprivileged_identity_and_hardening(self) -> None:
+    def test_service_uses_root_coordinator_and_unprivileged_worker(self) -> None:
         service = SERVICE.read_text(encoding="utf-8")
+        configuration = SQUID_CONFIG.read_text(encoding="utf-8")
 
-        self.assertIn("User=proxy", service)
+        self.assertNotIn("User=", service)
         self.assertIn("Group=proxy", service)
         self.assertIn("Type=simple", service)
         self.assertNotIn("NotifyAccess", service)
         self.assertNotIn("User=codex-runner", service)
+        self.assertIn("cache_effective_user proxy", configuration)
+        self.assertIn("pinger_enable off", configuration)
         self.assertIn("-m codex_dispatcher.egress_policy", service)
         self.assertIn("-k parse", service)
         self.assertGreaterEqual(
@@ -125,7 +128,10 @@ class RunnerEgressDeploymentTests(unittest.TestCase):
             "MemoryDenyWriteExecute=true",
         ):
             self.assertIn(directive, service)
-        self.assertNotIn("CapabilityBoundingSet=CAP_NET_ADMIN", service)
+        self.assertIn("CapabilityBoundingSet=CAP_SETGID CAP_SETUID", service)
+        for capability in ("CAP_NET_ADMIN", "CAP_NET_RAW", "CAP_NET_BIND_SERVICE"):
+            self.assertNotIn(capability, service)
+        self.assertIn("AmbientCapabilities=", service)
         for standard_tree in ("/etc/squid/", "/run/squid", "/var/log/squid"):
             self.assertIn(standard_tree, service)
         self.assertNotIn("/etc/codex-egress-proxy", service)

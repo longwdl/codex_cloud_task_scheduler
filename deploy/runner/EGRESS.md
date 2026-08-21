@@ -6,10 +6,12 @@ rootless Docker traffic. Proxy environment variables are compatibility inputs on
 can delete them, so the host firewall must independently reject direct egress from the Runner UID.
 
 The selected implementation is the Ubuntu 24.04 security-supported Squid package. Pin the exact
-candidate version recorded during the guarded installation. Squid runs as the distribution's
-dedicated `proxy` account, never as `codex-runner`, and does not terminate TLS. The repository
-contains a complete restricted configuration and a hardened service unit, but they remain offline
-artifacts until the native Squid parser and credential-free network probes pass on the target host.
+candidate version recorded during the guarded installation. Squid's required root coordinator has
+only `CAP_SETUID` and `CAP_SETGID`; it starts the distribution's dedicated unprivileged `proxy`
+worker, which performs DNS and outbound connections. Neither process runs as `codex-runner`, and
+Squid does not terminate TLS. The repository contains a complete restricted configuration and a
+hardened service unit, but they remain offline artifacts until the native Squid parser and
+credential-free network probes pass on the target host.
 
 ## Policy
 
@@ -75,8 +77,9 @@ Mask `squid.service` before installing the exact pinned `squid` package; package
 never expose its distribution default listener. Prove the distribution unit remains masked and no
 port appeared before installing the repository configuration root-owned and non-writable. Create
 non-secret domain and site-block files, validate with Squid's native parse-only command, then start
-only `codex-egress-proxy.service`. It must listen only on loopback and run as the `proxy` UID. The
-`codex-runner` config may receive only the canonical credential-free endpoint
+only `codex-egress-proxy.service`. It must listen only on loopback. Its coordinator must remain root
+with only the two identity-drop capabilities, while its network worker and outbound sockets must
+run as the `proxy` UID. The `codex-runner` config may receive only the canonical credential-free endpoint
 `http://127.0.0.1:3128` after the proxy is healthy.
 
 Ubuntu's package-provided AppArmor profile must remain loaded in enforce mode. The custom
