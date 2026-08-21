@@ -244,6 +244,8 @@ class FusedWorkItemDisk:
                 "-F",
                 "-m",
                 "0",
+                "-E",
+                "nodiscard",
                 "-L",
                 "codex-work-item",
                 str(image),

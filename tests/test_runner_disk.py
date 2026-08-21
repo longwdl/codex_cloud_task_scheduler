@@ -57,6 +57,32 @@ def runtime(root: Path) -> tuple[WorkItemDiskRuntime, Path]:
 
 
 class RunnerDiskTests(unittest.TestCase):
+    def test_format_preserves_dense_preallocation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            configured, work_items = runtime(root)
+            disk = FusedWorkItemDisk(configured, work_items_root=work_items)
+            image = configured.image_directory / f"{WORK_ITEM}.ext4"
+
+            with patch.object(disk, "_run_fixed") as run_fixed:
+                disk._format_image(image)
+
+            run_fixed.assert_called_once_with(
+                (
+                    str(configured.mkfs_ext4_path),
+                    "-q",
+                    "-F",
+                    "-m",
+                    "0",
+                    "-E",
+                    "nodiscard",
+                    "-L",
+                    "codex-work-item",
+                    str(image),
+                ),
+                stage="format",
+            )
+
     def test_runtime_rejects_unbounded_or_overlapping_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
