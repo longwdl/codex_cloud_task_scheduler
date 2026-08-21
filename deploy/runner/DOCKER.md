@@ -1,10 +1,10 @@
 # Rootless Docker per-WorkItem execution contract
 
-This document records the next Runner isolation boundary. The repository contains a fail-closed,
+This document records the Runner isolation boundary. The repository contains a fail-closed,
 explicit `rootless_docker` configuration path, fixed-argv planner, per-WorkItem session binding, and
-offline fake-Docker integration tests. Production remains in `direct` mode: this work does not
-install an engine, build or approve an image, migrate an existing Codex session, satisfy the disk
-quota gate, or authorize a live container Turn. The offline example configuration is deliberately
+offline fake-Docker integration tests. The dedicated Fixture Runner has been switched to this mode,
+but live admission remains incomplete and the Dispatcher timer remains disabled until one successful
+container Turn and its recovery checks pass. The offline example configuration is deliberately
 non-deployable until its zero digest is replaced by an independently reviewed image digest.
 
 Rootless Docker is preferred over a rootful daemon because both the daemon and containers run in a
@@ -18,6 +18,11 @@ production path; install version-pinned packages from the reviewed official Ubun
 The rootless daemon socket is a host-only control interface. The fixed Runner process may address
 only an absolute `unix:///run/user/<uid>/docker.sock` URL. No socket, Docker configuration, image
 build context, SSH agent, Control Host file, or other WorkItem is mounted into a task container.
+The production daemon uses a root-owned, protected XDG Docker `daemon.json` with `"group":"root"`.
+Namespace root then maps the socket group to the locked `codex-runner` host account instead of a
+subordinate GID. A root-owned systemd user-service drop-in fixes `XDG_CONFIG_HOME` and `UMask=0077`;
+the runtime directory and every parent remain protected, socket owner and group must both equal the
+Runner UID/GID, and other permission bits must be zero. The observed socket mode is `1660`.
 
 ## Fixed container boundary
 
@@ -119,12 +124,15 @@ The current `s3` root filesystem is ext4 without project quotas. Rootless mode t
 one preallocated ext4 image per new WorkItem outside `work_items_root` and mounts it with `fuse2fs`.
 The protected configuration fixes the image byte limit, a separate host-free-space reserve, and all
 filesystem helper paths. PREPARE holds the global Runner lock; a new image is formatted and populated
-only through a deterministic staging mount, cleanly unmounted and checked before atomic publication,
+only through the fixed `mkfs.ext4 -q -F -m 0 -E nodiscard -L codex-work-item <image>` argv and a
+deterministic staging mount, cleanly unmounted and checked before atomic publication,
 then remounted at the exact WorkItem root. Every later operation verifies the image is a single-link,
 fully allocated, owned mode-`0600` regular file of the exact size and verifies the live mount's exact
 source, target, `fuse.ext4` type, Runner UID/GID, `rw`, `nosuid`, `nodev`, and bounded capacity.
 Incomplete staging state is preserved and blocks retry rather than being deleted or guessed. A
 legacy direct-mode WorkItem has no matching image and is therefore not silently admitted or migrated.
+`nodiscard` is mandatory: default ext4 formatting may punch holes in a preallocated regular backing
+file, invalidating the dense-allocation invariant and the host-reserve admission proof.
 
 The image-size check is a real per-WorkItem hard byte limit; the separately preallocated host reserve
 prevents admission from intentionally consuming the final protected capacity. Neither replaces live

@@ -270,6 +270,60 @@ before any Runner configuration switch. Rollback is to freeze the Dispatcher tim
 disable the user `docker.service`, disable linger, and retain the masked rootful units and persistent
 Runner state for reconciliation.
 
+## Runner rootless Docker admission checkpoint — 2026-08-21
+
+Before admission work, the `s2` Dispatcher timer was disabled and its service was inactive. A fresh
+protected SQLite Online Backup was created and returned `integrity_check=ok`; read-only preflight was
+strictly idle. Checksummed root-only rollback directories on both hosts preserve the prior releases,
+configuration, units, firewall state, package inventory, and Docker bootstrap artifacts.
+
+The Runner pulled only the reviewed official `linux/amd64` image
+`ghcr.io/openai/codex-universal@sha256:1641c7bc30b00e0c5d4858b3e4da750123e9802fdb8086e9baa5afa2bc99393c`.
+Temporary registry bootstrap entries and the pull-only daemon proxy were removed afterward, restoring
+the original 14-domain audited allowlist. The retained image consumes approximately 43.69 GB and is
+not safely reclaimable. `br_netfilter` is loaded persistently, bridge netfilter is enabled, and the
+pre-existing audited nftables table remained byte-for-byte unchanged. The dedicated local bridge
+`codex-egress` is fixed to `172.30.0.0/24` with gateway `172.30.0.1`, masquerading enabled,
+inter-container communication disabled, IPv6/internal/attachable/ingress disabled, and no residual
+container attachment.
+
+Credential-free container probes proved the read-only root filesystem; exact 1 GiB `nosuid,nodev`
+`/tmp`; zero effective capabilities; `NoNewPrivs`; seccomp; 8 GiB memory, zero extra swap, 512 PIDs,
+and two CPUs; no Docker socket; proxy-only public access; direct, metadata, private, and unrelated
+public denial; proxy-stop fail-closed behavior; inter-container denial; exact cleanup; and the
+read-only digest-verified Codex CLI mount. No credential or Prompt entered these probes.
+
+An exact FUSE A/B probe found that default `mkfs.ext4` deallocated most blocks from the preallocated
+regular backing file. Commit `817be49` added the fixed `-E nodiscard` argument. The corrected 64 MiB
+live image remained dense before and after ENOSPC, delete, unmount, remount, and clean `e2fsck`, with
+its marker preserved and exact temporary cleanup. All 382 then-current tests passed locally and on
+both Linux hosts.
+
+The initial rootless socket used a subordinate mapped Docker group and was correctly rejected by the
+Runner ownership boundary. A root-owned protected XDG Docker configuration now fixes daemon group
+`root`, which maps to the locked account's host GID; the socket is `1002:1002`, mode `1660`, with no
+other permissions. Commit `7f611ee` also made error-only blocked Turns publish one bounded generic
+Runner error code to Slack without result fields or raw output. All 383 tests plus `compileall` passed
+locally and on both Linux hosts before both immutable releases were switched to that commit.
+
+Private Fixture Issue #20 then exercised the remaining fail-closed path. Exactly one WorkItem
+`wi_70b009360e9de76a19ee8eb4` and one Turn `turn_dc638a73cd6247b2bf27f357a8351309`
+were persisted. The pre-fix socket check blocked before Codex execution, leaving a durable finished
+Runner record with bounded `docker_boundary_invalid`, no agent result, session, published SHA, or PR.
+The root and failure Slack deliveries were each recorded once. After the operational socket fix, the
+only recovery action was `sync_tracker_state`; it did not call the Runner, START/RESUME, or resend the
+Prompt. Repeated preflight remained idle; the Fixture `main` SHA stayed
+`f5037925502905fd3d22a807df7291ba1004bab9`, open PR count stayed six, and active Actions stayed zero.
+The failed WorkItem image, mount, Turn, branch state, Issue, and delivery evidence remain preserved.
+
+A successful Codex container Turn is still not admitted. The 80 GiB root filesystem had
+23,663,915,008 available bytes while a new 8 GiB image plus the fixed 16 GiB reserve requires
+25,769,803,776 bytes, an exact shortfall of 2,105,888,768 bytes. Safe cache/log cleanup cannot close
+that gap, the reviewed Docker image cannot be pruned, and the failed WorkItem evidence cannot be
+deleted. The Dispatcher timer therefore remains disabled and temporary administrative access remains
+in place pending an explicit capacity decision. No secret, Prompt, private key, complete Runner
+output, merge, deployment, release, tag, or push was produced by this checkpoint.
+
 ## Slack Web API exact-retry fixture — 2026-08-20
 
 This fixture proves the provider-side contract required before enabling the real outbound Slack
