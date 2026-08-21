@@ -60,7 +60,9 @@ It must not record URL paths, request or response headers, proxy credentials, au
 Prompt, TLS content or full Codex output. Plain HTTP is denied before use, and TLS remains end to end.
 
 Keep 30 daily compressed rotations, mode `0640`, writable only by the proxy service and readable by
-root for audit. The proxy log is operational evidence, not a replay source. Correlate it to the
+root for audit. A root-only tmpfiles rule creates both logs without truncating existing audit data;
+the worker can append to the files but cannot replace them because the log directory remains
+root-owned and non-writable to `proxy`. The proxy log is operational evidence, not a replay source. Correlate it to the
 globally single active Turn by timestamp and durable Turn ID in the Runner/Dispatcher stores; never
 place a WorkItem ID, Turn ID or Prompt in the proxy URL or authentication fields.
 
@@ -76,7 +78,7 @@ exception could preserve an unreviewed connection after activation.
 Mask `squid.service` before installing the exact pinned `squid` package; package installation must
 never expose its distribution default listener. Prove the distribution unit remains masked and no
 port appeared before installing the repository configuration root-owned and non-writable. Create
-non-secret domain and site-block files, validate with Squid's native parse-only command, then start
+non-secret domain and site-block files plus the reviewed tmpfiles rule, validate with Squid's native parse-only command, then start
 only `codex-egress-proxy.service`. It must listen only on loopback. Its coordinator must remain root
 with only the two identity-drop capabilities, while its network worker and outbound sockets must
 run as the `proxy` UID. The `codex-runner` config may receive only the canonical credential-free endpoint

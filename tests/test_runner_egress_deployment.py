@@ -13,6 +13,7 @@ SERVICE = DEPLOYMENT / "codex-egress-proxy.service"
 FIREWALL_SERVICE = DEPLOYMENT / "codex-egress-firewall.service"
 FIREWALL_RULES = DEPLOYMENT / "codex-egress-firewall.s3.nft"
 LOGROTATE = DEPLOYMENT / "codex-egress-logrotate"
+TMPFILES = DEPLOYMENT / "codex-egress-tmpfiles.conf"
 ALLOWLIST = DEPLOYMENT / "allowed-domains.example"
 BLOCKLIST = DEPLOYMENT / "blocked-destinations.example"
 S3_ALLOWLIST = DEPLOYMENT / "allowed-domains.s3"
@@ -77,6 +78,7 @@ class RunnerEgressDeploymentTests(unittest.TestCase):
     def test_audit_is_metadata_only_and_rotated_with_protected_mode(self) -> None:
         configuration = SQUID_CONFIG.read_text(encoding="utf-8")
         rotation = LOGROTATE.read_text(encoding="utf-8")
+        tmpfiles = TMPFILES.read_text(encoding="utf-8")
         logformat = next(
             line for line in configuration.splitlines() if line.startswith("logformat ")
         )
@@ -101,6 +103,15 @@ class RunnerEgressDeploymentTests(unittest.TestCase):
         self.assertIn("maxsize 100M", rotation)
         self.assertIn("create 0640 proxy proxy", rotation)
         self.assertNotIn("|| true", rotation)
+        self.assertIn(
+            "f /var/log/squid/codex-egress-access.log 0640 proxy proxy -",
+            tmpfiles,
+        )
+        self.assertIn(
+            "f /var/log/squid/codex-egress-cache.log 0640 proxy proxy -",
+            tmpfiles,
+        )
+        self.assertNotIn("f+ ", tmpfiles)
 
     def test_service_uses_root_coordinator_and_unprivileged_worker(self) -> None:
         service = SERVICE.read_text(encoding="utf-8")
@@ -113,6 +124,12 @@ class RunnerEgressDeploymentTests(unittest.TestCase):
         self.assertNotIn("User=codex-runner", service)
         self.assertIn("cache_effective_user proxy", configuration)
         self.assertIn("pinger_enable off", configuration)
+        self.assertIn(
+            "ExecStartPre=+/usr/bin/systemd-tmpfiles --create "
+            "/etc/tmpfiles.d/codex-egress.conf",
+            service,
+        )
+        self.assertIn("LogsDirectoryMode=0750", service)
         self.assertIn("-m codex_dispatcher.egress_policy", service)
         self.assertIn("-k parse", service)
         self.assertGreaterEqual(

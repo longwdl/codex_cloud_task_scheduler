@@ -10,10 +10,11 @@ Group=proxy
 RuntimeDirectory=squid
 RuntimeDirectoryMode=0770
 LogsDirectory=squid
-LogsDirectoryMode=0770
+LogsDirectoryMode=0750
 UMask=0027
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONPATH=/srv/codex-runner/current/src
+ExecStartPre=+/usr/bin/systemd-tmpfiles --create /etc/tmpfiles.d/codex-egress.conf
 ExecStartPre=/usr/bin/python3 -m codex_dispatcher.egress_policy --allowlist /etc/squid/codex-egress-allowed-domains.conf --blocklist /etc/squid/codex-egress-blocked-destinations.conf
 ExecStartPre=/usr/sbin/squid -f /etc/squid/codex-egress.conf -k parse
 ExecStart=/usr/sbin/squid --foreground -f /etc/squid/codex-egress.conf
