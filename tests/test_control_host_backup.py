@@ -49,7 +49,7 @@ class ControlHostBackupTests(unittest.TestCase):
             self.assertEqual(0o600, stat.S_IMODE(metadata.st_mode))
             self.assertEqual(os.geteuid(), metadata.st_uid)
             self.assertEqual(1, metadata.st_nlink)
-            self.assertEqual([], list(backups.glob(".state-backup-*.tmp")))
+            self.assertEqual([], list(backups.glob(".state-backup-*")))
             with StateStore(result.path, read_only=True) as restored:
                 self.assertEqual("ok", restored.integrity_check())
                 self.assertIsNotNone(restored.get_run("backup-run"))
@@ -85,8 +85,13 @@ class ControlHostBackupTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "protected regular file"):
                 create_state_backup(link, backups, now=NOW)
 
+            def fail_with_sidecars(staging: Path) -> None:
+                staging.with_name(f"{staging.name}-wal").write_bytes(b"")
+                staging.with_name(f"{staging.name}-shm").write_bytes(b"")
+                raise RuntimeError("injected")
+
             with (
-                patch.object(StateStore, "backup", side_effect=RuntimeError("injected")),
+                patch.object(StateStore, "backup", side_effect=fail_with_sidecars),
                 self.assertRaisesRegex(RuntimeError, "injected"),
             ):
                 create_state_backup(database, backups, now=NOW)

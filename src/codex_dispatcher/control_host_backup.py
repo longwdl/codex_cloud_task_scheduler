@@ -44,6 +44,10 @@ def create_state_backup(
     )
     os.close(descriptor)
     staging = Path(staging_name)
+    staging_sidecars = (
+        staging.with_name(f"{staging.name}-wal"),
+        staging.with_name(f"{staging.name}-shm"),
+    )
     try:
         with StateStore(database_path, read_only=True) as source:
             if source.integrity_check() != "ok":
@@ -70,6 +74,9 @@ def create_state_backup(
     finally:
         if staging.exists() or staging.is_symlink():
             staging.unlink()
+        for sidecar in staging_sidecars:
+            if sidecar.exists() or sidecar.is_symlink():
+                sidecar.unlink()
 
 
 def _timestamp(value: datetime | None) -> str:
