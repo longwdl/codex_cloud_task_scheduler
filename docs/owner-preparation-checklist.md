@@ -104,7 +104,7 @@ recommendation but sufficient for the bounded fixture. The implementation fixes 
 
 - protected `/srv/codex-runner/etc/config.json`, based on `config/runner.example.json`;
 - protected `/srv/codex-runner/etc/agent-result.schema.json`;
-- `/srv/codex-runner/run/active.lock` writable by `ecs-user`;
+- `/srv/codex-runner/run/active.lock` writable only by `codex-runner`;
 - `/srv/codex-runner/work-items` for per-Issue repositories and Runner state;
 - absolute resolved Git and Codex executable paths;
 - Codex Turn timeout; the Control Host SSH operation timeout must be longer than it;
@@ -114,13 +114,14 @@ recommendation but sufficient for the bounded fixture. The implementation fixes 
 
 ### 3. Codex authentication on Runner
 
-`CODEX_HOME=/srv/codex-runner/app` is already logged in using ChatGPT. It is one shared Runner-level
-home, separate from the Runner's `etc`, `run`, and `work-items` directories, not one copy per task.
-Keep the directory owned by `ecs-user` with mode `0700`, keep
-`auth.json` at `0600`, and initialize or refresh login only in place. Dispatcher and fixture scripts
-must never read, print, copy, or log the credential file. Before each live fixture, verify only the
-non-secret result of `CODEX_HOME=/srv/codex-runner/app codex login status`. Generated Codex child
-commands must not receive GitHub or Control Host credentials.
+`CODEX_HOME=/srv/codex-runner/app` is logged in using ChatGPT, but its mode-`0600` `auth.json` is only
+the `codex-runner`-owned host seed. A rootless WorkItem copies that seed once into its protected
+`runner-state/codex-home/auth.json`; the container may read and atomically refresh only this
+WorkItem-local file. Its immutable `runner-state/codex-auth-binding.json` stays on the host outside
+container mounts. Never mount the Runner-wide seed or complete Runner home into a task container,
+and never print, copy off-host, or log either credential file. Before each live fixture, verify only
+the non-secret login-status result plus hashes/counts; Generated Codex children must not receive
+GitHub or Control Host credentials.
 
 For the current Mac fixture only, Dispatcher may use the existing SSH identity and the protected
 `/opt/homebrew/bin/assh` helper with the fixed proxy shape `assh connect --port=%p %h`. A dedicated

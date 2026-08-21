@@ -112,8 +112,7 @@ def build_docker_login_status_plan(
     codex_home = _mount_source(codex_home, "codex_home")
     auth_file = _mount_source(auth_file, "auth_file")
     _validate_codex_home(codex_home)
-    if auth_file.name != "auth.json":
-        raise ValueError("auth_file must name auth.json")
+    _validate_work_item_auth(codex_home, auth_file)
     inner = build_codex_login_status_invocation(
         codex_path=CONTAINER_CODEX_PATH,
         codex_home=CONTAINER_CODEX_HOME,
@@ -128,7 +127,6 @@ def build_docker_login_status_plan(
             readonly=True,
         ),
         _mount(codex_home, CONTAINER_CODEX_HOME),
-        _mount(auth_file, CONTAINER_CODEX_HOME / "auth.json", readonly=True),
         *_container_environment(inner.environment),
         f"--workdir={CONTAINER_CODEX_HOME}",
         runtime.image,
@@ -175,8 +173,7 @@ def build_docker_codex_plan(
     ):
         raise ValueError("timeout_seconds must be positive")
     _validate_work_item_mounts(repository, codex_home)
-    if auth_file.name != "auth.json":
-        raise ValueError("auth_file must name auth.json")
+    _validate_work_item_auth(codex_home, auth_file)
     if output_schema.name != "agent-result.schema.json":
         raise ValueError("output_schema must name agent-result.schema.json")
     inner = build_codex_invocation(
@@ -197,7 +194,6 @@ def build_docker_codex_plan(
         ),
         _mount(repository, CONTAINER_REPOSITORY),
         _mount(codex_home, CONTAINER_CODEX_HOME),
-        _mount(auth_file, CONTAINER_CODEX_HOME / "auth.json", readonly=True),
         _mount(output_schema, CONTAINER_SCHEMA, readonly=True),
         *_container_environment(inner.environment),
         f"--workdir={CONTAINER_REPOSITORY}",
@@ -291,6 +287,11 @@ def _validate_work_item_mounts(repository: Path, codex_home: Path) -> None:
 def _validate_codex_home(codex_home: Path) -> None:
     if codex_home.name != "codex-home" or codex_home.parent.name != "runner-state":
         raise ValueError("codex_home must belong to one WorkItem runner-state")
+
+
+def _validate_work_item_auth(codex_home: Path, auth_file: Path) -> None:
+    if auth_file != codex_home / "auth.json":
+        raise ValueError("auth_file must be the WorkItem host binding")
 
 
 def _validate_codex_tool_bundle(

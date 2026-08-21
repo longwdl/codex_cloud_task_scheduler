@@ -74,7 +74,10 @@ class DockerCodexPlanTests(unittest.TestCase):
             codex_home=Path(
                 "/srv/codex-runner/work-items/owner__repo/issue-42/runner-state/codex-home"
             ),
-            auth_file=Path("/srv/codex-runner/app/auth.json"),
+            auth_file=Path(
+                "/srv/codex-runner/work-items/owner__repo/issue-42/"
+                "runner-state/codex-home/auth.json"
+            ),
             output_schema=Path("/srv/codex-runner/etc/agent-result.schema.json"),
             session_id=SESSION,
         )
@@ -144,7 +147,7 @@ class DockerCodexPlanTests(unittest.TestCase):
         codex_home = Path(
             "/srv/codex-runner/work-items/owner__repo/issue-42/runner-state/codex-home"
         )
-        auth_file = Path("/srv/codex-runner/app/auth.json")
+        auth_file = codex_home / "auth.json"
         schema = Path("/srv/codex-runner/etc/agent-result.schema.json")
         plan = build_docker_codex_plan(
             runtime=runtime(),
@@ -159,7 +162,7 @@ class DockerCodexPlanTests(unittest.TestCase):
         )
         mounts = tuple(item for item in plan.argv if item.startswith("--mount="))
 
-        self.assertEqual(6, len(mounts))
+        self.assertEqual(5, len(mounts))
         self.assertEqual(
             f"--mount=type=bind,source={CODEX_PATH},target=/usr/local/bin/codex,readonly",
             mounts[0],
@@ -172,14 +175,11 @@ class DockerCodexPlanTests(unittest.TestCase):
         self.assertIn(f"source={repository},target=/workspace", mounts[2])
         self.assertIn(f"source={codex_home},target=/codex-home", mounts[3])
         self.assertEqual(
-            f"--mount=type=bind,source={auth_file},target=/codex-home/auth.json,readonly",
-            mounts[4],
-        )
-        self.assertEqual(
             f"--mount=type=bind,source={schema},"
             "target=/runner-contract/agent-result.schema.json,readonly",
-            mounts[5],
+            mounts[4],
         )
+        self.assertFalse(any(str(auth_file) in item for item in mounts))
         self.assertFalse(any("target=/srv" in item for item in mounts))
         self.assertFalse(any("source=/srv/codex-runner/app,target=" in item for item in mounts))
         self.assertFalse(any("source=/srv/codex-runner/work-items,target=" in item for item in mounts))
@@ -192,16 +192,21 @@ class DockerCodexPlanTests(unittest.TestCase):
             codex_home=Path(
                 "/srv/codex-runner/work-items/owner__repo/issue-42/runner-state/codex-home"
             ),
-            auth_file=Path("/srv/codex-runner/app/auth.json"),
+            auth_file=Path(
+                "/srv/codex-runner/work-items/owner__repo/issue-42/"
+                "runner-state/codex-home/auth.json"
+            ),
         )
         mounts = tuple(item for item in plan.argv if item.startswith("--mount="))
 
         self.assertFalse(plan.reads_prompt_from_stdin)
-        self.assertEqual(4, len(mounts))
+        self.assertEqual(3, len(mounts))
         self.assertIn("target=/usr/local/bin/codex,readonly", mounts[0])
         self.assertIn(
             "target=/usr/local/bin/codex-code-mode-host,readonly", mounts[1]
         )
+        self.assertIn("target=/codex-home", mounts[2])
+        self.assertFalse(any("target=/codex-home/auth.json" in item for item in mounts))
         self.assertEqual(("login", "status"), plan.argv[-2:])
         self.assertFalse(any("/workspace" in item for item in plan.argv))
         self.assertFalse(any("agent-result.schema" in item for item in plan.argv))
@@ -322,6 +327,16 @@ class DockerCodexPlanTests(unittest.TestCase):
                     "/srv/codex-runner/etc/agent-result.schema.json"
                 ),
                 session_id=None,
+            )
+        with self.assertRaisesRegex(ValueError, "WorkItem host binding"):
+            build_docker_login_status_plan(
+                runtime=runtime(),
+                work_item_id=WORK_ITEM,
+                codex_path=CODEX_PATH,
+                codex_home=Path(
+                    "/srv/codex-runner/work-items/owner__repo/issue-42/runner-state/codex-home"
+                ),
+                auth_file=Path("/srv/codex-runner/app/auth.json"),
             )
 
 

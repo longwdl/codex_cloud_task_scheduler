@@ -32,6 +32,7 @@ from codex_dispatcher.runner_docker import (
     RunnerDockerError,
     bind_docker_session,
     prepare_docker_work_item,
+    validate_docker_auth_state,
     validate_docker_command_boundary,
 )
 from codex_dispatcher.runner_protocol import (
@@ -269,7 +270,6 @@ class RunnerTurnExecutor:
                 runtime=self._docker_runtime,
                 context=context,
                 codex_path=self._codex_path,
-                auth_file=auth_file,
                 output_schema=self._output_schema,
             )
             if request.operation is RunnerOperation.RESUME:
@@ -286,7 +286,7 @@ class RunnerTurnExecutor:
                 codex_path=self._codex_path,
                 repository=context.repository,
                 codex_home=context.codex_home,
-                auth_file=auth_file,
+                auth_file=context.auth_file,
                 output_schema=self._output_schema,
                 session_id=request.session_id,
                 timeout_seconds=self._timeout_seconds,
@@ -304,6 +304,10 @@ class RunnerTurnExecutor:
             return self._failed_reply(request, "docker_boundary_invalid")
         if command.timed_out:
             raise RunnerTurnError("Docker Turn outcome is unresolved")
+        try:
+            validate_docker_auth_state(context)
+        except RunnerDockerError:
+            return self._failed_reply(request, "docker_boundary_invalid")
         if (
             command.error is not None
             or command.stdout_truncated
@@ -379,7 +383,6 @@ class RunnerTurnExecutor:
             runtime=self._docker_runtime,
             context=context,
             codex_path=self._codex_path,
-            auth_file=auth_file,
             output_schema=self._output_schema,
         )
         plan = build_docker_login_status_plan(
@@ -387,7 +390,7 @@ class RunnerTurnExecutor:
             work_item_id=request.work_item_id,
             codex_path=self._codex_path,
             codex_home=context.codex_home,
-            auth_file=auth_file,
+            auth_file=context.auth_file,
         )
         command = run_binary_command(
             plan.argv,

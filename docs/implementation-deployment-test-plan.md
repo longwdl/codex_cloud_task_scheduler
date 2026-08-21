@@ -149,9 +149,9 @@ ID 完成。
 Runner 丢失时，允许损失尚未 Publisher checkpoint 的改动和本地 Codex session 上下文。
 GitHub 已发布 commit、Issue/PR、Control Host SQLite 和审计记录不得受影响。
 
-### 3.3 后续 Docker 加固
+### 3.3 Rootless Docker 隔离
 
-Docker 阶段才增加：
+当前 `s3` Fixture 路径已增加：
 
 - 每个活动 WorkItem 一个容器；
 - 只挂载该 WorkItem 目录；
@@ -162,10 +162,10 @@ Docker 阶段才增加：
 - 禁止访问内网和云 metadata，按需限制外网；
 - 容器内可拥有完成开发所需权限，但这些权限不能扩展到 Runner Host。
 
-共享认证状态如何安全提供给容器必须在 Docker 阶段单独设计；不能把整个 Runner 级
-`CODEX_HOME` 无条件挂载给所有容器并宣称已经隔离。
-
-Docker 不在当前离线逻辑和第一轮 SSH Fixture 的完成条件内。
+Runner 级 `auth.json` 只作为宿主机种子。每个 WorkItem 在自己的 `codex-home` 中持有可写
+副本，容器外的不可变 sidecar 绑定 WorkItem 与种子摘要；不得挂载整个 Runner 级
+`CODEX_HOME` 或共享可写认证文件。Fixture live 成功不自动准入高价值仓库，剩余 auth refresh
+和 active-Turn recovery 门槛以 `deploy/runner/DOCKER.md` 的矩阵为准。
 
 ## 4. GitHub 协议
 

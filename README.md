@@ -54,16 +54,18 @@ executor. The environment-independent implementation now includes:
 The Runner path has now been exercised against the private Fixture through the real pinned SSH
 transport and Codex CLI 0.147.0 using ChatGPT login. A migrated Issue binding completed PREPARE,
 created one persistent session, and resumed that exact session on the same branch and directory;
-the read-only task produced no diff or publication checkpoint. The first-phase Runner on `s3` now
+the read-only task produced no diff or publication checkpoint. The Runner on `s3` now
 uses the dedicated locked `codex-runner` account, root-owned release/configuration/tool inputs, an
 external root-owned authorized-key file, and an sshd-enforced fixed command. Existing WorkItems and
-sessions were retained and a completed Turn was read back through STATUS after migration. This
-ownership boundary is not a substitute for the later per-WorkItem container boundary.
+sessions were retained and a completed Turn was read back through STATUS after migration. It now
+executes configured Fixture Turns in rootless per-WorkItem containers with bounded resources,
+storage, mounts, session home, and proxy-only egress.
 The same host account is now forced through a loopback-only Squid CONNECT proxy plus a dedicated
 nftables OUTPUT table. Live probes proved exact OpenAI-domain allow, public-domain deny, direct
 TCP/DNS/UDP and private/metadata denial, metadata-only audit, fail-closed restart, and safe log
-rotation. This is host-level egress enforcement; container-visible routing and hard aggregate disk
-limits are still deferred.
+rotation. Container-visible routing, cross-container denial, per-WorkItem ENOSPC/remount behavior,
+and the fixed 8 GiB disk admission boundary have also been exercised. Higher-value repositories
+remain prohibited pending the explicit auth/recovery matrix in `deploy/runner/DOCKER.md`.
 
 The write-enabled dependency assembly has now completed one bounded happy-path run against Fixture
 Issue `#2`: it claimed one SSH-labelled Issue, created one persistent Codex session, published the

@@ -26,7 +26,9 @@ from codex_dispatcher.work_items import validate_session_id, validate_work_item_
 
 _SESSION_BINDING_VERSION = 1
 _TOOL_BINDING_VERSION = 1
+_AUTH_BINDING_VERSION = 1
 _MAX_SESSION_BINDING_BYTES = 4096
+_MAX_AUTH_BYTES = 1024 * 1024
 
 
 class RunnerDockerError(RuntimeError):
@@ -35,9 +37,12 @@ class RunnerDockerError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class DockerWorkItemContext:
+    work_item_id: str
     repository: Path
     state: Path
     codex_home: Path
+    auth_file: Path
+    auth_binding: Path
     session_binding: Path
     tool_binding: Path
     image: str
@@ -66,7 +71,6 @@ def prepare_docker_work_item(
         or paths.state != paths.root / "runner-state"
     ):
         raise RunnerDockerError("WorkItem directory layout is invalid")
-    _trusted_regular_file(auth_file, "Codex auth file", secret=True)
     if auth_file.name != "auth.json":
         raise RunnerDockerError("Codex auth file name is invalid")
     _trusted_regular_file(output_schema, "output schema", secret=False)
@@ -74,6 +78,8 @@ def prepare_docker_work_item(
         raise RunnerDockerError("output schema name is invalid")
 
     codex_home = paths.state / "codex-home"
+    work_item_auth = codex_home / "auth.json"
+    auth_binding = paths.state / "codex-auth-binding.json"
     session_binding = paths.state / "codex-session.json"
     tool_binding = paths.state / "codex-session-tools.json"
     if request.operation is RunnerOperation.START:
@@ -84,18 +90,43 @@ def prepare_docker_work_item(
             or tool_binding.is_symlink()
         ):
             raise RunnerDockerError("Docker START cannot replace a bound Codex session")
+        auth_exists = work_item_auth.exists() or work_item_auth.is_symlink()
+        binding_exists = auth_binding.exists() or auth_binding.is_symlink()
+        if auth_exists != binding_exists:
+            raise RunnerDockerError("Docker START auth binding is incomplete")
         if codex_home.exists() or codex_home.is_symlink():
             _owned_protected_directory(codex_home, "WorkItem Codex home")
             try:
-                if any(codex_home.iterdir()):
-                    raise RunnerDockerError("unbound WorkItem Codex home is not empty")
+                entries = tuple(codex_home.iterdir())
             except OSError as exc:
                 raise RunnerDockerError("WorkItem Codex home is unavailable") from exc
+            if auth_exists:
+                if entries != (work_item_auth,):
+                    raise RunnerDockerError(
+                        "unbound WorkItem Codex home has ambiguous state"
+                    )
+                _validate_bound_auth(
+                    work_item_auth,
+                    auth_binding,
+                    request.work_item_id,
+                )
+            elif entries:
+                raise RunnerDockerError("unbound WorkItem Codex home is not empty")
         else:
+            if auth_exists or binding_exists:
+                raise RunnerDockerError("Docker START auth binding is inconsistent")
             try:
                 codex_home.mkdir(mode=0o700)
             except OSError as exc:
                 raise RunnerDockerError("WorkItem Codex home could not be created") from exc
+        if not auth_exists:
+            _seed_work_item_auth(
+                state=paths.state,
+                source=auth_file,
+                destination=work_item_auth,
+                binding=auth_binding,
+                work_item_id=request.work_item_id,
+            )
     else:
         assert request.session_id is not None
         _owned_protected_directory(codex_home, "WorkItem Codex home")
@@ -120,11 +151,32 @@ def prepare_docker_work_item(
             and tool_binding_value != expected_tool_binding
         ):
             raise RunnerDockerError("Docker RESUME session binding is unavailable")
+        auth_exists = work_item_auth.exists() or work_item_auth.is_symlink()
+        binding_exists = auth_binding.exists() or auth_binding.is_symlink()
+        if auth_exists != binding_exists:
+            raise RunnerDockerError("Docker RESUME auth binding is incomplete")
+        if not auth_exists:
+            _seed_work_item_auth(
+                state=paths.state,
+                source=auth_file,
+                destination=work_item_auth,
+                binding=auth_binding,
+                work_item_id=request.work_item_id,
+            )
+        else:
+            _validate_bound_auth(
+                work_item_auth,
+                auth_binding,
+                request.work_item_id,
+            )
     _owned_protected_directory(codex_home, "WorkItem Codex home")
     return DockerWorkItemContext(
+        request.work_item_id,
         paths.repository,
         paths.state,
         codex_home,
+        work_item_auth,
+        auth_binding,
         session_binding,
         tool_binding,
         runtime.image,
@@ -138,7 +190,6 @@ def validate_docker_command_boundary(
     runtime: DockerCodexRuntime,
     context: DockerWorkItemContext,
     codex_path: Path,
-    auth_file: Path,
     output_schema: Path,
 ) -> None:
     """Freshly validate every mutable input immediately before Docker starts."""
@@ -151,6 +202,8 @@ def validate_docker_command_boundary(
     if (
         context.state != context.repository.parent / "runner-state"
         or context.codex_home != context.state / "codex-home"
+        or context.auth_file != context.codex_home / "auth.json"
+        or context.auth_binding != context.state / "codex-auth-binding.json"
         or context.session_binding != context.state / "codex-session.json"
         or context.tool_binding != context.state / "codex-session-tools.json"
         or context.image != runtime.image
@@ -166,8 +219,18 @@ def validate_docker_command_boundary(
         runtime.code_mode_host_sha256,
         "Codex code-mode host",
     )
-    _trusted_regular_file(auth_file, "Codex auth file", secret=True)
+    validate_docker_auth_state(context)
     _trusted_regular_file(output_schema, "output schema", secret=False)
+
+
+def validate_docker_auth_state(context: DockerWorkItemContext) -> None:
+    """Validate the host-only WorkItem auth binding without exposing its content."""
+    _owned_protected_directory(context.state, "WorkItem state")
+    _validate_bound_auth(
+        context.auth_file,
+        context.auth_binding,
+        context.work_item_id,
+    )
 
 
 def bind_docker_session(
@@ -179,6 +242,8 @@ def bind_docker_session(
     """Persist one immutable WorkItem-to-session identity outside the container mount."""
     work_item_id = validate_work_item_id(work_item_id)
     session_id = validate_session_id(session_id)
+    if work_item_id != context.work_item_id:
+        raise RunnerDockerError("WorkItem Codex session binding conflicts")
     _owned_protected_directory(context.state, "WorkItem state")
     _owned_protected_directory(context.codex_home, "WorkItem Codex home")
     expected_session_binding = (
@@ -229,6 +294,124 @@ def bind_docker_session(
         existing_tool_binding = _read_tool_binding(context.tool_binding)
     if existing_tool_binding != expected_tool_binding:
         raise RunnerDockerError("WorkItem Codex tool binding conflicts")
+
+
+def _seed_work_item_auth(
+    *,
+    state: Path,
+    source: Path,
+    destination: Path,
+    binding: Path,
+    work_item_id: str,
+) -> None:
+    work_item_id = validate_work_item_id(work_item_id)
+    _owned_protected_directory(state, "WorkItem state")
+    if (
+        destination != state / "codex-home" / "auth.json"
+        or binding != state / "codex-auth-binding.json"
+    ):
+        raise RunnerDockerError("WorkItem auth paths are inconsistent")
+    if (
+        destination.exists()
+        or destination.is_symlink()
+        or binding.exists()
+        or binding.is_symlink()
+    ):
+        raise RunnerDockerError("WorkItem auth binding already exists")
+    raw = _read_auth_bytes(source, "Codex auth source", trusted_source=True)
+    source_sha256 = sha256(raw).hexdigest()
+    temporary = destination.parent / f".{destination.name}.{os.getpid()}.tmp"
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, destination, follow_symlinks=False)
+        directory_descriptor = os.open(
+            destination.parent, os.O_RDONLY | os.O_DIRECTORY
+        )
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except OSError as exc:
+        raise RunnerDockerError("WorkItem auth file could not be persisted") from exc
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    _persist_binding(
+        binding,
+        {
+            "version": _AUTH_BINDING_VERSION,
+            "work_item_id": work_item_id,
+            "source_sha256": source_sha256,
+        },
+        "WorkItem Codex auth binding",
+    )
+    _validate_bound_auth(destination, binding, work_item_id)
+
+
+def _validate_bound_auth(auth_file: Path, binding: Path, work_item_id: str) -> None:
+    _read_auth_bytes(auth_file, "WorkItem Codex auth file", trusted_source=False)
+    bound = _read_auth_binding(binding)
+    if bound is None or bound[0] != validate_work_item_id(work_item_id):
+        raise RunnerDockerError("WorkItem Codex auth binding conflicts")
+
+
+def _read_auth_binding(
+    path: Path, *, required: bool = True
+) -> tuple[str, str] | None:
+    payload = _read_binding_payload(
+        path, required=required, field="WorkItem Codex auth binding"
+    )
+    if payload is None:
+        return None
+    try:
+        if set(payload) != {"version", "work_item_id", "source_sha256"}:
+            raise ValueError("unexpected fields")
+        if payload["version"] != _AUTH_BINDING_VERSION:
+            raise ValueError("unsupported version")
+        work_item_id = validate_work_item_id(payload["work_item_id"])
+        source_sha256 = _validate_binding_sha256(
+            payload["source_sha256"], "auth source"
+        )
+    except (TypeError, ValueError) as exc:
+        raise RunnerDockerError("WorkItem Codex auth binding is malformed") from exc
+    return work_item_id, source_sha256
+
+
+def _read_auth_bytes(path: Path, field: str, *, trusted_source: bool) -> bytes:
+    try:
+        metadata = path.lstat()
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise RunnerDockerError(f"{field} is unavailable") from exc
+    valid_owner = (
+        metadata.st_uid in {0, os.geteuid()}
+        if trusted_source
+        else metadata.st_uid == os.geteuid()
+    )
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or path.is_symlink()
+        or not valid_owner
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+        or not raw
+        or len(raw) > _MAX_AUTH_BYTES
+        or b"\x00" in raw
+    ):
+        raise RunnerDockerError(f"{field} is invalid")
+    try:
+        payload = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise RunnerDockerError(f"{field} is malformed") from exc
+    if not isinstance(payload, dict):
+        raise RunnerDockerError(f"{field} is malformed")
+    return raw
 
 
 def _persist_binding(path: Path, payload: dict[str, object], field: str) -> None:

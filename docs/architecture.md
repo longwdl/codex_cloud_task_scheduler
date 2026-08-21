@@ -151,13 +151,14 @@ remain ambiguous; they are never interpreted as delivery success.
 ## Codex CLI session protocol
 
 The first turn runs `codex exec --json --dangerously-bypass-approvals-and-sandbox` with the prompt
-on standard input. The dedicated, disposable Runner host is the external boundary for this explicit
-first-phase risk acceptance. The Dispatcher captures
+on standard input. The rootless per-WorkItem container is the external execution boundary. The
+Dispatcher captures
 the `thread.started.thread_id` event and binds it exactly once to the work item. Later turns run
 `codex exec resume <session-id> --json --dangerously-bypass-approvals-and-sandbox -` from the same
-repository directory with the same runner-wide `CODEX_HOME`. The session ID, not a task-specific
-authentication directory, selects the exact Codex context. After Docker is introduced, the
-container becomes the external boundary and the Codex invocation remains unrestricted inside it.
+repository directory and the same WorkItem `CODEX_HOME`. The session ID selects the exact Codex
+context. The host seeds one WorkItem-local writable `codex-home/auth.json`; its binding record stays
+outside container mounts, and the Runner-wide auth seed is never mounted. The Codex invocation
+remains unrestricted inside the bounded container.
 
 `--ephemeral` and `resume --last` are forbidden. Missing, conflicting, or ambiguous session state
 becomes `blocked`; the scheduler never creates a replacement session automatically.
@@ -282,6 +283,10 @@ The initial dedicated Linux SSH Runner used direct host execution as an explicit
 acceptance. The configured `s3` Fixture path now executes Codex in a rootless per-WorkItem container
 with bounded disk, resources, mounts, capabilities, session home, and proxy-only network access.
 The host Docker socket is never mounted and containers never run with `--privileged`.
+
+Each WorkItem home contains its own writable auth copy so Codex can use atomic refresh safely. A
+host-only binding beside that home records the WorkItem and seed digest; the shared Runner auth seed,
+session/tool bindings, other WorkItems, and Control Host state remain outside the container mount.
 
 The runner still contains no production secrets, personal data, deployment credentials, inbound
 SSH key to the Control Host, or mounted Control Host filesystem. Published commits, GitHub state,

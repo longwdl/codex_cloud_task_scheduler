@@ -47,16 +47,15 @@ Every Turn plan uses:
   clean failure;
 - the dedicated `codex-egress` network, which is only a name until live inspection proves its
   firewall behavior;
-- only six bind mounts for a Turn: the independently digest-verified root-owned `codex` and
+- only five bind mounts for a Turn: the independently digest-verified root-owned `codex` and
   `codex-code-mode-host` executables read-only, that WorkItem's `repo/` read-write, that WorkItem's
-  dedicated Codex session home read-write, the protected Runner auth file read-only, and the
-  root-owned output Schema read-only;
+  dedicated Codex session/auth home read-write, and the root-owned output Schema read-only;
 - the Prompt only on standard input and no Docker or Codex argv derived from Issue text.
 
-The authentication check receives the two read-only executables, the WorkItem session home, and the
-read-only auth file; it does not receive the repository or Schema. Docker output is never persisted
-by the daemon because the Runner already captures it through a bounded pipe and reduces it to the
-strict Agent result.
+The authentication check receives the two read-only executables and only the WorkItem session/auth
+home; it does not receive the repository, Schema, Runner-wide auth source, or host binding record.
+Docker output is never persisted by the daemon because the Runner already captures it through a
+bounded pipe and reduces it to the strict Agent result.
 The host Docker CLI receives an explicit empty, protected `DOCKER_CONFIG`; ambient `HOME`, Docker
 contexts, client proxy configuration, credential helpers, and a user-selected daemon are absent.
 
@@ -69,7 +68,7 @@ separately reviewed image variant; they must not install an unbounded toolchain 
 
 Docker bind mounts are writable by default and directly expose host paths, so every source must be
 an owned, protected, non-symlink path derived from the durable WorkItem registry or the fixed Codex
-tool bundle. The Turn planner's six mounts are necessary but not sufficient: runtime integration
+tool bundle. The Turn planner's five mounts are necessary but not sufficient: runtime integration
 must freshly validate source ownership, mode, type, resolved containment, independent executable
 digests, and the per-WorkItem auth mount behavior immediately before starting Docker. See Docker's
 official
@@ -82,26 +81,34 @@ through the container cgroup rather than inferred from argv. See the official
 
 ## Authentication and session migration gate
 
-The current direct Runner has one shared `/srv/codex-runner/app` containing ChatGPT authentication
-and all existing session state. Mounting that complete directory into every container would preserve
-behavior but would not isolate WorkItems, so it is forbidden.
+The Runner keeps one protected `/srv/codex-runner/app/auth.json` only as the host seed. Mounting the
+complete Runner-wide home or that shared file read-write into every container is forbidden.
 
-The container layout gives each WorkItem a separate protected `runner-state/codex-home`. Its exact
-WorkItem/session/image/primary-Codex binding remains in the backward-compatible
+The container layout gives each WorkItem a separate protected `runner-state/codex-home`. Before its
+first container command, the host copies the seed once to that home's mode-`0600` `auth.json`. The
+WorkItem home is the writable mount, so Codex may atomically refresh its own auth file without a
+replace-hostile nested file mount. The immutable `runner-state/codex-auth-binding.json` remains
+outside every container mount and binds the WorkItem to the seed digest without exposing credential
+content. The Runner-wide seed is never mounted and must remain byte-identical. Other WorkItems
+receive different files and cannot enumerate, replace, or delete this one.
+
+The exact WorkItem/session/image/primary-Codex binding remains in the backward-compatible
 `runner-state/codex-session.json`; the independently hashed companion binding is stored in the new
 `runner-state/codex-session-tools.json` sidecar. Neither file is mounted into the container. START
-requires both bindings to be absent and the session home to be absent or empty. RESUME requires the
-exact protected session, image, and executable bindings. An existing isolated session without the
-sidecar may gain it once only after the original binding matches and both current executables pass
-their protected-path and configured-digest checks. The original version-1 binding is never rewritten,
-so a Runner code rollback can still read it; conflicting sidecars and other legacy or shared-home
-state remain blocked. Only the minimum auth file is supplied read-only for the duration of the
-container.
+requires all bindings to be absent and the session home to be absent or empty. RESUME requires the
+exact protected session, image, executable, and auth bindings. An existing isolated session without
+the tool or auth sidecar may gain each once only after its original session binding matches and the
+current host inputs pass their protected-path checks. The original version-1 session binding is
+never rewritten, so the previous Runner can still read it. If the WorkItem auth has diverged through
+refresh, however, rolling back to a release that uses the Runner-wide seed is not a safe RESUME path.
+Conflicting, partial, missing-after-binding, legacy shared-home, malformed, linked, oversized, or
+weakly protected auth state is rejected before Codex starts.
 Offline fake execution proves the START/RESUME identity and failure boundary. Live acceptance must
 prove:
 
 1. `codex login status` succeeds without mutating the protected auth source;
-2. token refresh does not require a writable shared auth file or silently invalidate the source;
+2. token refresh can atomically update only the selected WorkItem auth file without mutating or
+   silently invalidating the Runner-wide seed;
 3. a new session persists only in the selected WorkItem home and resumes there by exact session ID;
 4. one container cannot enumerate, read, modify, or delete another WorkItem home;
 5. existing direct-mode WorkItems migrate their exact session state only after independently
@@ -112,8 +119,10 @@ The dedicated Issue `#24` recovery fixture proved items 1, 3, and 5 for one exis
 session: the original version-1 binding remained byte-identical, the companion sidecar was added
 only after authentication and executable validation, and Turn 2 resumed the same session and
 produced one checkpoint. It did not intentionally force a token refresh, so item 2 remains a
-version-specific operational risk. Cross-WorkItem denial and the network/disk boundaries were
-proved separately with credential-free probes; repeat them whenever those boundaries change.
+version-specific operational risk. The WorkItem auth host binding and atomic-refresh behavior are
+covered offline but require a new dedicated Fixture before deployment admission. Cross-WorkItem
+denial and the network/disk boundaries were proved separately with credential-free probes; repeat
+them whenever those boundaries change.
 
 No credential value, session content, Prompt, raw JSONL stream, or full container output may be
 printed, logged, copied to GitHub/Slack, or committed during these proofs.
@@ -182,6 +191,22 @@ Items 1 through 6 have passed for the dedicated private Fixture, including the s
 `#24` RESUME recorded in `docs/live-test-evidence.md`. Item 7 remains in force. The Dispatcher timer
 is intentionally disabled while the operator reviews this checkpoint; successful Fixture admission
 does not authorize unattended use for another repository class.
+
+### Remaining admission matrix
+
+| Gate | Fixture-only unattended status | Higher-value repository status |
+|---|---|---|
+| Rootless daemon, image, mounts, cgroups, proxy and per-WorkItem disk | Live-proved; repeat after any relevant asset change | Requires the same exact target read-back |
+| Per-WorkItem writable auth plus host-only binding | Offline candidate; one new START/RESUME Fixture and seed/file digest comparison required | Blocked until that live proof passes |
+| Natural token refresh | The layout permits isolated atomic replacement; never force expiry by editing a credential | Blocked until a version-specific refresh/rotation procedure preserves the seed and other WorkItems |
+| Runner/client timeout or process loss | Durable `executing` becomes unknown and blind replay is forbidden | Blocked until operator recovery/abandonment semantics are explicitly accepted for the repository |
+| Docker/host restart with no active Turn | Credential-free restart/remount probes passed | Must be repeated after the final auth/runtime release |
+| Backup publication | Integrity and atomic publication passed; temporary SQLite sidecars must also be absent | Same requirement plus a restore drill |
+
+Fixture-only timer activation may proceed only after the offline candidate is independently deployed,
+one dedicated Fixture proves the WorkItem auth binding without exposing its contents, the backup
+sidecar fix is live-verified, temporary administrative access is removed, and preflight plus a
+repeated sweep are idle. It does not satisfy the higher-value column.
 
 Rollback keeps the Dispatcher timer disabled, stops the rootless user daemon, restores the previous
 Runner release/config/account binding, and uses read-only STATUS reconciliation. Preserve every

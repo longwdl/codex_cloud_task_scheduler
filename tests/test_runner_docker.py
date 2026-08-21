@@ -76,16 +76,23 @@ assert inner[0] == "/usr/bin/timeout"
 assert inner[1] == "--signal=KILL"
 codex = inner[4:]
 
-def mount_source(target):
+def mount_argument(target):
     for argument in args:
         if argument.startswith("--mount=") and f"target={{target}}" in argument:
-            for field in argument.split(","):
-                if field.startswith("source="):
-                    return Path(field.removeprefix("source="))
+            return argument
     raise AssertionError(f"missing mount {{target}}")
+
+def mount_source(target):
+    for field in mount_argument(target).split(","):
+        if field.startswith("source="):
+            return Path(field.removeprefix("source="))
+    raise AssertionError(f"missing source for {{target}}")
 
 assert mount_source("/usr/local/bin/codex").is_file()
 assert mount_source("/usr/local/bin/codex-code-mode-host").is_file()
+auth_file = mount_source("/codex-home") / "auth.json"
+assert auth_file.name == "auth.json"
+assert ",readonly" not in mount_argument("/codex-home")
 
 if codex[-2:] == ["login", "status"]:
     with Path({str(call_log)!r}).open("a", encoding="utf-8") as stream:
@@ -98,6 +105,13 @@ with Path({str(call_log)!r}).open("a", encoding="utf-8") as stream:
 repository = mount_source("/workspace")
 os.chdir(repository)
 prompt = sys.stdin.read()
+if "refresh auth" in prompt:
+    refreshed = auth_file.with_name(".auth-refresh.tmp")
+    refreshed.write_text('{{"refreshed":true}}\\n', encoding="utf-8")
+    refreshed.chmod(0o600)
+    refreshed.replace(auth_file)
+if "corrupt auth" in prompt:
+    auth_file.write_bytes(b"not-json")
 session = codex[codex.index("resume") + 1] if "resume" in codex else {SESSION!r}
 changed = []
 if "change" in prompt:
@@ -288,10 +302,243 @@ class RunnerDockerExecutionTests(unittest.TestCase):
                 tool_binding["code_mode_host_sha256"],
             )
             self.assertTrue((paths.state / "codex-home").is_dir())
+            source_auth = root / "shared-codex-home" / "auth.json"
+            work_item_auth = paths.state / "codex-home" / "auth.json"
+            auth_binding = json.loads(
+                (paths.state / "codex-auth-binding.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(1, auth_binding["version"])
+            self.assertEqual(WORK_ITEM, auth_binding["work_item_id"])
+            self.assertEqual(
+                sha256(source_auth.read_bytes()).hexdigest(),
+                auth_binding["source_sha256"],
+            )
+            self.assertEqual(source_auth.read_bytes(), work_item_auth.read_bytes())
+            self.assertNotEqual(source_auth.stat().st_ino, work_item_auth.stat().st_ino)
+            self.assertEqual(0o600, work_item_auth.stat().st_mode & 0o777)
+            self.assertEqual(1, work_item_auth.stat().st_nlink)
             self.assertEqual(
                 ["auth", "turn", "auth", "turn"],
                 call_log.read_text().splitlines(),
             )
+
+    def test_work_item_auth_refresh_is_isolated_and_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, turns, base_sha, _, socket_path, listener = self._setup(root)
+            assert listener is not None
+            source_auth = root / "shared-codex-home" / "auth.json"
+            source_bytes = source_auth.read_bytes()
+            try:
+                with patch(
+                    "codex_dispatcher.runner_docker._expected_rootless_socket",
+                    return_value=socket_path,
+                ):
+                    first_prompt = b"first change refresh auth"
+                    first = turns.execute(
+                        _request(
+                            RunnerOperation.START,
+                            TURN_ONE,
+                            first_prompt,
+                            base_sha,
+                        ),
+                        first_prompt,
+                    )
+                    assert first.head_sha is not None
+                    second_prompt = b"second change"
+                    second = turns.execute(
+                        _request(
+                            RunnerOperation.RESUME,
+                            TURN_TWO,
+                            second_prompt,
+                            first.head_sha,
+                            session_id=SESSION,
+                        ),
+                        second_prompt,
+                    )
+            finally:
+                listener.close()
+
+            self.assertEqual(RunnerTurnRemoteState.FINISHED, first.state)
+            self.assertEqual(RunnerTurnRemoteState.FINISHED, second.state)
+            self.assertEqual(source_bytes, source_auth.read_bytes())
+            self.assertEqual(
+                b'{"refreshed":true}\n',
+                (
+                    workspace.paths(WORK_ITEM).state / "codex-home" / "auth.json"
+                ).read_bytes(),
+            )
+
+    def test_resume_seeds_one_legacy_auth_binding_without_rewriting_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, turns, base_sha, _, socket_path, listener = self._setup(root)
+            assert listener is not None
+            try:
+                with patch(
+                    "codex_dispatcher.runner_docker._expected_rootless_socket",
+                    return_value=socket_path,
+                ):
+                    first_prompt = b"first change"
+                    first = turns.execute(
+                        _request(
+                            RunnerOperation.START,
+                            TURN_ONE,
+                            first_prompt,
+                            base_sha,
+                        ),
+                        first_prompt,
+                    )
+                    assert first.head_sha is not None
+                    paths = workspace.paths(WORK_ITEM)
+                    session_binding = paths.state / "codex-session.json"
+                    tool_binding = paths.state / "codex-session-tools.json"
+                    session_bytes = session_binding.read_bytes()
+                    tool_bytes = tool_binding.read_bytes()
+                    (paths.state / "codex-home" / "auth.json").unlink()
+                    (paths.state / "codex-auth-binding.json").unlink()
+                    second_prompt = b"second change"
+                    second = turns.execute(
+                        _request(
+                            RunnerOperation.RESUME,
+                            TURN_TWO,
+                            second_prompt,
+                            first.head_sha,
+                            session_id=SESSION,
+                        ),
+                        second_prompt,
+                    )
+            finally:
+                listener.close()
+
+            self.assertEqual(RunnerTurnRemoteState.FINISHED, second.state)
+            self.assertEqual(session_bytes, session_binding.read_bytes())
+            self.assertEqual(tool_bytes, tool_binding.read_bytes())
+            self.assertEqual(
+                (root / "shared-codex-home" / "auth.json").read_bytes(),
+                (paths.state / "codex-home" / "auth.json").read_bytes(),
+            )
+
+    def test_resume_rejects_incomplete_host_auth_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, turns, base_sha, call_log, socket_path, listener = self._setup(
+                root
+            )
+            assert listener is not None
+            try:
+                with patch(
+                    "codex_dispatcher.runner_docker._expected_rootless_socket",
+                    return_value=socket_path,
+                ):
+                    first_prompt = b"first change"
+                    first = turns.execute(
+                        _request(
+                            RunnerOperation.START,
+                            TURN_ONE,
+                            first_prompt,
+                            base_sha,
+                        ),
+                        first_prompt,
+                    )
+                    assert first.head_sha is not None
+                    (workspace.paths(WORK_ITEM).state / "codex-auth-binding.json").unlink()
+                    second_prompt = b"must not resume"
+                    second = turns.execute(
+                        _request(
+                            RunnerOperation.RESUME,
+                            TURN_TWO,
+                            second_prompt,
+                            first.head_sha,
+                            session_id=SESSION,
+                        ),
+                        second_prompt,
+                    )
+            finally:
+                listener.close()
+
+            self.assertEqual(RunnerTurnRemoteState.FAILED, second.state)
+            self.assertEqual("docker_boundary_invalid", second.error_code)
+            self.assertEqual(["auth", "turn"], call_log.read_text().splitlines())
+
+    def test_invalid_auth_mutation_is_a_durable_boundary_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _, turns, base_sha, _, socket_path, listener = self._setup(root)
+            assert listener is not None
+            prompt = b"change corrupt auth"
+            request = _request(RunnerOperation.START, TURN_ONE, prompt, base_sha)
+            try:
+                with patch(
+                    "codex_dispatcher.runner_docker._expected_rootless_socket",
+                    return_value=socket_path,
+                ):
+                    reply = turns.execute(request, prompt)
+                    repeated = turns.execute(request, prompt)
+            finally:
+                listener.close()
+
+            self.assertEqual(reply, repeated)
+            self.assertEqual(RunnerTurnRemoteState.FAILED, reply.state)
+            self.assertEqual("docker_boundary_invalid", reply.error_code)
+            self.assertEqual(
+                b"{}\n",
+                (root / "shared-codex-home" / "auth.json").read_bytes(),
+            )
+
+    def test_new_start_reuses_only_bound_auth_after_login_preflight_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace, turns, base_sha, call_log, socket_path, listener = self._setup(
+                root
+            )
+            assert listener is not None
+            first_prompt = b"first attempt"
+            try:
+                with (
+                    patch(
+                        "codex_dispatcher.runner_docker._expected_rootless_socket",
+                        return_value=socket_path,
+                    ),
+                    patch(
+                        "codex_dispatcher.runner_turns.run_binary_command",
+                        return_value=BinaryCommandResult(1, b"", b"logged out\n"),
+                    ),
+                ):
+                    first = turns.execute(
+                        _request(
+                            RunnerOperation.START,
+                            TURN_ONE,
+                            first_prompt,
+                            base_sha,
+                        ),
+                        first_prompt,
+                    )
+                with patch(
+                    "codex_dispatcher.runner_docker._expected_rootless_socket",
+                    return_value=socket_path,
+                ):
+                    second_prompt = b"second change"
+                    second = turns.execute(
+                        _request(
+                            RunnerOperation.START,
+                            TURN_TWO,
+                            second_prompt,
+                            base_sha,
+                        ),
+                        second_prompt,
+                    )
+            finally:
+                listener.close()
+
+            self.assertEqual(RunnerTurnRemoteState.FAILED, first.state)
+            self.assertEqual("codex_auth_invalid", first.error_code)
+            self.assertEqual(RunnerTurnRemoteState.FINISHED, second.state)
+            paths = workspace.paths(WORK_ITEM)
+            self.assertTrue((paths.state / "codex-auth-binding.json").is_file())
+            self.assertEqual(["auth", "turn"], call_log.read_text().splitlines())
 
     def test_missing_socket_is_a_durable_failure_without_starting_docker(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
