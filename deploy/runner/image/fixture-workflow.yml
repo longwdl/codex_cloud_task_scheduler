@@ -80,7 +80,6 @@ jobs:
     timeout-minutes: 25
     env:
       IMAGE_REPOSITORY: ghcr.io/longwdl/codex-runner-web
-      DOCKER_CONFIG: ${{ runner.temp }}/codex-runner-publisher-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Validate exact default-branch request
         env:
@@ -143,6 +142,7 @@ jobs:
           echo "image_layer_count=$(docker image inspect --format '{{len .RootFS.Layers}}' "$image_ref")"
       - name: Authenticate with the ephemeral workflow token
         env:
+          DOCKER_CONFIG: ${{ runner.temp }}/codex-runner-publisher-${{ github.run_id }}-${{ github.run_attempt }}
           GHCR_TOKEN: ${{ github.token }}
         run: |
           set -eu
@@ -152,6 +152,7 @@ jobs:
       - name: Push the commit-only candidate tag
         env:
           ACTUAL_COMMIT: ${{ github.sha }}
+          DOCKER_CONFIG: ${{ runner.temp }}/codex-runner-publisher-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -eu
           image_ref="$IMAGE_REPOSITORY:sha-$ACTUAL_COMMIT"
@@ -159,6 +160,7 @@ jobs:
       - name: Pull back and record the exact RepoDigest
         env:
           ACTUAL_COMMIT: ${{ github.sha }}
+          DOCKER_CONFIG: ${{ runner.temp }}/codex-runner-publisher-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
           image_ref="$IMAGE_REPOSITORY:sha-$ACTUAL_COMMIT"
@@ -183,6 +185,8 @@ jobs:
           echo "pulled_image_layer_count=$(docker image inspect --format '{{len .RootFS.Layers}}' "$repo_digest")"
       - name: Remove registry credentials
         if: always()
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/codex-runner-publisher-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -eu
           docker logout ghcr.io >/dev/null 2>&1 || true

@@ -126,6 +126,17 @@ class RunnerImageTests(unittest.TestCase):
             self.assertIn(required, workflow)
 
         self.assertEqual(1, workflow.count("packages: write"))
+        self.assertEqual(
+            4,
+            workflow.count(
+                "DOCKER_CONFIG: ${{ runner.temp }}/codex-runner-publisher-"
+            ),
+        )
+        self.assertNotIn(
+            "env:\n      IMAGE_REPOSITORY: ghcr.io/longwdl/codex-runner-web\n"
+            "      DOCKER_CONFIG:",
+            workflow,
+        )
         self.assertNotIn("push:\n", workflow)
         self.assertNotIn("schedule:", workflow)
 
