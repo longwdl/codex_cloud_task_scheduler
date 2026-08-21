@@ -123,9 +123,11 @@ class RunnerImageTests(unittest.TestCase):
             "GHCR_TOKEN: ${{ github.token }}",
             "--password-stdin",
             'docker push "$image_ref"',
-            "test \"${#repo_digests[@]}\" -eq 1",
+            "docker image inspect --format '{{json .RepoDigests}}'",
+            'jq -er --arg prefix "$IMAGE_REPOSITORY@sha256:"',
+            "| select(length == 1)",
             'docker pull --platform=linux/amd64 "$repo_digest"',
-            'test "${pulled_digests[0]}" = "$repo_digest"',
+            'test "$pulled_digest" = "$repo_digest"',
             'echo "repo_digest=$repo_digest"',
             "if: always()",
             'rm -rf -- "$DOCKER_CONFIG"',
@@ -160,8 +162,11 @@ class RunnerImageTests(unittest.TestCase):
         digest_readback = '          docker pull --platform=linux/amd64 "$repo_digest"\n'
         self.assertIn(first_readback, pullback)
         self.assertIn(digest_readback, pullback)
+        self.assertEqual(2, pullback.count("{{json .RepoDigests}}"))
+        self.assertEqual(2, pullback.count("| select(length == 1)"))
         self.assertEqual(1, pullback.count('docker image rm "$image_ref"'))
         self.assertNotIn('docker image rm "$repo_digest"', pullback)
+        self.assertNotIn("mapfile", pullback)
 
 
 if __name__ == "__main__":

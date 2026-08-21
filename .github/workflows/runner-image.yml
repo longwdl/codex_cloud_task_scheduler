@@ -168,20 +168,29 @@ jobs:
           image_ref="$IMAGE_REPOSITORY:sha-$ACTUAL_COMMIT"
           docker image rm "$image_ref"
           docker pull --platform=linux/amd64 "$image_ref"
-          mapfile -t repo_digests < <(
-            docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image_ref" | sort -u
-          )
-          test "${#repo_digests[@]}" -eq 1
-          repo_digest="${repo_digests[0]}"
+          repo_digest="$(
+            docker image inspect --format '{{json .RepoDigests}}' "$image_ref" |
+              jq -er --arg prefix "$IMAGE_REPOSITORY@sha256:" '
+                [.[] | select(startswith($prefix))]
+                | unique
+                | select(length == 1)
+                | .[0]
+              '
+          )"
           digest="${repo_digest#"$IMAGE_REPOSITORY@sha256:"}"
           test "$digest" != "$repo_digest"
           printf '%s\n' "$digest" | grep -Eq '^[0-9a-f]{64}$'
           docker pull --platform=linux/amd64 "$repo_digest"
-          mapfile -t pulled_digests < <(
-            docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$repo_digest" | sort -u
-          )
-          test "${#pulled_digests[@]}" -eq 1
-          test "${pulled_digests[0]}" = "$repo_digest"
+          pulled_digest="$(
+            docker image inspect --format '{{json .RepoDigests}}' "$repo_digest" |
+              jq -er --arg prefix "$IMAGE_REPOSITORY@sha256:" '
+                [.[] | select(startswith($prefix))]
+                | unique
+                | select(length == 1)
+                | .[0]
+              '
+          )"
+          test "$pulled_digest" = "$repo_digest"
           echo "repo_digest=$repo_digest"
           echo "pulled_image_id=$(docker image inspect --format '{{.Id}}' "$repo_digest")"
           echo "pulled_image_size_bytes=$(docker image inspect --format '{{.Size}}' "$repo_digest")"
