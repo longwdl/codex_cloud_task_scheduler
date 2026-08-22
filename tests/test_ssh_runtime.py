@@ -20,6 +20,7 @@ from codex_dispatcher.fixture_faults import (
     FixtureFaultPoint,
 )
 from codex_dispatcher.git_publisher import GitTaskBranchPublisher
+from codex_dispatcher.github_actions_evidence import GitHubActionsEvidenceImporter
 from codex_dispatcher.slack_web_api import SlackWebApiPublisher
 from codex_dispatcher.ssh_preflight import SshPreflightStatus
 from codex_dispatcher.ssh_runtime import (
@@ -107,6 +108,10 @@ class SshRuntimeTests(unittest.TestCase):
 
         self.assertIsInstance(sweep._tracker, GitHubCliTracker)
         self.assertIsInstance(sweep._publisher, GitTaskBranchPublisher)
+        self.assertIsInstance(
+            sweep._dispatch._ci_evidence_importer,
+            GitHubActionsEvidenceImporter,
+        )
         self.assertFalse((self.root / "mirrors").exists())
         self.assertFalse((self.root / "quarantine").exists())
         self.assertFalse((self.root / "publisher-temporary").exists())

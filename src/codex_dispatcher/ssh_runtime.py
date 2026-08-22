@@ -22,6 +22,7 @@ from codex_dispatcher.control_sweep import ControlSweepResult, SshControlSweep
 from codex_dispatcher.dispatcher_lock import DispatcherProcessLock
 from codex_dispatcher.git_bundle_verifier import GitBundleQuarantineVerifier
 from codex_dispatcher.git_publisher import GitTaskBranchPublisher
+from codex_dispatcher.github_actions_evidence import GitHubActionsEvidenceImporter
 from codex_dispatcher.github_delivery import GitHubDeliveryCoordinator
 from codex_dispatcher.slack_delivery import SlackDeliveryCoordinator
 from codex_dispatcher.slack_web_api import SlackWebApiPublisher
@@ -251,6 +252,10 @@ def _assemble_ssh_control_sweep(
         config=config,
         store=store,
         orchestrator=orchestrator,
+        ci_evidence_importer=GitHubActionsEvidenceImporter(
+            gh_path=gh_path,
+            token=github_token,
+        ),
     )
     publisher = GitTaskBranchPublisher(
         git_path=git_path,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 import re
 
 
@@ -23,6 +24,32 @@ _HEADINGS = (
 )
 _HEADING_RE = re.compile(r"(?m)^##[ \t]+(.+?)[ \t]*$")
 _GLOB_CHARS = frozenset("*?[]{}")
+_STRUCTURED_ACCEPTANCE_RE = re.compile(
+    r"^[ \t]*(?:[-*][ \t]+)?\[(AC-[1-9][0-9]{0,3})\][ \t]+"
+    r"([a-z][a-z0-9-]{0,63})(?::[ \t]*(.*?))?[ \t]*$"
+)
+_STRUCTURED_ACCEPTANCE_PREFIX_RE = re.compile(
+    r"^[ \t]*(?:[-*][ \t]+)?\[AC-"
+)
+_SUPPORTED_ACCEPTANCE_PREDICATES = frozenset(
+    {
+        "changed-paths-within-allowed",
+        "required-check",
+        "task-head-published",
+    }
+)
+_CHECKLIST_PREFIX_RE = re.compile(r"^[ \t]*(?:[-*][ \t]+)?\[[ xX]\][ \t]+")
+_BULLET_PREFIX_RE = re.compile(r"^[ \t]*(?:[-*][ \t]+)")
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptanceCriterion:
+    """One normalized Issue acceptance item and its optional trusted predicate."""
+
+    criterion_id: str
+    description: str
+    predicate: str
+    argument: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +59,7 @@ class TaskSpec:
     scope: str
     non_goals: str
     acceptance_criteria: str
+    acceptance_items: tuple[AcceptanceCriterion, ...]
     allowed_paths: tuple[str, ...]
     verification_commands: str
     blockers: str
@@ -139,12 +167,101 @@ def parse_task_spec(issue_body: str) -> TaskSpec:
     if missing:
         raise TaskSpecError("missing required section(s): " + ", ".join(missing))
 
+    acceptance_items = parse_acceptance_criteria(sections["验收条件"])
     allowed_paths = _parse_allowed_paths(sections["允许修改路径"])
     return TaskSpec(
         objective=sections["目标"], background=sections["背景"], scope=sections["范围"],
         non_goals=sections["非目标"], acceptance_criteria=sections["验收条件"],
-        allowed_paths=allowed_paths, verification_commands=sections["验证命令"],
+        acceptance_items=acceptance_items, allowed_paths=allowed_paths,
+        verification_commands=sections["验证命令"],
         blockers=sections["阻塞条件"], deployment_constraints=sections["部署限制"],
+    )
+
+
+def parse_acceptance_criteria(content: str) -> tuple[AcceptanceCriterion, ...]:
+    """Parse a small Markdown-compatible AC language without guessing prose semantics.
+
+    Supported machine-evaluable forms are exact, one-per-line directives::
+
+        - [AC-1] required-check: unit-tests
+        - [AC-2] changed-paths-within-allowed
+        - [AC-3] task-head-published
+
+    Every other non-empty line remains an explicit ``manual`` criterion. A line that
+    starts like a structured directive but is malformed is rejected so a typo cannot
+    silently downgrade an intended automated assertion.
+    """
+    if not isinstance(content, str) or not content.strip():
+        raise TaskSpecError("验收条件 must be non-empty text")
+    items: list[AcceptanceCriterion] = []
+    structured_ids: set[str] = set()
+    for line_number, raw_line in enumerate(content.splitlines(), start=1):
+        if not raw_line.strip():
+            continue
+        match = _STRUCTURED_ACCEPTANCE_RE.fullmatch(raw_line)
+        if match is not None:
+            criterion_id, predicate, raw_argument = match.groups()
+            if criterion_id in structured_ids:
+                raise TaskSpecError(f"duplicate acceptance criterion id: {criterion_id}")
+            structured_ids.add(criterion_id)
+            if predicate not in _SUPPORTED_ACCEPTANCE_PREDICATES:
+                raise TaskSpecError(
+                    f"unsupported acceptance predicate on line {line_number}: {predicate}"
+                )
+            argument = raw_argument.strip() if raw_argument is not None else None
+            if predicate == "required-check":
+                if argument is None or not _bounded_acceptance_text(argument, maximum=256):
+                    raise TaskSpecError(
+                        f"required-check on line {line_number} needs a bounded check name"
+                    )
+            elif argument is not None:
+                raise TaskSpecError(
+                    f"acceptance predicate on line {line_number} does not take an argument"
+                )
+            items.append(
+                AcceptanceCriterion(
+                    criterion_id=criterion_id,
+                    description=(
+                        f"{predicate}: {argument}" if argument is not None else predicate
+                    ),
+                    predicate=predicate,
+                    argument=argument,
+                )
+            )
+            continue
+        if _STRUCTURED_ACCEPTANCE_PREFIX_RE.match(raw_line):
+            raise TaskSpecError(
+                f"malformed structured acceptance criterion on line {line_number}"
+            )
+        description = _CHECKLIST_PREFIX_RE.sub("", raw_line, count=1)
+        description = _BULLET_PREFIX_RE.sub("", description, count=1).strip()
+        if not _bounded_acceptance_text(description, maximum=4_096):
+            raise TaskSpecError(
+                f"manual acceptance criterion on line {line_number} is invalid or too large"
+            )
+        digest = sha256(description.encode("utf-8")).hexdigest()[:10].upper()
+        items.append(
+            AcceptanceCriterion(
+                criterion_id=f"AC-TEXT-{len(items) + 1:03d}-{digest}",
+                description=description,
+                predicate="manual",
+            )
+        )
+    if not items:
+        raise TaskSpecError("验收条件 must contain at least one criterion")
+    if len(items) > 100:
+        raise TaskSpecError("验收条件 exceeds the 100-criterion safety boundary")
+    if sum(len(item.description.encode("utf-8")) for item in items) > 32 * 1024:
+        raise TaskSpecError("验收条件 exceeds the structured evidence size boundary")
+    return tuple(items)
+
+
+def _bounded_acceptance_text(value: str, *, maximum: int) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value.encode("utf-8")) <= maximum
+        and not any(ord(character) < 32 or ord(character) == 127 for character in value)
     )
 
 

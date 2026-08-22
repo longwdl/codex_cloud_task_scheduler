@@ -8,6 +8,12 @@ from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 
+from codex_dispatcher.ci_evidence import (
+    ActionsEvidenceSnapshot,
+    ActionsRunEvidence,
+    CiEvidenceError,
+    RequiredCheckEvidence,
+)
 from codex_dispatcher.codex_jsonl import CodexTurnUsage
 from codex_dispatcher.config import SessionRuntimeConfig
 from codex_dispatcher.publisher import VerifiedBundle
@@ -558,17 +564,68 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
         self.assertEqual(
             ("src/codex_dispatcher/parser.py",), checkpoints[0].changed_paths
         )
+
+        captured: list[dict[str, object]] = []
+
+        def import_for_head(**kwargs: object) -> ActionsEvidenceSnapshot:
+            captured.append(dict(kwargs))
+            run = ActionsRunEvidence(
+                name="tests",
+                workflow_id=200,
+                run_id=100,
+                run_attempt=1,
+                repository="owner/repo",
+                head_repository="owner/repo",
+                head_branch=item.task_branch,
+                head_sha=head_sha,
+                event="pull_request",
+                status="completed",
+                conclusion="success",
+                created_at="2026-08-22T08:00:00Z",
+                updated_at="2026-08-22T08:01:00Z",
+                html_url="https://github.com/owner/repo/actions/runs/100",
+            )
+            return ActionsEvidenceSnapshot(
+                repository="owner/repo",
+                task_branch=item.task_branch,
+                head_sha=head_sha,
+                remote_ref_sha=head_sha,
+                observed_at=str(kwargs["observed_at"]),
+                required_checks=(
+                    RequiredCheckEvidence("tests", run.check_status, run),
+                ),
+            )
+
         service.resolve_and_prepare(claimed_task(), base_sha=BASE_SHA)
+        evidence_service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+            ci_evidence_importer=SimpleNamespace(import_for_head=import_for_head),
+        )
         self.transport.queue_turn(
             item.work_item_id,
             FakeTurnFixture(SESSION_2, head_sha, blocked_result()),
         )
-        followup = service.run_claimed_turn(
+        evidence_service.run_claimed_turn(
             claimed_task(), turn_id="turn_" + "9" * 32
         )
-        handoff = self.store.get_turn_handoff(followup.turn.turn_id)
+
+        self.assertEqual(1, len(captured))
+        self.assertEqual(head_sha, captured[0]["head_sha"])
+        replacement = self.store.list_session_generations(item.work_item_id)[1]
+        handoff = self.store.get_session_handoff_for_generation(
+            replacement.session_generation_id
+        )
         self.assertIsNotNone(handoff)
         assert handoff is not None
+        self.assertEqual(
+            [{"name": "tests", "status": "passed"}],
+            handoff.trusted_facts["required_checks"],
+        )
+        self.assertEqual(
+            "github_actions", handoff.trusted_facts["ci_evidence"]["provider"]
+        )
         self.assertTrue(
             handoff.trusted_facts["git"]["publication_evidence_complete"]
         )
@@ -576,6 +633,29 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
             ["src/codex_dispatcher/parser.py"],
             handoff.trusted_facts["git"]["verified_changed_paths"],
         )
+
+        def reject_import(**_: object) -> ActionsEvidenceSnapshot:
+            raise CiEvidenceError("provider denied the exact-head read")
+
+        evidence_service.resolve_and_prepare(claimed_task(), base_sha=BASE_SHA)
+        failing_service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+            ci_evidence_importer=SimpleNamespace(import_for_head=reject_import),
+        )
+        with self.assertRaisesRegex(
+            SshDispatchPlanningError, "Actions evidence import failed"
+        ):
+            failing_service.run_claimed_turn(
+                claimed_task(), turn_id="turn_" + "a" * 32
+            )
+        generations = self.store.list_session_generations(item.work_item_id)
+        self.assertEqual(2, len(generations))
+        self.assertEqual(
+            ["retired", "active"], [item.state.value for item in generations]
+        )
+        self.assertEqual(2, len(self.store.list_turns(item.work_item_id)))
 
     def test_missing_or_conflicting_source_bundle_fails_before_persistence(self) -> None:
         for bundle in (None, source_bundle("b" * 40)):

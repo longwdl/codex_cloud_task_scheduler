@@ -165,7 +165,8 @@ Preferred long-term option: a GitHub App installed only on explicitly selected r
 
 - Dispatcher operations: Metadata read, Contents read, Issues write, Pull requests write.
 - Publisher operation: temporary Contents write token.
-- No Administration, Secrets, Environments, Deployments, Actions write, or bypass permission.
+- Actions read is required for exact-HEAD Handoff evidence. No Administration, Secrets,
+  Environments, Deployments, Actions write, or bypass permission.
 - The App must not merge, force-push, delete refs, write tags, or bypass default-branch protection.
 
 For the private fixture, the previously accepted absence of a personal-account ruleset remains a

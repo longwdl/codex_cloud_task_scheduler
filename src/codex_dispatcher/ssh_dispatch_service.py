@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Iterable
 from uuid import uuid4
 
+from codex_dispatcher.ci_evidence import CiEvidenceError, CiEvidenceImporter
 from codex_dispatcher.config import Config, RepositoryConfig
 from codex_dispatcher.git_bundle_verifier import GitBundleVerificationError
 from codex_dispatcher.git_publisher import (
@@ -61,12 +62,20 @@ class OfflineSshDispatchService:
         config: Config,
         store: StateStore,
         orchestrator: OfflineTurnOrchestrator,
+        ci_evidence_importer: CiEvidenceImporter | None = None,
     ) -> None:
         if not isinstance(config, Config):
             raise TypeError("config must be a Config")
+        if ci_evidence_importer is not None and not callable(
+            getattr(ci_evidence_importer, "import_for_head", None)
+        ):
+            raise TypeError(
+                "ci_evidence_importer must provide import_for_head or be None"
+            )
         self._config = config
         self._store = store
         self._orchestrator = orchestrator
+        self._ci_evidence_importer = ci_evidence_importer
         self._repositories = {item.slug: item for item in config.repositories}
 
     def plan_candidates(self, tracker: Tracker) -> DryRunPlan:
@@ -257,6 +266,26 @@ class OfflineSshDispatchService:
                         if source_turn is not None
                         else None
                     )
+                    handoff_created_at = datetime.now(timezone.utc).isoformat()
+                    actions_evidence = None
+                    if (
+                        work_item.last_published_sha is not None
+                        and self._ci_evidence_importer is not None
+                    ):
+                        try:
+                            actions_evidence = (
+                                self._ci_evidence_importer.import_for_head(
+                                    repository=work_item.repository,
+                                    task_branch=work_item.task_branch,
+                                    head_sha=work_item.last_published_sha,
+                                    required_checks=repository.required_checks,
+                                    observed_at=handoff_created_at,
+                                )
+                            )
+                        except CiEvidenceError as exc:
+                            raise SshDispatchPlanningError(
+                                f"Actions evidence import failed: {exc}"
+                            ) from exc
                     handoff = build_ssh_session_handoff_snapshot(
                         task=task,
                         repository=repository,
@@ -274,7 +303,8 @@ class OfflineSshDispatchService:
                         source_turn=source_turn,
                         source_agent_result=source_agent_result,
                         comments=comments,
-                        created_at=datetime.now(timezone.utc).isoformat(),
+                        created_at=handoff_created_at,
+                        actions_evidence=actions_evidence,
                     )
                     _, generation = self._store.rotate_session_generation(
                         work_item.work_item_id,

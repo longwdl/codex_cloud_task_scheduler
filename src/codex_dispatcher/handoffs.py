@@ -3,14 +3,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from hashlib import sha256
 import json
 import re
 from typing import Any
 from uuid import uuid4
 
+from codex_dispatcher.acceptance_evaluator import (
+    AcceptanceStatus,
+    evaluate_acceptance,
+)
+from codex_dispatcher.ci_evidence import (
+    ActionsEvidenceSnapshot,
+    ActionsRunEvidence,
+    RequiredCheckStatus,
+)
 from codex_dispatcher.runner_protocol import AgentResult, agent_result_to_mapping
-from codex_dispatcher.task_spec import normalize_repo_path
+from codex_dispatcher.task_spec import (
+    AcceptanceCriterion,
+    normalize_repo_path,
+    parse_acceptance_criteria,
+)
 from codex_dispatcher.work_items import (
     SessionGeneration,
     WorkItem,
@@ -92,6 +106,12 @@ class SessionHandoffSnapshot:
         )
         _validate_trusted_facts(trusted)
         _validate_untrusted_advisory(advisory)
+        if trusted["schema_version"] == 2:
+            observed_at = trusted["ci_evidence"]["observed_at"]
+            if observed_at is not None and _aware_timestamp(
+                observed_at, "CI observed_at"
+            ) > _aware_timestamp(self.created_at, "handoff created_at"):
+                raise ValueError("CI evidence observation occurs after Handoff creation")
         if (
             trusted["work_item"]["work_item_id"] != self.work_item_id
             or trusted["generation"]["from_session_generation_id"]
@@ -170,6 +190,9 @@ def build_session_handoff_snapshot(
     source_agent_result: AgentResult | None,
     created_at: str,
     handoff_id: str | None = None,
+    acceptance_items: tuple[AcceptanceCriterion, ...] | None = None,
+    allowed_paths: tuple[str, ...] = (),
+    actions_evidence: ActionsEvidenceSnapshot | None = None,
 ) -> SessionHandoffSnapshot:
     """Build a canonical handoff without promoting Agent output to trusted facts."""
     if not isinstance(work_item, WorkItem):
@@ -214,6 +237,7 @@ def build_session_handoff_snapshot(
     if (
         not isinstance(required_checks, tuple)
         or not required_checks
+        or len(required_checks) > 100
         or len(set(required_checks)) != len(required_checks)
         or any(
             not isinstance(item, str)
@@ -229,6 +253,19 @@ def build_session_handoff_snapshot(
         or any(not isinstance(item, PublishedCheckpoint) for item in published_checkpoints)
     ):
         raise TypeError("published_checkpoints must contain PublishedCheckpoint values")
+    if acceptance_items is None:
+        acceptance_items = parse_acceptance_criteria(acceptance_criteria)
+    if (
+        not isinstance(acceptance_items, tuple)
+        or not acceptance_items
+        or any(not isinstance(item, AcceptanceCriterion) for item in acceptance_items)
+    ):
+        raise TypeError("acceptance_items must be a non-empty criterion tuple")
+    if (
+        not isinstance(allowed_paths, tuple)
+        or any(not isinstance(path, str) for path in allowed_paths)
+    ):
+        raise TypeError("allowed_paths must be a tuple of repository paths")
     if source_agent_result is not None:
         if (
             source_turn_id is None
@@ -243,6 +280,17 @@ def build_session_handoff_snapshot(
     generation_head_sha = from_generation.last_published_sha or from_generation.start_head_sha
     if current_head_sha != generation_head_sha:
         raise ValueError("WorkItem and source generation publication anchors differ")
+    if actions_evidence is not None:
+        if not isinstance(actions_evidence, ActionsEvidenceSnapshot):
+            raise TypeError("actions_evidence must be an ActionsEvidenceSnapshot or None")
+        if (
+            actions_evidence.repository != work_item.repository
+            or actions_evidence.task_branch != work_item.task_branch
+            or actions_evidence.head_sha != current_head_sha
+            or tuple(item.name for item in actions_evidence.required_checks)
+            != required_checks
+        ):
+            raise ValueError("Actions evidence conflicts with the Handoff target")
 
     for previous, current in zip(
         published_checkpoints, published_checkpoints[1:]
@@ -283,15 +331,36 @@ def build_session_handoff_snapshot(
             or published_checkpoint_heads[-1] == current_head_sha
         )
     )
-    required_check_facts = [
-        {"name": name, "status": "not_observed"} for name in required_checks
-    ]
+    verified_changed_paths = tuple(sorted(path_set))
+    if actions_evidence is None:
+        required_check_facts = [
+            {"name": name, "status": RequiredCheckStatus.NOT_OBSERVED.value}
+            for name in required_checks
+        ]
+    else:
+        required_check_facts = [
+            {"name": item.name, "status": item.status.value}
+            for item in actions_evidence.required_checks
+        ]
+    acceptance = evaluate_acceptance(
+        criteria=acceptance_items,
+        configured_required_checks=required_checks,
+        allowed_paths=allowed_paths,
+        publication_evidence_complete=publication_evidence_complete,
+        verified_changed_paths=verified_changed_paths,
+        head_was_published=work_item.last_published_sha is not None,
+        actions_evidence=actions_evidence,
+    )
     remaining_work: list[dict[str, str]] = [
         {
-            "kind": "acceptance_verification",
+            "kind": "acceptance_criterion",
             "status": "remaining",
-            "summary": "Verify the acceptance criteria against the current repository state.",
+            "summary": (
+                f"{item.criterion_id} [{item.status.value}]: {item.description}"
+            ),
         }
+        for item in acceptance.criteria
+        if item.status is not AcceptanceStatus.PASSED
     ]
     remaining_work.extend(
         {
@@ -299,13 +368,40 @@ def build_session_handoff_snapshot(
             "status": "remaining",
             "summary": f"Observe required check '{name}' for the current HEAD.",
         }
-        for name in required_checks
+        for name, status in (
+            (item["name"], item["status"]) for item in required_check_facts
+        )
+        if status != RequiredCheckStatus.PASSED.value
+    )
+    ci_runs = (
+        []
+        if actions_evidence is None
+        else [
+            _actions_run_mapping(item.run)
+            for item in actions_evidence.required_checks
+            if item.run is not None
+        ]
     )
     trusted: dict[str, Any] = {
-        "acceptance": {
-            "criteria_sha256": sha256(acceptance_criteria.encode("utf-8")).hexdigest(),
-            "evidence": [],
-            "status": "unverified",
+        "acceptance": acceptance.to_mapping(
+            criteria_sha256=sha256(acceptance_criteria.encode("utf-8")).hexdigest()
+        ),
+        "ci_evidence": {
+            "head_sha": current_head_sha,
+            "observed_at": (
+                actions_evidence.observed_at if actions_evidence is not None else None
+            ),
+            "provider": (
+                "github_actions" if actions_evidence is not None else "not_available"
+            ),
+            "remote_ref_sha": (
+                actions_evidence.remote_ref_sha
+                if actions_evidence is not None
+                else None
+            ),
+            "repository": work_item.repository,
+            "runs": ci_runs,
+            "task_branch": work_item.task_branch,
         },
         "generation": {
             "from_generation_number": from_generation.generation_number,
@@ -321,7 +417,7 @@ def build_session_handoff_snapshot(
             "publication_evidence_complete": publication_evidence_complete,
             "published_checkpoint_heads": published_checkpoint_heads,
             "task_branch": work_item.task_branch,
-            "verified_changed_paths": sorted(path_set),
+            "verified_changed_paths": list(verified_changed_paths),
         },
         "issue": {
             "approved_context_sha256": approved_context_sha256,
@@ -330,10 +426,10 @@ def build_session_handoff_snapshot(
             "revision_sha256": sha256(issue_revision.encode("utf-8")).hexdigest(),
             "task_spec_sha256": task_spec_sha256,
         },
-        "provenance": "dispatcher_git_state",
+        "provenance": "dispatcher_git_ci_state",
         "remaining_work": remaining_work,
         "required_checks": required_check_facts,
-        "schema_version": 1,
+        "schema_version": 2,
         "work_item": {
             "issue_number": work_item.issue_number,
             "repository": work_item.repository,
@@ -387,6 +483,25 @@ def validate_handoff_id(value: str) -> str:
     return value
 
 
+def _actions_run_mapping(run: ActionsRunEvidence) -> dict[str, object]:
+    return {
+        "conclusion": run.conclusion,
+        "created_at": run.created_at,
+        "event": run.event,
+        "head_branch": run.head_branch,
+        "head_repository": run.head_repository,
+        "head_sha": run.head_sha,
+        "html_url": run.html_url,
+        "name": run.name,
+        "repository": run.repository,
+        "run_attempt": run.run_attempt,
+        "run_id": run.run_id,
+        "status": run.status,
+        "updated_at": run.updated_at,
+        "workflow_id": run.workflow_id,
+    }
+
+
 def _handoff_digest(trusted: dict[str, Any], advisory: dict[str, Any]) -> str:
     return sha256(
         _canonical_json(
@@ -403,7 +518,11 @@ def _canonical_json(value: object) -> str:
 
 
 def _load_canonical_object(value: object, field: str) -> dict[str, Any]:
-    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > MAX_HANDOFF_JSON_BYTES:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8")) > MAX_HANDOFF_JSON_BYTES
+    ):
         raise ValueError(f"{field} exceeds its safe boundary")
     try:
         parsed = json.loads(value, object_pairs_hook=_unique_object)
@@ -424,6 +543,17 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _validate_trusted_facts(value: dict[str, Any]) -> None:
+    schema_version = value.get("schema_version")
+    if schema_version == 1:
+        _validate_trusted_facts_v1(value)
+        return
+    if schema_version == 2:
+        _validate_trusted_facts_v2(value)
+        return
+    raise ValueError("trusted handoff facts have an unsupported schema")
+
+
+def _validate_trusted_facts_v1(value: dict[str, Any]) -> None:
     expected = {
         "acceptance",
         "generation",
@@ -533,11 +663,15 @@ def _validate_trusted_facts(value: dict[str, Any]) -> None:
         raise ValueError("Dispatcher must not invent acceptance evidence")
     validate_sha256(acceptance["criteria_sha256"], "acceptance criteria digest")
     checks = value["required_checks"]
-    if not isinstance(checks, list) or not checks:
+    if not isinstance(checks, list) or not checks or len(checks) > 100:
         raise ValueError("required_checks must be non-empty")
     for check in checks:
         item = _exact_object(check, {"name", "status"}, "required check")
-        if not isinstance(item["name"], str) or not item["name"] or item["status"] != "not_observed":
+        if (
+            not isinstance(item["name"], str)
+            or not item["name"]
+            or item["status"] != "not_observed"
+        ):
             raise ValueError("required check evidence is invalid")
     remaining = value["remaining_work"]
     if not isinstance(remaining, list) or not remaining:
@@ -545,6 +679,313 @@ def _validate_trusted_facts(value: dict[str, Any]) -> None:
     for item in remaining:
         parsed = _exact_object(item, {"kind", "status", "summary"}, "remaining work")
         if parsed["status"] != "remaining" or not isinstance(parsed["summary"], str):
+            raise ValueError("remaining_work contains invalid state")
+
+
+def _validate_trusted_facts_v2(value: dict[str, Any]) -> None:
+    expected = {
+        "acceptance",
+        "ci_evidence",
+        "generation",
+        "git",
+        "issue",
+        "provenance",
+        "remaining_work",
+        "required_checks",
+        "schema_version",
+        "work_item",
+    }
+    if set(value) != expected or value["schema_version"] != 2:
+        raise ValueError("trusted handoff facts have an unsupported schema")
+    if value["provenance"] != "dispatcher_git_ci_state":
+        raise ValueError("trusted handoff facts have invalid provenance")
+    work_item = _exact_object(
+        value["work_item"], {"issue_number", "repository", "work_item_id"}, "work_item"
+    )
+    validate_work_item_id(work_item["work_item_id"])
+    validate_repository(work_item["repository"])
+    if type(work_item["issue_number"]) is not int or work_item["issue_number"] <= 0:
+        raise ValueError("handoff issue_number must be positive")
+    generation = _exact_object(
+        value["generation"],
+        {
+            "from_generation_number",
+            "from_session_generation_id",
+            "rotation_reason",
+            "to_agent_policy_sha256",
+            "to_generation_number",
+            "to_session_generation_id",
+        },
+        "generation",
+    )
+    validate_session_generation_id(generation["from_session_generation_id"])
+    validate_session_generation_id(generation["to_session_generation_id"])
+    if generation["from_session_generation_id"] == generation["to_session_generation_id"]:
+        raise ValueError("handoff source and target generation must differ")
+    validate_sha256(generation["to_agent_policy_sha256"], "to_agent_policy_sha256")
+    if (
+        type(generation["from_generation_number"]) is not int
+        or type(generation["to_generation_number"]) is not int
+        or generation["to_generation_number"] != generation["from_generation_number"] + 1
+    ):
+        raise ValueError("handoff generation numbers are not consecutive")
+    issue = _exact_object(
+        value["issue"],
+        {
+            "approved_context_sha256",
+            "content_sha256",
+            "revision",
+            "revision_sha256",
+            "task_spec_sha256",
+        },
+        "issue",
+    )
+    for field in (
+        "approved_context_sha256",
+        "content_sha256",
+        "revision_sha256",
+        "task_spec_sha256",
+    ):
+        validate_sha256(issue[field], field)
+    if not isinstance(issue["revision"], str) or not issue["revision"]:
+        raise ValueError("handoff Issue revision must be non-empty text")
+    if sha256(issue["revision"].encode("utf-8")).hexdigest() != issue["revision_sha256"]:
+        raise ValueError("handoff Issue revision digest is invalid")
+    git = _exact_object(
+        value["git"],
+        {
+            "base_sha",
+            "current_head_sha",
+            "publication_evidence_complete",
+            "published_checkpoint_heads",
+            "task_branch",
+            "verified_changed_paths",
+        },
+        "git",
+    )
+    validate_git_sha(git["base_sha"], "base_sha")
+    validate_git_sha(git["current_head_sha"], "current_head_sha")
+    validate_branch(git["task_branch"])
+    if type(git["publication_evidence_complete"]) is not bool:
+        raise ValueError("publication_evidence_complete must be boolean")
+    checkpoint_heads = _string_list(
+        git["published_checkpoint_heads"], "published_checkpoint_heads"
+    )
+    for sha_value in checkpoint_heads:
+        validate_git_sha(sha_value, "published_checkpoint_head")
+    if checkpoint_heads and checkpoint_heads[-1] != git["current_head_sha"]:
+        raise ValueError("published_checkpoint_heads do not reach current_head_sha")
+    if (
+        git["publication_evidence_complete"]
+        and not checkpoint_heads
+        and git["current_head_sha"] != git["base_sha"]
+    ):
+        raise ValueError("complete publication evidence cannot omit a checkpoint HEAD")
+    paths = _string_list(git["verified_changed_paths"], "verified_changed_paths")
+    if paths != sorted(paths) or tuple(normalize_repo_path(path) for path in paths) != tuple(paths):
+        raise ValueError("verified_changed_paths must be canonical")
+
+    ci = _exact_object(
+        value["ci_evidence"],
+        {
+            "head_sha",
+            "observed_at",
+            "provider",
+            "remote_ref_sha",
+            "repository",
+            "runs",
+            "task_branch",
+        },
+        "ci_evidence",
+    )
+    if (
+        ci["repository"] != work_item["repository"]
+        or ci["task_branch"] != git["task_branch"]
+        or ci["head_sha"] != git["current_head_sha"]
+    ):
+        raise ValueError("CI evidence identity conflicts with trusted Git facts")
+    runs_value = ci["runs"]
+    if not isinstance(runs_value, list) or len(runs_value) > 1_000:
+        raise ValueError("CI evidence runs must be a bounded array")
+    runs: list[ActionsRunEvidence] = []
+    for run_value in runs_value:
+        run_object = _exact_object(
+            run_value,
+            {
+                "conclusion",
+                "created_at",
+                "event",
+                "head_branch",
+                "head_repository",
+                "head_sha",
+                "html_url",
+                "name",
+                "repository",
+                "run_attempt",
+                "run_id",
+                "status",
+                "updated_at",
+                "workflow_id",
+            },
+            "Actions run",
+        )
+        runs.append(
+            ActionsRunEvidence(
+                name=run_object["name"],
+                workflow_id=run_object["workflow_id"],
+                run_id=run_object["run_id"],
+                run_attempt=run_object["run_attempt"],
+                repository=run_object["repository"],
+                head_repository=run_object["head_repository"],
+                head_branch=run_object["head_branch"],
+                head_sha=run_object["head_sha"],
+                event=run_object["event"],
+                status=run_object["status"],
+                conclusion=run_object["conclusion"],
+                created_at=run_object["created_at"],
+                updated_at=run_object["updated_at"],
+                html_url=run_object["html_url"],
+            )
+        )
+    if len({run.run_id for run in runs}) != len(runs):
+        raise ValueError("CI evidence runs contain duplicate run ids")
+    if ci["provider"] == "not_available":
+        if ci["observed_at"] is not None or ci["remote_ref_sha"] is not None or runs:
+            raise ValueError("unavailable CI evidence must not contain provider observations")
+    elif ci["provider"] == "github_actions":
+        validate_git_sha(ci["remote_ref_sha"], "remote_ref_sha")
+        if ci["remote_ref_sha"] != ci["head_sha"]:
+            raise ValueError("CI remote ref does not equal the observed HEAD")
+        observed_at = _aware_timestamp(ci["observed_at"], "CI observed_at")
+        for run in runs:
+            if (
+                run.repository != ci["repository"]
+                or run.head_repository != ci["repository"]
+                or run.head_branch != ci["task_branch"]
+                or run.head_sha != ci["head_sha"]
+            ):
+                raise ValueError("CI run identity conflicts with its evidence snapshot")
+            if _aware_timestamp(
+                run.updated_at, "Actions run updated_at"
+            ) > observed_at:
+                raise ValueError("CI run update occurs after its evidence observation")
+    else:
+        raise ValueError("CI evidence provider is unsupported")
+
+    checks = value["required_checks"]
+    if not isinstance(checks, list) or not checks or len(checks) > 100:
+        raise ValueError("required_checks must be non-empty")
+    run_by_name = {run.name: run for run in runs}
+    if len(run_by_name) != len(runs):
+        raise ValueError("CI evidence contains duplicate workflow names")
+    check_names: list[str] = []
+    for check in checks:
+        item = _exact_object(check, {"name", "status"}, "required check")
+        if not isinstance(item["name"], str) or not item["name"]:
+            raise ValueError("required check name is invalid")
+        check_names.append(item["name"])
+        try:
+            status = RequiredCheckStatus(item["status"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("required check status is invalid") from exc
+        run = run_by_name.get(item["name"])
+        if status is RequiredCheckStatus.NOT_OBSERVED:
+            if run is not None:
+                raise ValueError("not_observed required check contains Actions evidence")
+        elif run is None or run.check_status is not status:
+            raise ValueError("required check status conflicts with Actions evidence")
+    if len(set(check_names)) != len(check_names):
+        raise ValueError("required_checks must not contain duplicates")
+    if set(run_by_name) != {
+        item["name"] for item in checks if item["status"] != "not_observed"
+    }:
+        raise ValueError("CI runs do not exactly cover observed required checks")
+    if ci["provider"] == "not_available" and any(
+        item["status"] != "not_observed" for item in checks
+    ):
+        raise ValueError("unavailable CI provider cannot assert check observations")
+
+    acceptance = _exact_object(
+        value["acceptance"], {"criteria", "criteria_sha256", "status"}, "acceptance"
+    )
+    validate_sha256(acceptance["criteria_sha256"], "acceptance criteria digest")
+    criteria_value = acceptance["criteria"]
+    if not isinstance(criteria_value, list) or not criteria_value or len(criteria_value) > 100:
+        raise ValueError("acceptance criteria evaluations must be a bounded non-empty array")
+    criterion_ids: list[str] = []
+    statuses: list[AcceptanceStatus] = []
+    valid_action_refs = {run.evidence_ref for run in runs}
+    fixed_refs = {
+        "dispatcher-publication-ledger",
+        "dispatcher-work-item:last-published-sha",
+    }
+    for criterion in criteria_value:
+        item = _exact_object(
+            criterion,
+            {
+                "argument",
+                "criterion_id",
+                "description",
+                "evidence_refs",
+                "predicate",
+                "reason",
+                "status",
+            },
+            "acceptance criterion",
+        )
+        if (
+            not isinstance(item["criterion_id"], str)
+            or not item["criterion_id"]
+            or not isinstance(item["description"], str)
+            or not item["description"]
+            or item["predicate"]
+            not in {
+                "manual",
+                "required-check",
+                "changed-paths-within-allowed",
+                "task-head-published",
+            }
+            or (item["argument"] is not None and not isinstance(item["argument"], str))
+            or not isinstance(item["reason"], str)
+            or not item["reason"]
+        ):
+            raise ValueError("acceptance criterion evaluation is invalid")
+        refs = _string_list(item["evidence_refs"], "acceptance evidence_refs")
+        if any(ref not in valid_action_refs | fixed_refs for ref in refs):
+            raise ValueError("acceptance criterion cites unknown trusted evidence")
+        criterion_ids.append(item["criterion_id"])
+        try:
+            statuses.append(AcceptanceStatus(item["status"]))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("acceptance criterion status is invalid") from exc
+    if len(set(criterion_ids)) != len(criterion_ids):
+        raise ValueError("acceptance criterion ids must be unique")
+    aggregate = AcceptanceStatus.PASSED
+    for candidate in (
+        AcceptanceStatus.FAILED,
+        AcceptanceStatus.UNVERIFIED,
+        AcceptanceStatus.PENDING,
+    ):
+        if candidate in statuses:
+            aggregate = candidate
+            break
+    if acceptance["status"] != aggregate.value:
+        raise ValueError("acceptance aggregate status conflicts with criterion evaluations")
+
+    remaining = value["remaining_work"]
+    if not isinstance(remaining, list) or len(remaining) > 1_000:
+        raise ValueError("remaining_work must be a bounded array")
+    for remaining_item in remaining:
+        parsed = _exact_object(
+            remaining_item, {"kind", "status", "summary"}, "remaining work"
+        )
+        if (
+            parsed["status"] != "remaining"
+            or not isinstance(parsed["kind"], str)
+            or not parsed["kind"]
+            or not isinstance(parsed["summary"], str)
+            or not parsed["summary"]
+        ):
             raise ValueError("remaining_work contains invalid state")
 
 
@@ -585,7 +1026,11 @@ def _exact_object(value: object, fields: set[str], description: str) -> dict[str
 
 
 def _string_list(value: object, description: str) -> list[str]:
-    if not isinstance(value, list) or len(value) > 1_000 or any(not isinstance(item, str) for item in value):
+    if (
+        not isinstance(value, list)
+        or len(value) > 1_000
+        or any(not isinstance(item, str) for item in value)
+    ):
         raise ValueError(f"handoff {description} must be a bounded string array")
     if len(set(value)) != len(value):
         raise ValueError(f"handoff {description} must not contain duplicates")
@@ -599,3 +1044,20 @@ def _contains_control(value: str, *, allow_newlines: bool = False) -> bool:
         or ord(character) == 127
         for character in value
     )
+
+
+def _aware_timestamp(value: object, field: str) -> datetime:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 64
+        or _contains_control(value)
+    ):
+        raise ValueError(f"{field} must be non-empty bounded text")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field} must be ISO-8601") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{field} must include a timezone")
+    return parsed

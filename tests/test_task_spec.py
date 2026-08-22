@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from codex_dispatcher.task_spec import TaskSpecError, is_path_allowed, parse_task_spec
+from codex_dispatcher.task_spec import (
+    TaskSpecError,
+    is_path_allowed,
+    parse_acceptance_criteria,
+    parse_task_spec,
+)
 
 
 BODY = """## 目标
@@ -69,6 +74,40 @@ class TaskSpecTests(unittest.TestCase):
                 "src/codex_dispatcher_evil/a.py", ("src/codex_dispatcher",)
             )
         )
+
+    def test_acceptance_parser_preserves_prose_and_recognizes_strict_predicates(self) -> None:
+        criteria = parse_acceptance_criteria(
+            """- [AC-1] required-check: tests
+- [AC-2] changed-paths-within-allowed
+- [AC-3] task-head-published
+- [ ] 人工检查错误信息
+"""
+        )
+
+        self.assertEqual(
+            [
+                "required-check",
+                "changed-paths-within-allowed",
+                "task-head-published",
+                "manual",
+            ],
+            [item.predicate for item in criteria],
+        )
+        self.assertEqual("tests", criteria[0].argument)
+        self.assertEqual("人工检查错误信息", criteria[3].description)
+        self.assertTrue(criteria[3].criterion_id.startswith("AC-TEXT-004-"))
+
+    def test_acceptance_parser_rejects_typos_unknown_predicates_and_duplicate_ids(self) -> None:
+        invalid = (
+            "- [AC-0] required-check: tests",
+            "- [AC-1] required-check",
+            "- [AC-1] invented-predicate",
+            "- [AC-1] task-head-published: extra",
+            "- [AC-1] task-head-published\n- [AC-1] changed-paths-within-allowed",
+        )
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(TaskSpecError):
+                parse_acceptance_criteria(value)
         self.assertFalse(
             is_path_allowed(
                 "src/codex_dispatcher/private/a.py",

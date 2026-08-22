@@ -7,6 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Iterable
 
+from codex_dispatcher.ci_evidence import ActionsEvidenceSnapshot
 from codex_dispatcher.config import RepositoryConfig
 from codex_dispatcher.handoffs import (
     PublishedCheckpoint,
@@ -353,8 +354,9 @@ def build_ssh_session_handoff_snapshot(
     source_agent_result: AgentResult | None,
     comments: Iterable[object],
     created_at: str,
+    actions_evidence: ActionsEvidenceSnapshot | None = None,
 ) -> SessionHandoffSnapshot:
-    """Freeze trusted Dispatcher/Git facts and a separately untrusted advisory."""
+    """Freeze trusted Dispatcher/Git/CI facts and a separate untrusted advisory."""
     task_spec, issue_revision = _validate_claimed_task(task, repository)
     _validate_existing_binding(task, repository, work_item, _runner_root_for(work_item))
     if from_generation.work_item_id != work_item.work_item_id:
@@ -404,6 +406,9 @@ def build_ssh_session_handoff_snapshot(
             ),
             source_agent_result=source_agent_result,
             created_at=created_at,
+            acceptance_items=task_spec.acceptance_items,
+            allowed_paths=task_spec.allowed_paths,
+            actions_evidence=actions_evidence,
         )
     except (TypeError, ValueError) as exc:
         raise SshDispatchPlanningError(str(exc)) from exc

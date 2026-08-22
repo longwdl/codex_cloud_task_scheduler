@@ -197,6 +197,18 @@ exec:ssh-cli
 Issue 模板继续使用：目标、背景、范围、非目标、验收条件、允许修改路径、验证命令、阻塞
 条件和部署限制。
 
+`验收条件` 保持 Markdown 兼容。普通文本或 `- [ ] ...` 条目会逐项保存为人工
+`unverified` 条件；需要机械判定时只能使用以下严格语法，ID 在同一 Issue 内唯一：
+
+```text
+- [AC-1] required-check: fixture
+- [AC-2] changed-paths-within-allowed
+- [AC-3] task-head-published
+```
+
+`required-check` 参数必须同时存在于仓库的 `required_checks` 配置。拼写错误、未知谓词、
+重复 ID 或无参数/多参数都在 claim 前拒绝，不能降级成普通文本。
+
 进入 Codex Prompt 的人工输入只有：
 
 - Issue 标题和正文；
@@ -857,6 +869,8 @@ git diff --check
 | AC-060 | Handoff 可信边界 | verified publication facts 与 `untrusted_advisory` 分离；Agent summary/tests/paths/next step 不得成为 CI 或验收事实 |
 | AC-061 | replacement Bootstrap | 新代首个 Full START 必须绑定同一 durable Handoff，并先校验 AGENTS/HEAD/commits/code/tests/Issue；同代 Delta 不重放 Handoff |
 | AC-062 | Handoff 崩溃恢复 | rotation 后、START 前中断时恢复同一 planned generation/Handoff；START 回执歧义仍只用 STATUS，不生成第二次 START |
+| AC-063 | Actions/CI exact-HEAD 导入 | rotation 前后两次读取 task ref 保持精确 HEAD；只接受唯一同仓库、同分支、同 HEAD、`pull_request` 事件和配置 workflow 名的 run；权限失败、ref 漂移、重复同名或畸形响应均拒绝 rotation |
+| AC-064 | 结构化 AC 判定 | 只判定配置内 required check、完整 publication ledger 的路径集合和 durable published HEAD；普通文本及证据不完整保持 `unverified`，AgentResult 永不升级为验收证据；Handoff v1 保持可读 |
 
 ### 12.3 Live Fixture 顺序
 
