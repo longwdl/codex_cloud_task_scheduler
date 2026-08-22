@@ -142,7 +142,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 ).fetchall()
                 legacy_runs = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
                 self.assertEqual(
-                    [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)],
+            [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)],
                     versions,
                 )
             self.assertEqual(0, legacy_runs)
@@ -211,7 +211,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
                 self.assertEqual(
-                    [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)],
+            [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)],
                     versions,
                 )
 
@@ -617,8 +617,8 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     delegation_receipt=receipt,
                 )
 
-                self.assertEqual(WorkItemState.REVIEW, reviewed.state)
-                self.assertEqual(TurnState.FINISHED, finished.state)
+                self.assertEqual(WorkItemState.RUNNING, reviewed.state)
+                self.assertEqual(TurnState.PUBLISHED, finished.state)
                 self.assertEqual(receipt, store.get_turn_delegation_receipt(turn.turn_id))
                 event = store._connection.execute(
                     "SELECT payload_json FROM work_item_events "

@@ -7,6 +7,7 @@ from codex_dispatcher.codex_jsonl import (
     CodexJsonlError,
     CodexTurnUsage,
     CodexTerminalStatus,
+    is_context_failure,
     parse_codex_jsonl,
 )
 
@@ -127,6 +128,31 @@ class CodexJsonlTests(unittest.TestCase):
         summary = parse_codex_jsonl(output)
         self.assertEqual(CodexTerminalStatus.FAILED, summary.status)
         self.assertEqual(("Bearer [REDACTED]",), summary.errors)
+
+    def test_context_failure_classifier_accepts_only_known_error_markers(self) -> None:
+        for message in (
+            "context_length_exceeded",
+            "Codex ran out of room in the context window",
+            "Remote compact failed while resuming",
+            "Compaction failure",
+        ):
+            with self.subTest(message=message):
+                summary = parse_codex_jsonl(
+                    jsonl(
+                        {"type": "thread.started", "thread_id": SESSION},
+                        {"type": "error", "message": message},
+                        {"type": "turn.failed"},
+                    )
+                )
+                self.assertTrue(is_context_failure(summary))
+        ordinary = parse_codex_jsonl(
+            jsonl(
+                {"type": "thread.started", "thread_id": SESSION},
+                {"type": "error", "message": "network unavailable"},
+                {"type": "turn.failed"},
+            )
+        )
+        self.assertFalse(is_context_failure(ordinary))
 
     def test_rejects_session_conflict_duplicate_and_incomplete_streams(self) -> None:
         other = "223e4567-e89b-12d3-a456-426614174000"

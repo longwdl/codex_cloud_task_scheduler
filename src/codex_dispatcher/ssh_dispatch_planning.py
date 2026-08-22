@@ -272,6 +272,7 @@ def build_ssh_generation_turn_plan(
         "branch": work_item.task_branch,
         "input_head_sha": input_head_sha,
         "inputs": inputs,
+        "session_role": session_generation.role,
     }
     if session_generation.state is SessionGenerationState.PLANNED:
         if any(

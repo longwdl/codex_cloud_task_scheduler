@@ -19,6 +19,10 @@ from codex_dispatcher.delegation_evidence import (
     delegation_receipt_to_json,
     parse_delegation_receipt,
 )
+from codex_dispatcher.completion_gate import (
+    CompletionGateSnapshot,
+    CompletionGateStatus,
+)
 from codex_dispatcher.handoffs import (
     PublishedCheckpoint,
     SessionHandoffSnapshot,
@@ -45,6 +49,7 @@ from codex_dispatcher.work_items import (
     SessionGenerationState,
     TaskBranchSource,
     Turn,
+    TurnContextFailureReceipt,
     TurnPromptInput,
     TurnState,
     TurnUsage,
@@ -1481,6 +1486,144 @@ class StateStore:
                 raise ValueError("WorkItem cannot record a generation failure")
         return work_item, generation, turn
 
+    def record_generation_turn_context_failure(
+        self,
+        turn_id: str,
+        *,
+        session_generation_id: str,
+        generation_number: int,
+        policy_sha256: str,
+        session_id: str,
+        head_sha: str,
+        worktree_clean: bool,
+        error_code: str,
+        updated_at: str | None = None,
+    ) -> tuple[WorkItem, SessionGeneration, Turn, TurnContextFailureReceipt]:
+        """Record a clean exact-anchor context failure without killing the generation."""
+        now = updated_at or utc_now_iso()
+        receipt = TurnContextFailureReceipt(
+            turn_id=turn_id,
+            session_generation_id=session_generation_id,
+            head_sha=head_sha,
+            worktree_clean=worktree_clean,
+            error_code=error_code,
+            created_at=now,
+            updated_at=now,
+        )
+        with self._transaction() as connection:
+            generation, turn = self._require_bound_generation_turn(
+                connection,
+                turn_id=turn_id,
+                session_generation_id=session_generation_id,
+                generation_number=generation_number,
+                policy_sha256=policy_sha256,
+            )
+            work_item = self._require_work_item(connection, turn.work_item_id)
+            existing_row = connection.execute(
+                "SELECT * FROM turn_context_failures WHERE turn_id = ?", (turn_id,)
+            ).fetchone()
+            if existing_row is not None:
+                existing = self._row_to_turn_context_failure(existing_row)
+                if existing != replace(
+                    receipt,
+                    created_at=existing.created_at,
+                    updated_at=existing.updated_at,
+                ):
+                    raise ValueError("Turn already has different context failure evidence")
+                if (
+                    turn.state is TurnState.INTERRUPTED
+                    and turn.error_code == error_code
+                    and work_item.state is WorkItemState.READY
+                    and generation.state is SessionGenerationState.ACTIVE
+                ):
+                    return work_item, generation, turn, existing
+                raise ValueError("persisted context failure state is inconsistent")
+            if (
+                turn.state not in {
+                    TurnState.STARTING,
+                    TurnState.RUNNING,
+                    TurnState.RECONCILING,
+                }
+                or turn.input_head_sha != head_sha
+                or work_item.state is not WorkItemState.RUNNING
+            ):
+                raise ValueError("Turn cannot record a clean context failure")
+            if generation.state is SessionGenerationState.STARTING:
+                generation = generation.bind_session(session_id, at=now).transition_to(
+                    SessionGenerationState.ACTIVE, at=now
+                )
+                cursor = connection.execute(
+                    "UPDATE session_generations SET state = ?, codex_session_id = ?, "
+                    "started_at = ?, updated_at = ? WHERE session_generation_id = ? "
+                    "AND state = 'starting'",
+                    (
+                        generation.state.value,
+                        generation.codex_session_id,
+                        generation.started_at,
+                        now,
+                        generation.session_generation_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("concurrent context failure activation detected")
+            elif generation.state is SessionGenerationState.ACTIVE:
+                generation = generation.bind_session(session_id, at=now)
+            else:
+                raise ValueError("context failure requires a live generation")
+            turn = replace(turn, error_code=error_code).transition_to(
+                TurnState.INTERRUPTED, at=now
+            )
+            work_item = work_item.transition_to(WorkItemState.READY, at=now)
+            connection.execute(
+                "INSERT INTO turn_context_failures "
+                "(turn_id, session_generation_id, head_sha, worktree_clean, "
+                "error_code, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?)",
+                (
+                    receipt.turn_id,
+                    receipt.session_generation_id,
+                    receipt.head_sha,
+                    receipt.error_code,
+                    receipt.created_at,
+                    receipt.updated_at,
+                ),
+            )
+            connection.execute(
+                "UPDATE turns SET state = ?, error_code = ?, finished_at = ?, "
+                "updated_at = ? WHERE turn_id = ?",
+                (
+                    turn.state.value,
+                    turn.error_code,
+                    turn.finished_at,
+                    now,
+                    turn.turn_id,
+                ),
+            )
+            connection.execute(
+                "UPDATE work_items SET state = ?, updated_at = ? WHERE work_item_id = ?",
+                (work_item.state.value, now, work_item.work_item_id),
+            )
+            self._insert_work_item_event(
+                connection,
+                work_item.work_item_id,
+                turn.turn_id,
+                "session_context_failure_clean",
+                {
+                    "head_sha": head_sha,
+                    "session_generation_id": session_generation_id,
+                    "worktree_clean": True,
+                },
+                now,
+            )
+        return work_item, generation, turn, receipt
+
+    def get_turn_context_failure(
+        self, turn_id: str
+    ) -> TurnContextFailureReceipt | None:
+        row = self._connection.execute(
+            "SELECT * FROM turn_context_failures WHERE turn_id = ?", (turn_id,)
+        ).fetchone()
+        return self._row_to_turn_context_failure(row) if row is not None else None
+
     def record_generation_turn_finished(
         self,
         turn_id: str,
@@ -1715,14 +1858,20 @@ class StateStore:
                 next_work_item = work_item
             else:
                 outcome = {
-                    "completed": (TurnState.FINISHED, WorkItemState.REVIEW),
+                    # Protocol-v2 completion candidates remain active until exact-HEAD
+                    # CI and structured acceptance evidence pass on the Control Host.
+                    "completed": (TurnState.PUBLISHED, WorkItemState.RUNNING),
                     "needs_input": (TurnState.NEEDS_INPUT, WorkItemState.WAITING_INPUT),
                     "blocked": (TurnState.BLOCKED, WorkItemState.BLOCKED),
                 }.get(result_status)
                 if outcome is None:
                     raise ValueError("result_status is unsupported")
                 next_turn = candidate.transition_to(outcome[0], at=now)
-                next_work_item = work_item.transition_to(outcome[1], at=now)
+                next_work_item = (
+                    work_item
+                    if outcome[1] is work_item.state
+                    else work_item.transition_to(outcome[1], at=now)
+                )
             if turn.state is not next_turn.state:
                 connection.execute(
                     "UPDATE turns SET state = ?, started_at = ?, finished_at = ?, updated_at = ? "
@@ -1762,6 +1911,167 @@ class StateStore:
         except (json.JSONDecodeError, ValueError) as exc:
             raise ValueError("persisted delegation receipt is invalid") from exc
         return parse_delegation_receipt(payload)
+
+    def get_turn_completion_gate(
+        self, turn_id: str
+    ) -> CompletionGateSnapshot | None:
+        row = self._connection.execute(
+            "SELECT * FROM turn_completion_gates WHERE turn_id = ?", (turn_id,)
+        ).fetchone()
+        return self._row_to_completion_gate(row) if row is not None else None
+
+    def record_turn_completion_gate(
+        self,
+        snapshot: CompletionGateSnapshot,
+        *,
+        updated_at: str | None = None,
+    ) -> tuple[WorkItem, Turn, CompletionGateSnapshot]:
+        """Persist one gate observation and atomically apply a terminal verdict."""
+        if not isinstance(snapshot, CompletionGateSnapshot):
+            raise TypeError("snapshot must be a CompletionGateSnapshot")
+        now = updated_at or snapshot.observed_at
+        with self._transaction() as connection:
+            turn = self._require_turn(connection, snapshot.turn_id)
+            work_item = self._require_work_item(connection, turn.work_item_id)
+            existing_row = connection.execute(
+                "SELECT * FROM turn_completion_gates WHERE turn_id = ?",
+                (snapshot.turn_id,),
+            ).fetchone()
+            existing = (
+                self._row_to_completion_gate(existing_row)
+                if existing_row is not None
+                else None
+            )
+            if existing is not None and (
+                existing.work_item_id != snapshot.work_item_id
+                or existing.head_sha != snapshot.head_sha
+                or existing.task_spec_sha256 != snapshot.task_spec_sha256
+            ):
+                raise ValueError("completion gate target is already bound differently")
+            if existing is not None and existing.status is not CompletionGateStatus.PENDING:
+                if (
+                    existing.status is CompletionGateStatus.PASSED
+                    and turn.state is TurnState.FINISHED
+                    and work_item.state is WorkItemState.REVIEW
+                ) or (
+                    existing.status
+                    in {CompletionGateStatus.FAILED, CompletionGateStatus.UNVERIFIED}
+                    and turn.state is TurnState.BLOCKED
+                    and work_item.state is WorkItemState.BLOCKED
+                ):
+                    return work_item, turn, existing
+                raise ValueError("terminal completion gate state is inconsistent")
+            if (
+                turn.work_item_id != snapshot.work_item_id
+                or turn.output_head_sha != snapshot.head_sha
+                or turn.result_status != "completed"
+                or turn.state is not TurnState.PUBLISHED
+                or work_item.state is not WorkItemState.RUNNING
+            ):
+                raise ValueError("Turn is not awaiting its completion gate")
+
+            persisted = replace(
+                snapshot,
+                created_at=(existing.created_at if existing is not None else now),
+                updated_at=now,
+            )
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO turn_completion_gates "
+                    "(turn_id, work_item_id, status, head_sha, task_spec_sha256, "
+                    "evidence_json, evidence_sha256, observed_at, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        persisted.turn_id,
+                        persisted.work_item_id,
+                        persisted.status.value,
+                        persisted.head_sha,
+                        persisted.task_spec_sha256,
+                        persisted.evidence_json,
+                        persisted.evidence_sha256,
+                        persisted.observed_at,
+                        persisted.created_at,
+                        persisted.updated_at,
+                    ),
+                )
+            else:
+                connection.execute(
+                    "UPDATE turn_completion_gates SET status = ?, evidence_json = ?, "
+                    "evidence_sha256 = ?, observed_at = ?, updated_at = ? "
+                    "WHERE turn_id = ? AND status = 'pending'",
+                    (
+                        persisted.status.value,
+                        persisted.evidence_json,
+                        persisted.evidence_sha256,
+                        persisted.observed_at,
+                        persisted.updated_at,
+                        persisted.turn_id,
+                    ),
+                )
+            self._insert_work_item_event(
+                connection,
+                work_item.work_item_id,
+                turn.turn_id,
+                "completion_gate_observed",
+                {
+                    "evidence_sha256": persisted.evidence_sha256,
+                    "head_sha": persisted.head_sha,
+                    "status": persisted.status.value,
+                },
+                now,
+            )
+            if persisted.status is CompletionGateStatus.PENDING:
+                return work_item, turn, persisted
+
+            if persisted.status is CompletionGateStatus.PASSED:
+                next_turn = turn.transition_to(TurnState.FINISHED, at=now)
+                next_work_item = work_item.transition_to(WorkItemState.REVIEW, at=now)
+                error_code = None
+            else:
+                error_code = (
+                    "completion_gate_failed"
+                    if persisted.status is CompletionGateStatus.FAILED
+                    else "completion_gate_unverified"
+                )
+                next_turn = replace(turn, error_code=error_code).transition_to(
+                    TurnState.BLOCKED, at=now
+                )
+                next_work_item = work_item.transition_to(WorkItemState.BLOCKED, at=now)
+            turn_cursor = connection.execute(
+                "UPDATE turns SET state = ?, error_code = ?, finished_at = ?, "
+                "updated_at = ? WHERE turn_id = ? AND state = 'published'",
+                (
+                    next_turn.state.value,
+                    error_code,
+                    next_turn.finished_at,
+                    now,
+                    turn.turn_id,
+                ),
+            )
+            work_cursor = connection.execute(
+                "UPDATE work_items SET state = ?, updated_at = ? "
+                "WHERE work_item_id = ? AND state = 'running'",
+                (
+                    next_work_item.state.value,
+                    now,
+                    work_item.work_item_id,
+                ),
+            )
+            if turn_cursor.rowcount != 1 or work_cursor.rowcount != 1:
+                raise RuntimeError("concurrent completion gate finalization detected")
+            self._insert_work_item_event(
+                connection,
+                work_item.work_item_id,
+                turn.turn_id,
+                "completion_gate_finalized",
+                {
+                    "status": persisted.status.value,
+                    "turn_state": next_turn.state.value,
+                    "work_item_state": next_work_item.state.value,
+                },
+                now,
+            )
+        return next_work_item, next_turn, persisted
 
     def record_generation_publication(
         self,
@@ -3203,10 +3513,24 @@ class StateStore:
         return TurnUsage(**dict(row))
 
     @staticmethod
+    def _row_to_turn_context_failure(
+        row: sqlite3.Row,
+    ) -> TurnContextFailureReceipt:
+        values = dict(row)
+        values["worktree_clean"] = bool(values["worktree_clean"])
+        return TurnContextFailureReceipt(**values)
+
+    @staticmethod
     def _row_to_turn_prompt_input(row: sqlite3.Row) -> TurnPromptInput:
         values = dict(row)
         values["prompt_kind"] = PromptKind(values["prompt_kind"])
         return TurnPromptInput(**values)
+
+    @staticmethod
+    def _row_to_completion_gate(row: sqlite3.Row) -> CompletionGateSnapshot:
+        values = dict(row)
+        values["status"] = CompletionGateStatus(values["status"])
+        return CompletionGateSnapshot(**values)
 
     @staticmethod
     def _row_to_session_handoff(row: sqlite3.Row) -> SessionHandoffSnapshot:

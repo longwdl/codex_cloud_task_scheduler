@@ -9,6 +9,7 @@ from typing import Any, Iterable, Mapping
 
 from codex_dispatcher.handoffs import SessionHandoffSnapshot
 from codex_dispatcher.task_spec import TaskSpec
+from codex_dispatcher.work_items import SessionGenerationRole
 
 
 MAX_GENERATION_PROMPT_BYTES = 1024 * 1024
@@ -167,6 +168,7 @@ def build_generation_full_prompt_snapshot(
     branch: str,
     input_head_sha: str,
     inputs: CanonicalInputSnapshot,
+    session_role: SessionGenerationRole = SessionGenerationRole.IMPLEMENTATION,
     handoff: SessionHandoffSnapshot | None = None,
     pre_session_retry_without_handoff: bool = False,
 ) -> PromptSnapshot:
@@ -184,6 +186,8 @@ def build_generation_full_prompt_snapshot(
     )
     if not isinstance(inputs, CanonicalInputSnapshot):
         raise TypeError("inputs must be a CanonicalInputSnapshot")
+    if not isinstance(session_role, SessionGenerationRole):
+        raise TypeError("session_role must be a SessionGenerationRole")
     if type(pre_session_retry_without_handoff) is not bool:
         raise TypeError("pre_session_retry_without_handoff must be a bool")
     if session_generation == 1:
@@ -214,6 +218,7 @@ def build_generation_full_prompt_snapshot(
         f"Work Item ID: {work_item_id}",
         f"Session Generation ID: {session_generation_id}",
         f"Session Generation: {session_generation}",
+        f"Session Role: {session_role.value}",
         f"Agent policy digest: {agent_policy_digest}",
         f"Turn: {turn_number}",
         f"Issue revision: {issue_revision}",
@@ -226,6 +231,8 @@ def build_generation_full_prompt_snapshot(
         "",
         *_canonical_digest_lines(inputs),
     ]
+    if session_role is SessionGenerationRole.AUDIT:
+        sections.extend(["", *_fresh_final_audit_contract()])
     if pre_session_retry_without_handoff:
         sections.extend(
             [
@@ -289,6 +296,19 @@ def _fresh_session_bootstrap_contract() -> tuple[str, ...]:
     )
 
 
+def _fresh_final_audit_contract() -> tuple[str, ...]:
+    return (
+        "## Fresh final audit",
+        "Independently audit the completion candidate from the reviewed Issue,",
+        "current Git HEAD, trusted handoff facts, repository rules, and tests.",
+        "Do not inherit the implementation session's confidence or conclusions.",
+        "Inspect the actual diff and run the smallest sufficient verification.",
+        "You may make bounded in-scope fixes and commit them when evidence requires it.",
+        "Return completed only when every structured acceptance criterion is satisfied;",
+        "otherwise return needs_input or blocked with the exact remaining gap.",
+    )
+
+
 def build_generation_delta_prompt_snapshot(
     *,
     work_item_id: str,
@@ -301,6 +321,7 @@ def build_generation_delta_prompt_snapshot(
     branch: str,
     input_head_sha: str,
     inputs: CanonicalInputSnapshot,
+    session_role: SessionGenerationRole = SessionGenerationRole.IMPLEMENTATION,
     prior_status: str,
     prior_summary: str,
     new_approved_items: tuple[ApprovedContextItem, ...] = (),
@@ -319,6 +340,8 @@ def build_generation_delta_prompt_snapshot(
     )
     if not isinstance(inputs, CanonicalInputSnapshot):
         raise TypeError("inputs must be a CanonicalInputSnapshot")
+    if not isinstance(session_role, SessionGenerationRole):
+        raise TypeError("session_role must be a SessionGenerationRole")
     if prior_status not in {"completed", "needs_input", "blocked"}:
         raise ValueError("prior_status is unsupported")
     _bounded_text(prior_summary, "prior_summary", maximum=8_000)
@@ -346,6 +369,7 @@ def build_generation_delta_prompt_snapshot(
         f"Work Item ID: {work_item_id}",
         f"Session Generation ID: {session_generation_id}",
         f"Session Generation: {session_generation}",
+        f"Session Role: {session_role.value}",
         f"Agent policy digest: {agent_policy_digest}",
         f"Turn: {turn_number}",
         f"Issue revision: {issue_revision}",
@@ -363,6 +387,8 @@ def build_generation_delta_prompt_snapshot(
         "Summary:",
         prior_summary,
     ]
+    if session_role is SessionGenerationRole.AUDIT:
+        sections.extend(["", *_fresh_final_audit_contract()])
     if canonical_new:
         sections.extend(["", "## New maintainer context"])
         for item in canonical_new:

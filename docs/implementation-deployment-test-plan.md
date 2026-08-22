@@ -535,9 +535,13 @@ fixture 证明前保持禁用，也不通过增加 message-history 权限来找�
     Prompt。
 12. 解析、脱敏并保存结构化结果。
 13. 若有安全且一致的 checkpoint，拉取 bundle 并调用 Publisher。
-14. 创建/更新唯一 Draft PR、Issue 和 Slack Turn report。
-15. 根据结构化结果进入 `needs_input`、`review` 或 `blocked`。
-16. 后续人工 merge 后，只在 PR identity 与 persisted exact head 完全一致时先落本地
+14. 对 protocol v2 的 `completed` 候选导入 exact-HEAD Actions、结构化 AC 和 publication
+    ledger；pending 时保持运行并只轮询证据，失败/不明确时 blocked。
+15. Implementation gate 通过且启用 final audit 时，创建 fresh Audit generation/Handoff；Audit
+    可作范围内修复，但完成后必须再次通过同一 gate。
+16. 创建/更新唯一 Draft PR、Issue 和 Slack Turn report，并根据可信终态进入
+    `needs_input`、`review` 或 `blocked`。
+17. 后续人工 merge 后，只在 PR identity 与 persisted exact head 完全一致时先落本地
     `completed` tombstone，再更新固定 Issue comment 和 `agent:completed`；不自动 merge/close/delete。
 
 同一个 Issue 即使多次从 `needs_input/review` 回到 `ready`，步骤 6 也只能解析到原 WorkItem。
@@ -886,6 +890,9 @@ git diff --check
 | AC-064 | 结构化 AC 判定 | 只判定配置内 required check、完整 publication ledger 的路径集合和 durable published HEAD；普通文本及证据不完整保持 `unverified`，AgentResult 永不升级为验收证据；Handoff v1 保持可读 |
 | AC-065 | PREPARE/START 明确拒绝后人工重试 | 没有 `preparing→ready` ACK provenance 的 blocked/paused WorkItem 在 claim 前读取持久 base 的 exact bundle，原子回到 preparing，幂等 PREPARE 成功后才允许 START；exact source 失败不 claim，已有 ACK 的 Turn-blocked WorkItem 不重复 PREPARE；START 在 session 创建前明确拒绝时，只在 planner 与 StateStore 双重证明无 session/output/checkpoint/handoff 且所有前代均为 exact rejection 后，才允许新 generation 无 Handoff 重试 |
 | AC-066 | Sol 自主 agent 路由可信证据 | 调用方只提交任务，Runner 固定 primary Sol 并由其选择 direct-child profile；每个新完成 v2 Turn 以隔离 `state_5.sqlite` 的 edge/token 增量生成 metadata-only receipt，逐项匹配固定 Codex 版本、role/model/reasoning policy 并与 Turn 原子落库；未知 role、策略漂移、删边/计数回退、间接委派或 schema 异常均 fail closed，旧无 receipt 回执仍可恢复读取 |
+| AC-067 | exact-HEAD 完成门 | v2 `completed` 只成为 `published` 候选；配置内全部 Actions checks、结构化 AC 和完整 publication ledger 绑定同一远端 HEAD 后才原子进入 finished/review；pending 不重跑 Codex/Publisher，失败或身份/权限歧义 blocked |
+| AC-068 | fresh Final Audit | Implementation gate 通过后使用新 `audit` generation、独立 session、`completion_candidate` Handoff 和明确 Audit prompt；Audit 可提交范围内修复但必须再次通过完成门，崩溃恢复不重复 rotation，generation 预算不足时 blocked |
+| AC-069 | context failure 安全换代 | 只识别有限的 context/compaction 错误；Runner 必须证明 worktree clean 且 HEAD 等于 Turn input，才原子记录 receipt、interrupt Turn 并通过 `context_failure` Handoff 新建 generation，旧 session 不 resume；dirty、moved HEAD 或状态不明均 blocked |
 
 ### 12.3 Live Fixture 顺序
 

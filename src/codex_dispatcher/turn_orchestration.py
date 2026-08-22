@@ -503,7 +503,7 @@ class OfflineTurnOrchestrator:
             return None
         if turn.state is TurnState.CHECKPOINTING:
             turn = self._store.update_turn_state(turn.turn_id, TurnState.PUBLISHED)
-        return self._finalize_recorded_result(turn.turn_id)
+        return self._finalize_or_hold_recorded_result(turn.turn_id)
 
     def reject_publication(self, turn_id: str) -> TurnProgress:
         """Terminalize one mechanically rejected checkpoint with a bounded error code."""
@@ -591,7 +591,7 @@ class OfflineTurnOrchestrator:
                 if self._publication_recorded_hook is not None:
                     self._publication_recorded_hook(work_item, turn)
             turn = self._store.update_turn_state(turn.turn_id, TurnState.PUBLISHED)
-        return self._finalize_recorded_result(turn.turn_id)
+        return self._finalize_or_hold_recorded_result(turn.turn_id)
 
     def _apply_turn_reply(
         self,
@@ -685,6 +685,30 @@ class OfflineTurnOrchestrator:
             return TurnProgress(self._require_work_item(work_item.work_item_id), turn)
         if reply.state is RunnerTurnRemoteState.FAILED:
             assert reply.error_code is not None
+            if reply.error_code == "session_context_failure_clean":
+                if (
+                    reply.session_id is None
+                    or reply.failure_head_sha != turn.input_head_sha
+                    or reply.worktree_clean is not True
+                ):
+                    work_item, _, turn = self._store.record_generation_turn_failed(
+                        turn_id,
+                        **identity,
+                        error_code="session_context_failure_evidence_invalid",
+                        session_id=reply.session_id,
+                    )
+                    return TurnProgress(work_item, turn)
+                work_item, _, turn, _ = (
+                    self._store.record_generation_turn_context_failure(
+                        turn_id,
+                        **identity,
+                        session_id=reply.session_id,
+                        head_sha=reply.failure_head_sha,
+                        worktree_clean=reply.worktree_clean,
+                        error_code=reply.error_code,
+                    )
+                )
+                return TurnProgress(work_item, turn)
             work_item, _, turn = self._store.record_generation_turn_failed(
                 turn_id,
                 **identity,
@@ -749,6 +773,36 @@ class OfflineTurnOrchestrator:
             work_item_state=work_item_state,
         )
         return TurnProgress(work_item, turn)
+
+    def _finalize_or_hold_recorded_result(self, turn_id: str) -> TurnProgress:
+        """Hold v2 completion candidates at PUBLISHED for Control Host evidence."""
+        turn = self._require_turn(turn_id)
+        generation = self._store.get_turn_session_generation(turn_id)
+        if (
+            turn.result_status == AgentResultStatus.COMPLETED.value
+            and generation is not None
+            and generation.policy_sha256 is not None
+        ):
+            if turn.state is not TurnState.PUBLISHED:
+                raise TurnOrchestrationError(
+                    "v2 completion candidate is not at its publication boundary"
+                )
+            return TurnProgress(self._require_work_item(turn.work_item_id), turn)
+        return self._finalize_recorded_result(turn_id)
+
+    def reject_completion_candidate(
+        self, turn_id: str, *, error_code: str
+    ) -> TurnProgress:
+        """Fail closed when completion evidence cannot be attributed safely."""
+        turn = self._require_turn(turn_id)
+        if (
+            turn.state is not TurnState.PUBLISHED
+            or turn.result_status != AgentResultStatus.COMPLETED.value
+        ):
+            raise TurnOrchestrationError(
+                "Turn is not awaiting completion evidence"
+            )
+        return self._finalize_blocked(turn_id, error_code=error_code)
 
     def _mark_reconciling(self, turn_id: str) -> TurnProgress:
         turn = self._require_turn(turn_id)

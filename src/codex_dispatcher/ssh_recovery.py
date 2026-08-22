@@ -16,6 +16,7 @@ from codex_dispatcher.trackers.base import (
     TrackerTask,
 )
 from codex_dispatcher.work_items import Turn, TurnState, WorkItem, WorkItemState
+from codex_dispatcher.work_items import SessionGenerationRole
 
 
 class SshRecoveryAction(StrEnum):
@@ -24,6 +25,7 @@ class SshRecoveryAction(StrEnum):
     RESUME_PUBLICATION = "resume_publication"
     RESUME_PREPARATION = "resume_preparation"
     START_CLAIMED_TURN = "start_claimed_turn"
+    START_FRESH_FINAL_AUDIT = "start_fresh_final_audit"
     RECOVER_ORPHAN_CLAIM = "recover_orphan_claim"
     SYNC_TRACKER_STATE = "sync_tracker_state"
     COMPLETE_MERGED_WORK_ITEM = "complete_merged_work_item"
@@ -83,6 +85,10 @@ def plan_ssh_recovery(
             work_item,
             active_turn,
         )
+
+    final_audit = _plan_fresh_final_audit(config, store, tracker, configured)
+    if final_audit is not None:
+        return final_audit
 
     pending_states = {
         WorkItemState.DISCOVERED,
@@ -163,6 +169,54 @@ def plan_ssh_recovery(
     if task.state is TaskState.RUNNING:
         return _blocked("orphan_running_issue")
     return SshRecoveryPlan(SshRecoveryAction.RECOVER_ORPHAN_CLAIM, task=task)
+
+
+def _plan_fresh_final_audit(
+    config: Config,
+    store: StateStore,
+    tracker: Tracker,
+    configured: dict[str, object],
+) -> SshRecoveryPlan | None:
+    runtime = config.session_runtime
+    if runtime is None or not runtime.rotate_before_final_audit:
+        return None
+    for work_item in store.list_work_items(include_completed=False):
+        if work_item.state not in {WorkItemState.REVIEW, WorkItemState.READY}:
+            continue
+        turns = store.list_turns(work_item.work_item_id)
+        if not turns:
+            continue
+        source_turn = turns[-1]
+        gate = store.get_turn_completion_gate(source_turn.turn_id)
+        generation = store.get_turn_session_generation(source_turn.turn_id)
+        if (
+            source_turn.state is not TurnState.FINISHED
+            or source_turn.result_status != "completed"
+            or gate is None
+            or gate.status.value != "passed"
+            or generation is None
+            or generation.role is not SessionGenerationRole.IMPLEMENTATION
+        ):
+            continue
+        task = tracker.get_task(work_item.repository, str(work_item.issue_number))
+        error = _binding_error(task, work_item, configured)
+        if error is not None:
+            return _blocked(error, task=task, work_item=work_item, turn=source_turn)
+        assert task is not None
+        if task.state not in {TaskState.DISPATCHING, TaskState.RUNNING}:
+            return _blocked(
+                "final_audit_tracker_state_conflict",
+                task=task,
+                work_item=work_item,
+                turn=source_turn,
+            )
+        return SshRecoveryPlan(
+            SshRecoveryAction.START_FRESH_FINAL_AUDIT,
+            task=task,
+            work_item=work_item,
+            turn=source_turn,
+        )
+    return None
 
 
 def _plan_merged_completion(

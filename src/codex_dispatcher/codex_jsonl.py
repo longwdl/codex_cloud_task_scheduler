@@ -49,6 +49,25 @@ class CodexExecutionSummary:
     usage: CodexTurnUsage | None = None
 
 
+_CONTEXT_FAILURE_MARKERS = (
+    "context_length_exceeded",
+    "ran out of room in the context window",
+    "remote compact failed",
+    "compaction failure",
+)
+
+
+def is_context_failure(summary: CodexExecutionSummary) -> bool:
+    """Classify only bounded known Codex context/compaction failure markers."""
+    if not isinstance(summary, CodexExecutionSummary):
+        raise TypeError("summary must be a CodexExecutionSummary")
+    return any(
+        marker in message.casefold()
+        for message in summary.errors
+        for marker in _CONTEXT_FAILURE_MARKERS
+    )
+
+
 def parse_codex_jsonl(
     value: str | bytes,
     *,

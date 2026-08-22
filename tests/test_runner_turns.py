@@ -227,6 +227,43 @@ class RunnerTurnExecutorTests(unittest.TestCase):
                             turns.execute(request, supplied_prompt)
             self.assertFalse(records.exists())
 
+    def test_context_failure_reply_proves_clean_anchor_and_rejects_dirty_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _, base_sha, workspace, turns = self.setUpRunner(root)
+            prompt = b"context failure"
+            common = {
+                "version": NEXT_PROTOCOL_VERSION,
+                "session_generation_id": GENERATION_ID,
+                "session_generation": 1,
+                "agent_policy_digest": POLICY_DIGEST,
+            }
+            request = RunnerRequest(
+                RunnerOperation.START,
+                WORK_ITEM,
+                turn_id=TURN_ONE,
+                prompt_sha256=sha256(prompt).hexdigest(),
+                input_head_sha=base_sha,
+                **common,
+            )
+
+            clean = turns._context_failure_reply(request, session_id=SESSION)
+
+            self.assertEqual("session_context_failure_clean", clean.error_code)
+            self.assertEqual(base_sha, clean.failure_head_sha)
+            self.assertTrue(clean.worktree_clean)
+            self.assertEqual(clean, parse_runner_turn_reply(clean.to_json()))
+
+            repository = workspace.paths(WORK_ITEM).repository
+            (repository / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+            dirty = turns._context_failure_reply(request, session_id=SESSION)
+
+            self.assertEqual(
+                "session_context_failure_dirty_worktree", dirty.error_code
+            )
+            self.assertEqual(base_sha, dirty.failure_head_sha)
+            self.assertFalse(dirty.worktree_clean)
+
     def test_invalid_agent_result_is_durable_failure_not_a_replay(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

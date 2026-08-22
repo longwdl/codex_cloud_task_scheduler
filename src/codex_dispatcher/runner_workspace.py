@@ -40,6 +40,14 @@ class RunnerWorkspacePaths:
 
 
 @dataclass(frozen=True, slots=True)
+class RunnerCheckpointState:
+    """Minimal trusted Git facts captured after a failed Codex process exits."""
+
+    head_sha: str
+    worktree_clean: bool
+
+
+@dataclass(frozen=True, slots=True)
 class RunnerWorkspaceMetadata:
     work_item_id: str
     repository: str
@@ -218,6 +226,15 @@ class RunnerWorkspace:
         if require_clean and self._status(paths.repository):
             raise RunnerWorkspaceError("WorkItem repository contains uncommitted changes")
         return head
+
+    def checkpoint_state(self, work_item_id: str) -> RunnerCheckpointState:
+        """Inspect exact HEAD and cleanliness under the Runner operation lock."""
+        head_sha = self.current_head(work_item_id, require_clean=False)
+        repository = self.paths(work_item_id).repository
+        return RunnerCheckpointState(
+            head_sha=head_sha,
+            worktree_clean=not bool(self._status(repository)),
+        )
 
     def export(self, request: RunnerRequest) -> RunnerWireOutput:
         if request.operation is not RunnerOperation.EXPORT:

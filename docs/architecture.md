@@ -193,6 +193,25 @@ Older persisted v2 replies without the additive receipt remain readable for reco
 completed v2 Turn from the updated Runner emits one, including an empty receipt when Sol worked
 directly.
 
+A protocol-v2 `completed` result is only a completion candidate. After checkpoint publication, the
+Turn remains `published` and the WorkItem remains `running`. The Control Host then imports configured
+GitHub Actions runs for the exact remote task-branch HEAD and combines them with the structured Issue
+acceptance predicates and complete publication ledger. Pending checks remain recoverable and are
+polled without replaying Codex or Publisher. A trusted failure or unverifiable/ambiguous identity
+blocks; only a passed durable gate atomically finishes the Turn and advances the WorkItem.
+
+When `rotate_before_final_audit=true`, a passed Implementation gate is not yet review. Recovery
+creates one new generation with role `audit`, a `completion_candidate` Handoff, fresh exact-HEAD CI
+evidence, and an explicit independent-audit prompt contract. The Audit may make bounded in-scope
+fixes, but its completed candidate must pass the same completion gate. Generation-budget exhaustion
+or ambiguous audit preparation blocks instead of degrading to an implementation-only review.
+
+Known context-window or compaction failures form a separate emergency rotation boundary. After the
+Codex process exits, the Runner records the exact Git HEAD and worktree cleanliness. Rotation is
+permitted only when the worktree is clean and HEAD still equals the Turn input anchor; the old
+generation is retired through a durable `context_failure` Handoff and the broken session is never
+resumed. Dirty state, an unpublished moved HEAD, or unverifiable Git state terminates fail closed.
+
 ## Generation handoff and bootstrap
 
 Retiring a generation and planning its replacement is one SQLite transaction. That transaction also

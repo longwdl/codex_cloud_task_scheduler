@@ -307,6 +307,22 @@ class PromptBuilderTests(unittest.TestCase):
                 ),
             )
 
+    def test_fresh_audit_role_adds_independent_completion_contract(self) -> None:
+        inputs = build_canonical_input_snapshot(
+            issue_title="Implement parser",
+            task_spec=parse_task_spec(BODY),
+        )
+        prompt = build_generation_full_prompt_snapshot(
+            **generation_arguments(),
+            session_role=SessionGenerationRole.AUDIT,
+            inputs=inputs,
+            handoff=generation_handoff(inputs),
+        )
+
+        self.assertIn("Session Role: audit", prompt.content)
+        self.assertIn("## Fresh final audit", prompt.content)
+        self.assertIn("Do not inherit the implementation session's confidence", prompt.content)
+
     def test_existing_v1_turn_prompt_remains_byte_for_byte_unchanged(self) -> None:
         snapshot = build_turn_prompt_snapshot(
             work_item_id=WORK_ITEM_ID,

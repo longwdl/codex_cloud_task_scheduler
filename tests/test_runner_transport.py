@@ -244,6 +244,44 @@ class RunnerTransportContractTests(unittest.TestCase):
             parse_runner_turn_reply(json.dumps(legacy_without_delegation)).delegation_receipt
         )
 
+    def test_v2_clean_context_failure_requires_exact_checkpoint_evidence(self) -> None:
+        common = {
+            "version": NEXT_PROTOCOL_VERSION,
+            "session_generation_id": GENERATION_ID,
+            "session_generation": 1,
+            "agent_policy_digest": POLICY_DIGEST,
+        }
+        reply = RunnerTurnReply(
+            operation=RunnerOperation.RESUME,
+            work_item_id=WORK_ITEM,
+            turn_id=TURN,
+            state=RunnerTurnRemoteState.FAILED,
+            session_id=SESSION,
+            error_code="session_context_failure_clean",
+            failure_head_sha="c" * 40,
+            worktree_clean=True,
+            **common,
+        )
+        self.assertEqual(reply, parse_runner_turn_reply(reply.to_json()))
+        for changes in (
+            {"failure_head_sha": None},
+            {"worktree_clean": False},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(
+                RunnerProtocolError
+            ):
+                RunnerTurnReply(
+                    operation=RunnerOperation.RESUME,
+                    work_item_id=WORK_ITEM,
+                    turn_id=TURN,
+                    state=RunnerTurnRemoteState.FAILED,
+                    session_id=SESSION,
+                    error_code="session_context_failure_clean",
+                    failure_head_sha=changes.get("failure_head_sha", "c" * 40),
+                    worktree_clean=changes.get("worktree_clean", True),
+                    **common,
+                )
+
     def test_v1_turn_reply_rejects_v2_field_injection(self) -> None:
         reply = RunnerTurnReply(
             operation=RunnerOperation.STATUS,

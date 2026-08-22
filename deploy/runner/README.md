@@ -79,9 +79,12 @@ Runner configuration first, then enable the Control Host `[session_runtime]`
 table with the exact same `agent_policy_digest`. Never enable the Control Host
 v2 request path against a v1-only Runner.
 
-`rotate_before_final_audit=true` is deliberately rejected until a separate
-fresh audit generation is implemented. Keep it `false`; it is not a soft or
-best-effort switch.
+`rotate_before_final_audit=true` requires every passed Implementation completion
+candidate to rotate into a separate fresh Audit generation. The Audit starts from
+the exact published HEAD and trusted Handoff/CI evidence, may make bounded fixes,
+and must pass the same completion gate before review. Keep enough
+`max_session_generations` budget for this mandatory generation; budget exhaustion
+blocks instead of silently skipping the Audit.
 
 Before activation, take a Control Host SQLite backup and preserve the previous
 Runner config/package. Roll back by stopping new sweeps and restoring both the
@@ -91,10 +94,11 @@ remove `[session_runtime]` after a v2 WorkItem has started: the legacy
 rollback could start an unrelated v1 session. Generation directories are audit
 state and must not be deleted during rollback.
 
-Releases with schema migration 008 add the Handoff, Agent-result, and verified
-publication ledgers. Older binaries intentionally reject that newer schema.
-Rolling back such a release therefore requires the matching pre-migration
-SQLite Online Backup; changing only the `current` release symlink is unsafe.
+Releases through schema migration 011 add Handoff, Agent-result, verified
+publication, delegation, completion-gate, and context-failure ledgers. Older
+binaries intentionally reject a newer schema. Rolling back such a release
+therefore requires the matching pre-migration SQLite Online Backup; changing
+only the `current` release symlink is unsafe.
 
 ## SSH contract
 

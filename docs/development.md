@@ -79,6 +79,13 @@ The environment-independent core now additionally contains:
   reached;
 - digest-pinned Sol-to-agent routing profiles plus a metadata-only protocol-v2 delegation receipt
   derived from per-Turn Codex state-database activity and stored atomically with the Turn result.
+- a durable protocol-v2 completion gate that holds `completed` Turns at `published` until exact-HEAD
+  configured Actions checks, structured acceptance predicates, and verified publication evidence
+  reach a trusted verdict;
+- a configured fresh final-Audit generation with a role-bound prompt contract and crash-recoverable
+  Implementation-to-Audit Handoff;
+- bounded context/compaction failure classification with Runner checkpoint evidence, atomic clean
+  generation retirement, and fail-closed dirty or moved-HEAD handling.
 
 The fixed OpenSSH argv/byte-stream adapter is covered by isolated unit tests, and the installed
 Runner protocol has also completed the disposable SSH/real-Codex fixture recorded in

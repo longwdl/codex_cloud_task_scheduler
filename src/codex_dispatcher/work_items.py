@@ -100,6 +100,7 @@ _WORK_ITEM_TRANSITIONS: Final[dict[WorkItemState, frozenset[WorkItemState]]] = {
     ),
     WorkItemState.RUNNING: frozenset(
         {
+            WorkItemState.READY,
             WorkItemState.WAITING_INPUT,
             WorkItemState.REVIEW,
             WorkItemState.BLOCKED,
@@ -133,6 +134,7 @@ _TURN_TRANSITIONS: Final[dict[TurnState, frozenset[TurnState]]] = {
             TurnState.RUNNING,
             TurnState.RECONCILING,
             TurnState.CHECKPOINTING,
+            TurnState.PUBLISHED,
             TurnState.FINISHED,
             TurnState.NEEDS_INPUT,
             TurnState.FAILED,
@@ -144,6 +146,7 @@ _TURN_TRANSITIONS: Final[dict[TurnState, frozenset[TurnState]]] = {
         {
             TurnState.RECONCILING,
             TurnState.CHECKPOINTING,
+            TurnState.PUBLISHED,
             TurnState.FINISHED,
             TurnState.NEEDS_INPUT,
             TurnState.FAILED,
@@ -155,6 +158,7 @@ _TURN_TRANSITIONS: Final[dict[TurnState, frozenset[TurnState]]] = {
         {
             TurnState.RUNNING,
             TurnState.CHECKPOINTING,
+            TurnState.PUBLISHED,
             TurnState.FINISHED,
             TurnState.NEEDS_INPUT,
             TurnState.FAILED,
@@ -806,6 +810,30 @@ class TurnUsage:
             created_at=now,
             updated_at=now,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class TurnContextFailureReceipt:
+    """Trusted clean exact-anchor evidence for one emergency session rotation."""
+
+    turn_id: str
+    session_generation_id: str
+    head_sha: str
+    worktree_clean: bool
+    error_code: str
+    created_at: str
+    updated_at: str
+
+    def __post_init__(self) -> None:
+        validate_turn_id(self.turn_id)
+        validate_session_generation_id(self.session_generation_id)
+        validate_git_sha(self.head_sha, "head_sha")
+        if self.worktree_clean is not True:
+            raise ValueError("context failure rotation requires a clean worktree")
+        if self.error_code != "session_context_failure_clean":
+            raise ValueError("context failure receipt error code is invalid")
+        _bounded_text(self.created_at, "created_at", maximum=64)
+        _bounded_text(self.updated_at, "updated_at", maximum=64)
 
 
 @dataclass(frozen=True, slots=True)

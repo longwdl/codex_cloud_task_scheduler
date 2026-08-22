@@ -73,6 +73,91 @@ class PublishedCheckpoint:
 
 
 @dataclass(frozen=True, slots=True)
+class PublicationEvidence:
+    """Mechanically reconstructed evidence for the durable task-branch chain."""
+
+    current_head_sha: str
+    published_checkpoint_heads: tuple[str, ...]
+    publication_evidence_complete: bool
+    verified_changed_paths: tuple[str, ...]
+    head_was_published: bool
+
+
+def build_publication_evidence(
+    *,
+    work_item: WorkItem,
+    published_checkpoints: tuple[PublishedCheckpoint, ...],
+) -> PublicationEvidence:
+    """Validate and summarize the additive publication ledger without guessing gaps."""
+    if not isinstance(work_item, WorkItem):
+        raise TypeError("work_item must be a WorkItem")
+    if (
+        not isinstance(published_checkpoints, tuple)
+        or any(
+            not isinstance(item, PublishedCheckpoint)
+            for item in published_checkpoints
+        )
+    ):
+        raise TypeError(
+            "published_checkpoints must contain PublishedCheckpoint values"
+        )
+    current_head_sha = work_item.last_published_sha or work_item.base_sha
+    for previous, current in zip(
+        published_checkpoints, published_checkpoints[1:]
+    ):
+        if current.previous_sha != previous.head_sha:
+            raise ValueError(
+                "publication checkpoint evidence is not one ordered chain"
+            )
+    if (
+        published_checkpoints
+        and published_checkpoints[-1].head_sha != current_head_sha
+    ):
+        raise ValueError("publication checkpoint evidence does not reach current HEAD")
+
+    published_checkpoint_heads = [
+        item.head_sha for item in published_checkpoints
+    ]
+    if (
+        work_item.last_published_sha is not None
+        and current_head_sha not in published_checkpoint_heads
+    ):
+        # Schema-7 publication anchors can predate the additive evidence ledger.
+        published_checkpoint_heads.append(current_head_sha)
+    verified_changed_paths = tuple(
+        sorted(
+            {
+                path
+                for checkpoint in published_checkpoints
+                if checkpoint.has_complete_evidence
+                for path in checkpoint.changed_paths
+            }
+        )
+    )
+    complete = (
+        all(item.has_complete_evidence for item in published_checkpoints)
+        and (
+            work_item.last_published_sha is None
+            or (
+                bool(published_checkpoints)
+                and published_checkpoints[0].previous_sha == work_item.base_sha
+            )
+        )
+        and (
+            not published_checkpoint_heads
+            or published_checkpoint_heads[-1] == current_head_sha
+        )
+    )
+    return PublicationEvidence(
+        current_head_sha=current_head_sha,
+        published_checkpoint_heads=tuple(published_checkpoint_heads),
+        publication_evidence_complete=complete,
+        verified_changed_paths=verified_changed_paths,
+        head_was_published=work_item.last_published_sha is not None,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class SessionHandoffSnapshot:
     """Canonical handoff bytes durably bound to exactly one generation replacement."""
 
@@ -292,46 +377,13 @@ def build_session_handoff_snapshot(
         ):
             raise ValueError("Actions evidence conflicts with the Handoff target")
 
-    for previous, current in zip(
-        published_checkpoints, published_checkpoints[1:]
-    ):
-        if current.previous_sha != previous.head_sha:
-            raise ValueError("publication checkpoint evidence is not one ordered chain")
-    if published_checkpoints:
-        if published_checkpoints[-1].head_sha != current_head_sha:
-            raise ValueError("publication checkpoint evidence does not reach current HEAD")
-    elif work_item.last_published_sha is not None:
-        # A schema-7 publication can predate the additive evidence ledger. Its durable
-        # current anchor remains trusted, but the missing history is explicitly incomplete.
-        pass
-
-    published_checkpoint_heads = [item.head_sha for item in published_checkpoints]
-    if (
-        work_item.last_published_sha is not None
-        and current_head_sha not in published_checkpoint_heads
-    ):
-        published_checkpoint_heads.append(current_head_sha)
-    path_set = {
-        path
-        for checkpoint in published_checkpoints
-        if checkpoint.has_complete_evidence
-        for path in checkpoint.changed_paths
-    }
-    publication_evidence_complete = (
-        all(item.has_complete_evidence for item in published_checkpoints)
-        and (
-            work_item.last_published_sha is None
-            or (
-                bool(published_checkpoints)
-                and published_checkpoints[0].previous_sha == work_item.base_sha
-            )
-        )
-        and (
-            not published_checkpoint_heads
-            or published_checkpoint_heads[-1] == current_head_sha
-        )
+    publication = build_publication_evidence(
+        work_item=work_item,
+        published_checkpoints=published_checkpoints,
     )
-    verified_changed_paths = tuple(sorted(path_set))
+    published_checkpoint_heads = list(publication.published_checkpoint_heads)
+    publication_evidence_complete = publication.publication_evidence_complete
+    verified_changed_paths = publication.verified_changed_paths
     if actions_evidence is None:
         required_check_facts = [
             {"name": name, "status": RequiredCheckStatus.NOT_OBSERVED.value}

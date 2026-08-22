@@ -31,6 +31,13 @@ executor. The environment-independent implementation now includes:
 - persistent Runner workspaces and idempotent first/resume Turn execution;
 - a recovery-first, process-locked Control Host sweep with stable Issue/comment snapshots and
   idempotent Publisher checkpoint completion;
+- an exact-HEAD completion gate that combines configured GitHub Actions checks, the verified
+  publication ledger, and structured Issue acceptance predicates before a completed Turn can enter
+  review;
+- mandatory fresh Audit generations when configured, with an independent audit contract and the
+  same trusted completion gate after any bounded audit fixes;
+- fail-closed context/compaction failure handling that rotates only after the Runner proves a clean
+  worktree at the unchanged input HEAD, while dirty or moved-HEAD failures block the generation;
 - strict same-repository Draft PR lookup/creation, branch read-back, SQLite binding, and ordered
   Issue status projection with lost-receipt recovery;
 - exact merged-PR/head reconciliation that durably closes the WorkItem before projecting

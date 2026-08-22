@@ -234,13 +234,13 @@ class ConfigTests(unittest.TestCase):
             'codex_version = "0.1.0"\nssh_version = "9.6"',
         )
         content = configured + SSH_RUNTIME + SESSION_RUNTIME
-        with self.assertRaisesRegex(ValueError, "fresh audit generation is not implemented"):
-            self._load(
-                content.replace(
-                    "rotate_before_final_audit = false",
-                    "rotate_before_final_audit = true",
-                )
+        enabled = self._load(
+            content.replace(
+                "rotate_before_final_audit = false",
+                "rotate_before_final_audit = true",
             )
+        )
+        self.assertTrue(enabled.session_runtime.rotate_before_final_audit)
         for invalid_protocol in ("1", "3", "true"):
             with self.subTest(protocol=invalid_protocol):
                 with self.assertRaisesRegex(ValueError, "must equal 2"):

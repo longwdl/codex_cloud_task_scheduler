@@ -13,6 +13,7 @@ from codex_dispatcher.slack_delivery import SlackDeliveryCoordinator
 from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_dispatch_service import (
     CheckpointPublicationInterrupted,
+    FinalAuditPreparationError,
     OfflineSshDispatchService,
 )
 from codex_dispatcher.ssh_recovery import (
@@ -63,6 +64,7 @@ class ControlSweepStatus(StrEnum):
     RETRY = "retry"
     RUNNER_ACTIVE = "runner_active"
     AWAITING_PUBLICATION = "awaiting_publication"
+    AWAITING_COMPLETION = "awaiting_completion"
     REVIEW = "review"
     NEEDS_INPUT = "needs_input"
     BLOCKED = "blocked"
@@ -269,9 +271,18 @@ class SshControlSweep:
         if recovery.action is SshRecoveryAction.RESUME_PUBLICATION:
             assert recovery.task is not None
             running = self._set_task_state(recovery.task, TaskState.RUNNING)
+            assert recovery.turn is not None
+            if (
+                recovery.turn.state is TurnState.PUBLISHED
+                and recovery.turn.result_status == "completed"
+            ):
+                assert recovery.work_item is not None
+                return self._after_turn(
+                    running,
+                    TurnProgress(recovery.work_item, recovery.turn),
+                )
             if self._publisher is None:
                 return _plan_result(ControlSweepStatus.AWAITING_PUBLICATION, recovery)
-            assert recovery.turn is not None
             return self._publish_checkpoint(running, recovery.turn.turn_id)
         if recovery.action is SshRecoveryAction.RECONCILE_ACTIVE_TURN:
             assert recovery.task is not None and recovery.turn is not None
@@ -280,6 +291,11 @@ class SshControlSweep:
         if recovery.action is SshRecoveryAction.START_CLAIMED_TURN:
             assert recovery.task is not None
             return self._run_claimed(recovery.task, turn_id=turn_id)
+        if recovery.action is SshRecoveryAction.START_FRESH_FINAL_AUDIT:
+            assert recovery.task is not None
+            return self._run_fresh_final_audit(
+                recovery.task, turn_id=turn_id
+            )
         if recovery.action is SshRecoveryAction.RESUME_PREPARATION:
             assert recovery.task is not None and recovery.work_item is not None
             bundle = self._source.exact(
@@ -386,7 +402,12 @@ class SshControlSweep:
         return self._after_turn(stable_task, progress)
 
     def _stable_claimed_snapshot(
-        self, task: TrackerTask
+        self,
+        task: TrackerTask,
+        *,
+        allowed_states: frozenset[TaskState] = frozenset(
+            {TaskState.DISPATCHING}
+        ),
     ) -> tuple[TrackerTask | None, tuple[TrackerComment, ...]]:
         current = task
         for _ in range(2):
@@ -406,8 +427,8 @@ class SshControlSweep:
             ):
                 return None, ()
             if (
-                middle.state is not TaskState.DISPATCHING
-                or latest.state is not TaskState.DISPATCHING
+                middle.state not in allowed_states
+                or latest.state not in allowed_states
                 or not middle.is_open
                 or not latest.is_open
             ):
@@ -426,11 +447,41 @@ class SshControlSweep:
         task: TrackerTask,
         progress: TurnProgress,
     ) -> ControlSweepResult:
+        if progress.turn.state is TurnState.CHECKPOINTING and self._publisher is not None:
+            return self._publish_checkpoint(task, progress.turn.turn_id)
         if (
-            progress.turn.state in {TurnState.CHECKPOINTING, TurnState.PUBLISHED}
+            progress.turn.state is TurnState.PUBLISHED
+            and progress.turn.result_status == "completed"
+        ):
+            progress = self._dispatch.evaluate_completion_gate(
+                task, progress.turn.turn_id
+            )
+        elif (
+            progress.turn.state is TurnState.PUBLISHED
             and self._publisher is not None
         ):
             return self._publish_checkpoint(task, progress.turn.turn_id)
+        if (
+            progress.turn.state is TurnState.FINISHED
+            and self._dispatch.requires_fresh_final_audit(progress.turn.turn_id)
+        ):
+            return self._run_fresh_final_audit(task)
+        if progress.turn.state is TurnState.INTERRUPTED:
+            context_failure = self._store.get_turn_context_failure(
+                progress.turn.turn_id
+            )
+            if (
+                context_failure is not None
+                and progress.work_item.state is WorkItemState.READY
+            ):
+                updated = self._set_task_state(task, TaskState.DISPATCHING)
+                return _task_result(
+                    ControlSweepStatus.RETRY,
+                    updated,
+                    work_item=progress.work_item,
+                    turn_id=progress.turn.turn_id,
+                    reason="clean_context_failure_rotation_pending",
+                )
         mapping = {
             TurnState.STARTING: (ControlSweepStatus.RUNNER_ACTIVE, TaskState.RUNNING),
             TurnState.RUNNING: (ControlSweepStatus.RUNNER_ACTIVE, TaskState.RUNNING),
@@ -440,7 +491,7 @@ class SshControlSweep:
                 TaskState.RUNNING,
             ),
             TurnState.PUBLISHED: (
-                ControlSweepStatus.AWAITING_PUBLICATION,
+                ControlSweepStatus.AWAITING_COMPLETION,
                 TaskState.RUNNING,
             ),
             TurnState.FINISHED: (ControlSweepStatus.REVIEW, TaskState.REVIEW),
@@ -479,6 +530,59 @@ class SshControlSweep:
             work_item=work_item,
             turn_id=progress.turn.turn_id,
         )
+
+    def _run_fresh_final_audit(
+        self,
+        task: TrackerTask,
+        *,
+        turn_id: str | None = None,
+    ) -> ControlSweepResult:
+        stable_task, comments = self._stable_claimed_snapshot(
+            task,
+            allowed_states=frozenset(
+                {TaskState.DISPATCHING, TaskState.RUNNING}
+            ),
+        )
+        if stable_task is None:
+            work_item = self._store.get_work_item_by_issue(
+                task.repository, task.issue_number
+            )
+            return _task_result(
+                ControlSweepStatus.RETRY,
+                task,
+                work_item=work_item,
+                reason="final_audit_issue_snapshot_changed",
+            )
+        try:
+            progress = self._dispatch.run_fresh_final_audit(
+                stable_task,
+                comments=comments,
+                turn_id=turn_id,
+            )
+        except FinalAuditPreparationError as exc:
+            work_item = self._store.get_work_item_by_issue(
+                stable_task.repository, stable_task.issue_number
+            )
+            if work_item is None:
+                raise RuntimeError("final Audit lost its persistent WorkItem") from exc
+            if work_item.state in {WorkItemState.REVIEW, WorkItemState.READY}:
+                work_item = self._store.update_work_item_state(
+                    work_item.work_item_id, WorkItemState.BLOCKED
+                )
+            work_item = self._deliver_terminal(
+                stable_task,
+                work_item=work_item,
+                desired_task_state=TaskState.BLOCKED,
+                turn=None,
+            )
+            updated = self._set_task_state(stable_task, TaskState.BLOCKED)
+            return _task_result(
+                ControlSweepStatus.BLOCKED,
+                updated,
+                work_item=work_item,
+                reason=exc.error_code,
+            )
+        return self._after_turn(stable_task, progress)
 
     def _publish_checkpoint(
         self,

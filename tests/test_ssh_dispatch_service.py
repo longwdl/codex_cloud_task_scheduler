@@ -20,6 +20,7 @@ from codex_dispatcher.publisher import VerifiedBundle
 from codex_dispatcher.runner_protocol import RunnerOperation, parse_agent_result
 from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_dispatch_planning import SshDispatchPlanningError
+from codex_dispatcher.ssh_recovery import SshRecoveryAction, plan_ssh_recovery
 from codex_dispatcher.ssh_dispatch_service import OfflineSshDispatchService
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.testing.fake_runner import (
@@ -58,6 +59,33 @@ def blocked_result():
                 "next_step": "Record the blocker in the Issue",
             }
         )
+    )
+
+
+def completed_result():
+    return parse_agent_result(
+        json.dumps(
+            {
+                "status": "completed",
+                "summary": "Completion candidate",
+                "needs_input": [],
+                "tests": [{"name": "tests", "status": "passed"}],
+                "changed_paths": ["src/codex_dispatcher/parser.py"],
+                "next_step": "Wait for trusted completion evidence",
+            }
+        )
+    )
+
+
+def structured_claimed_task():
+    return replace(
+        claimed_task(),
+        body=claimed_task().body.replace(
+            "- [ ] 测试通过",
+            "- [AC-1] required-check: tests\n"
+            "- [AC-2] changed-paths-within-allowed\n"
+            "- [AC-3] task-head-published",
+        ),
     )
 
 
@@ -794,6 +822,414 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
             ["retired", "active"], [item.state.value for item in generations]
         )
         self.assertEqual(2, len(self.store.list_turns(item.work_item_id)))
+
+    def test_v2_completion_waits_for_exact_head_ci_then_atomically_enters_review(
+        self,
+    ) -> None:
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(),
+        )
+        state = {"status": "queued", "conclusion": None}
+        captured: list[dict[str, object]] = []
+
+        def import_for_head(**kwargs: object) -> ActionsEvidenceSnapshot:
+            captured.append(dict(kwargs))
+            run = ActionsRunEvidence(
+                name="tests",
+                workflow_id=201,
+                run_id=101,
+                run_attempt=1,
+                repository="owner/repo",
+                head_repository="owner/repo",
+                head_branch=str(kwargs["task_branch"]),
+                head_sha=str(kwargs["head_sha"]),
+                event="pull_request",
+                status=str(state["status"]),
+                conclusion=state["conclusion"],
+                created_at="2026-01-01T00:00:00Z",
+                updated_at="2026-01-01T00:01:00Z",
+                html_url="https://github.com/owner/repo/actions/runs/101",
+            )
+            return ActionsEvidenceSnapshot(
+                repository="owner/repo",
+                task_branch=str(kwargs["task_branch"]),
+                head_sha=str(kwargs["head_sha"]),
+                remote_ref_sha=str(kwargs["head_sha"]),
+                observed_at=str(kwargs["observed_at"]),
+                required_checks=(
+                    RequiredCheckEvidence("tests", run.check_status, run),
+                ),
+            )
+
+        service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+            ci_evidence_importer=SimpleNamespace(import_for_head=import_for_head),
+        )
+        task = structured_claimed_task()
+        item = service.resolve_and_prepare(
+            task, base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        artifact = b"completion-gate-checkpoint"
+        head_sha = "c" * 40
+        self.verifier.register(
+            VerifiedBundle(
+                bundle_sha256=sha256(artifact).hexdigest(),
+                head_sha=head_sha,
+                parent_anchor_sha=BASE_SHA,
+                changed_paths=("src/codex_dispatcher/parser.py",),
+                commit_count=1,
+                size_bytes=len(artifact),
+            )
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, head_sha, completed_result(), artifact),
+        )
+        progress = service.run_claimed_turn(
+            task, turn_id="turn_" + "c" * 32
+        )
+        progress = service.publish_checkpoint(
+            progress.turn.turn_id,
+            publisher=SimpleNamespace(
+                publish=lambda artifact, *, plan, work_item: SimpleNamespace(
+                    observed_remote_sha=plan.source_sha
+                )
+            ),
+        )
+        self.assertEqual(TurnState.PUBLISHED, progress.turn.state)
+        self.assertEqual(WorkItemState.RUNNING, progress.work_item.state)
+
+        pending = service.evaluate_completion_gate(task, progress.turn.turn_id)
+
+        self.assertEqual(TurnState.PUBLISHED, pending.turn.state)
+        self.assertEqual(WorkItemState.RUNNING, pending.work_item.state)
+        first_gate = self.store.get_turn_completion_gate(progress.turn.turn_id)
+        self.assertIsNotNone(first_gate)
+        assert first_gate is not None
+        self.assertEqual("pending", first_gate.status.value)
+
+        state.update(status="completed", conclusion="success")
+        passed = service.evaluate_completion_gate(task, progress.turn.turn_id)
+
+        self.assertEqual(TurnState.FINISHED, passed.turn.state)
+        self.assertEqual(WorkItemState.REVIEW, passed.work_item.state)
+        final_gate = self.store.get_turn_completion_gate(progress.turn.turn_id)
+        self.assertIsNotNone(final_gate)
+        assert final_gate is not None
+        self.assertEqual("passed", final_gate.status.value)
+        self.assertEqual(head_sha, final_gate.head_sha)
+        self.assertEqual(2, len(captured))
+        self.assertTrue(final_gate.evidence["git"]["publication_evidence_complete"])
+        self.assertEqual("passed", final_gate.evidence["acceptance"]["status"])
+
+    def test_v2_completion_blocks_when_exact_head_ci_is_ambiguous(self) -> None:
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(),
+        )
+
+        def reject_import(**_: object) -> ActionsEvidenceSnapshot:
+            raise CiEvidenceError("remote ref changed during observation")
+
+        service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+            ci_evidence_importer=SimpleNamespace(import_for_head=reject_import),
+        )
+        task = structured_claimed_task()
+        item = service.resolve_and_prepare(
+            task, base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        artifact = b"ambiguous-completion-checkpoint"
+        head_sha = "d" * 40
+        self.verifier.register(
+            VerifiedBundle(
+                bundle_sha256=sha256(artifact).hexdigest(),
+                head_sha=head_sha,
+                parent_anchor_sha=BASE_SHA,
+                changed_paths=("src/codex_dispatcher/parser.py",),
+                commit_count=1,
+                size_bytes=len(artifact),
+            )
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, head_sha, completed_result(), artifact),
+        )
+        progress = service.run_claimed_turn(
+            task, turn_id="turn_" + "d" * 32
+        )
+        progress = service.publish_checkpoint(
+            progress.turn.turn_id,
+            publisher=SimpleNamespace(
+                publish=lambda artifact, *, plan, work_item: SimpleNamespace(
+                    observed_remote_sha=plan.source_sha
+                )
+            ),
+        )
+
+        blocked = service.evaluate_completion_gate(task, progress.turn.turn_id)
+
+        self.assertEqual(TurnState.BLOCKED, blocked.turn.state)
+        self.assertEqual(
+            "completion_ci_evidence_ambiguous", blocked.turn.error_code
+        )
+        self.assertEqual(WorkItemState.BLOCKED, blocked.work_item.state)
+
+    def test_passed_implementation_rotates_to_fresh_audit_before_review(self) -> None:
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(
+                rotate_before_final_audit=True
+            ),
+        )
+
+        def import_for_head(**kwargs: object) -> ActionsEvidenceSnapshot:
+            run = ActionsRunEvidence(
+                name="tests",
+                workflow_id=202,
+                run_id=102,
+                run_attempt=1,
+                repository="owner/repo",
+                head_repository="owner/repo",
+                head_branch=str(kwargs["task_branch"]),
+                head_sha=str(kwargs["head_sha"]),
+                event="pull_request",
+                status="completed",
+                conclusion="success",
+                created_at="2026-01-01T00:00:00Z",
+                updated_at="2026-01-01T00:01:00Z",
+                html_url="https://github.com/owner/repo/actions/runs/102",
+            )
+            return ActionsEvidenceSnapshot(
+                repository="owner/repo",
+                task_branch=str(kwargs["task_branch"]),
+                head_sha=str(kwargs["head_sha"]),
+                remote_ref_sha=str(kwargs["head_sha"]),
+                observed_at=str(kwargs["observed_at"]),
+                required_checks=(
+                    RequiredCheckEvidence("tests", run.check_status, run),
+                ),
+            )
+
+        service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+            ci_evidence_importer=SimpleNamespace(import_for_head=import_for_head),
+        )
+        task = structured_claimed_task()
+        item = service.resolve_and_prepare(
+            task, base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        artifact = b"fresh-audit-implementation"
+        head_sha = "e" * 40
+        self.verifier.register(
+            VerifiedBundle(
+                bundle_sha256=sha256(artifact).hexdigest(),
+                head_sha=head_sha,
+                parent_anchor_sha=BASE_SHA,
+                changed_paths=("src/codex_dispatcher/parser.py",),
+                commit_count=1,
+                size_bytes=len(artifact),
+            )
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, head_sha, completed_result(), artifact),
+        )
+        implementation = service.run_claimed_turn(
+            task, turn_id="turn_" + "e" * 32
+        )
+        implementation = service.publish_checkpoint(
+            implementation.turn.turn_id,
+            publisher=SimpleNamespace(
+                publish=lambda artifact, *, plan, work_item: SimpleNamespace(
+                    observed_remote_sha=plan.source_sha
+                )
+            ),
+        )
+        implementation = service.evaluate_completion_gate(
+            task, implementation.turn.turn_id
+        )
+        self.assertTrue(
+            service.requires_fresh_final_audit(implementation.turn.turn_id)
+        )
+        tracker = FakeTracker()
+        tracker.tasks[task.task_id] = replace(
+            task,
+            state=TaskState.RUNNING,
+            labels=("agent:running", "exec:ssh-cli", "priority:p1"),
+        )
+        recovery = plan_ssh_recovery(config, self.store, tracker)
+        self.assertEqual(
+            SshRecoveryAction.START_FRESH_FINAL_AUDIT,
+            recovery.action,
+        )
+
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION_2, head_sha, completed_result()),
+        )
+        audit = service.run_fresh_final_audit(
+            task, turn_id="turn_" + "f" * 32
+        )
+
+        self.assertEqual(TurnState.PUBLISHED, audit.turn.state)
+        generations = self.store.list_session_generations(item.work_item_id)
+        self.assertEqual(
+            ["implementation", "audit"],
+            [generation.role.value for generation in generations],
+        )
+        self.assertEqual(
+            ["retired", "active"],
+            [generation.state.value for generation in generations],
+        )
+        self.assertEqual(SESSION, generations[0].codex_session_id)
+        self.assertEqual(SESSION_2, generations[1].codex_session_id)
+        handoff = self.store.get_session_handoff_for_generation(
+            generations[1].session_generation_id
+        )
+        self.assertIsNotNone(handoff)
+        assert handoff is not None
+        self.assertEqual(
+            "completion_candidate",
+            handoff.trusted_facts["generation"]["rotation_reason"],
+        )
+
+        accepted = service.evaluate_completion_gate(task, audit.turn.turn_id)
+
+        self.assertEqual(TurnState.FINISHED, accepted.turn.state)
+        self.assertEqual(WorkItemState.REVIEW, accepted.work_item.state)
+        self.assertFalse(service.requires_fresh_final_audit(audit.turn.turn_id))
+        self.assertEqual(
+            2,
+            len(
+                [
+                    call
+                    for call in self.transport.calls
+                    if call.operation is RunnerOperation.START
+                ]
+            ),
+        )
+
+    def test_clean_context_failure_rotates_to_new_session_from_exact_anchor(self) -> None:
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(),
+        )
+        service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+        task = claimed_task()
+        item = service.resolve_and_prepare(
+            task, base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(
+                SESSION,
+                BASE_SHA,
+                blocked_result(),
+                error_code="session_context_failure_clean",
+                failure_head_sha=BASE_SHA,
+                worktree_clean=True,
+            ),
+        )
+
+        interrupted = service.run_claimed_turn(
+            task, turn_id="turn_" + "1" * 32
+        )
+
+        self.assertEqual(TurnState.INTERRUPTED, interrupted.turn.state)
+        self.assertEqual(WorkItemState.READY, interrupted.work_item.state)
+        receipt = self.store.get_turn_context_failure(interrupted.turn.turn_id)
+        self.assertIsNotNone(receipt)
+        assert receipt is not None
+        self.assertEqual(BASE_SHA, receipt.head_sha)
+        self.assertTrue(receipt.worktree_clean)
+
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION_2, BASE_SHA, blocked_result()),
+        )
+        rotated = service.run_claimed_turn(
+            task, turn_id="turn_" + "2" * 32
+        )
+
+        self.assertEqual(TurnState.BLOCKED, rotated.turn.state)
+        generations = self.store.list_session_generations(item.work_item_id)
+        self.assertEqual(["retired", "active"], [g.state.value for g in generations])
+        self.assertEqual(
+            "context_failure", generations[1].rotation_reason
+        )
+        self.assertEqual(SESSION, generations[0].codex_session_id)
+        self.assertEqual(SESSION_2, generations[1].codex_session_id)
+        handoff = self.store.get_session_handoff_for_generation(
+            generations[1].session_generation_id
+        )
+        self.assertIsNotNone(handoff)
+        assert handoff is not None
+        self.assertEqual(
+            "context_failure",
+            handoff.trusted_facts["generation"]["rotation_reason"],
+        )
+        self.assertEqual(
+            [RunnerOperation.START, RunnerOperation.START],
+            [
+                call.operation
+                for call in self.transport.calls
+                if call.operation in {RunnerOperation.START, RunnerOperation.RESUME}
+            ],
+        )
+
+    def test_dirty_context_failure_is_terminal_and_never_rotates(self) -> None:
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(),
+        )
+        service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+        task = claimed_task()
+        item = service.resolve_and_prepare(
+            task, base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(
+                SESSION,
+                BASE_SHA,
+                blocked_result(),
+                error_code="session_context_failure_dirty_worktree",
+                failure_head_sha=BASE_SHA,
+                worktree_clean=False,
+            ),
+        )
+
+        blocked = service.run_claimed_turn(
+            task, turn_id="turn_" + "3" * 32
+        )
+
+        self.assertEqual(TurnState.BLOCKED, blocked.turn.state)
+        self.assertEqual(
+            "session_context_failure_dirty_worktree", blocked.turn.error_code
+        )
+        self.assertEqual(WorkItemState.BLOCKED, blocked.work_item.state)
+        self.assertIsNone(
+            self.store.get_turn_context_failure(blocked.turn.turn_id)
+        )
+        generations = self.store.list_session_generations(item.work_item_id)
+        self.assertEqual(1, len(generations))
+        self.assertEqual("failed", generations[0].state.value)
 
     def test_missing_or_conflicting_source_bundle_fails_before_persistence(self) -> None:
         for bundle in (None, source_bundle("b" * 40)):

@@ -142,6 +142,8 @@ class RunnerTurnReply:
     output_sha256: str | None = None
     result: AgentResult | None = None
     error_code: str | None = None
+    failure_head_sha: str | None = None
+    worktree_clean: bool | None = None
     session_generation_id: str | None = None
     session_generation: int | None = None
     agent_policy_digest: str | None = None
@@ -178,6 +180,14 @@ class RunnerTurnReply:
             or any(ord(character) < 32 or ord(character) == 127 for character in self.error_code)
         ):
             raise RunnerProtocolError("Runner error_code is invalid")
+        if self.failure_head_sha is not None:
+            validate_git_sha(self.failure_head_sha, "failure_head_sha")
+        if self.worktree_clean is not None and type(self.worktree_clean) is not bool:
+            raise RunnerProtocolError("worktree_clean must be a bool or None")
+        if (self.failure_head_sha is None) != (self.worktree_clean is None):
+            raise RunnerProtocolError(
+                "failed checkpoint evidence fields must be recorded together"
+            )
         if self.version == NEXT_PROTOCOL_VERSION:
             if self.session_generation_id is None:
                 raise RunnerProtocolError("v2 Runner Turn requires session_generation_id")
@@ -201,11 +211,19 @@ class RunnerTurnReply:
                 self.agent_policy_digest,
                 self.usage,
                 self.delegation_receipt,
+                self.failure_head_sha,
+                self.worktree_clean,
             )
         ):
             raise RunnerProtocolError("v1 Runner Turn cannot contain v2 fields")
 
         final_fields = (self.head_sha, self.output_sha256, self.result)
+        if self.state is not RunnerTurnRemoteState.FAILED and (
+            self.failure_head_sha is not None or self.worktree_clean is not None
+        ):
+            raise RunnerProtocolError(
+                "failed checkpoint evidence requires a failed Runner Turn"
+            )
         if self.state is RunnerTurnRemoteState.FINISHED:
             if self.session_id is None or any(value is None for value in final_fields):
                 raise RunnerProtocolError("finished Runner Turn is missing result fields")
@@ -246,6 +264,26 @@ class RunnerTurnReply:
                 raise RunnerProtocolError(
                     "failed or unknown Runner Turn cannot contain delegation evidence"
                 )
+            if self.state is RunnerTurnRemoteState.UNKNOWN and (
+                self.failure_head_sha is not None
+                or self.worktree_clean is not None
+            ):
+                raise RunnerProtocolError(
+                    "unknown Runner Turn cannot contain failed checkpoint evidence"
+                )
+            if self.version == PROTOCOL_VERSION and (
+                self.failure_head_sha is not None
+                or self.worktree_clean is not None
+            ):
+                raise RunnerProtocolError(
+                    "v1 Runner Turn cannot contain failed checkpoint evidence"
+                )
+            if self.error_code == "session_context_failure_clean" and (
+                self.failure_head_sha is None or self.worktree_clean is not True
+            ):
+                raise RunnerProtocolError(
+                    "clean context failure requires exact checkpoint evidence"
+                )
 
     def to_json(self) -> str:
         payload: dict[str, object] = {
@@ -264,6 +302,8 @@ class RunnerTurnReply:
                 agent_result_to_mapping(self.result) if self.result is not None else None,
             ),
             ("error_code", self.error_code),
+            ("failure_head_sha", self.failure_head_sha),
+            ("worktree_clean", self.worktree_clean),
             ("session_generation_id", self.session_generation_id),
             ("session_generation", self.session_generation),
             ("agent_policy_digest", self.agent_policy_digest),
@@ -303,6 +343,10 @@ def parse_runner_turn_reply(value: str | bytes) -> RunnerTurnReply:
         "session_id" in payload
     ):
         expected = expected | {"session_id"}
+    if state is RunnerTurnRemoteState.FAILED and (
+        "failure_head_sha" in payload or "worktree_clean" in payload
+    ):
+        expected = expected | {"failure_head_sha", "worktree_clean"}
     if version == NEXT_PROTOCOL_VERSION:
         expected = expected | {
             "session_generation_id",
@@ -329,6 +373,8 @@ def parse_runner_turn_reply(value: str | bytes) -> RunnerTurnReply:
             output_sha256=payload.get("output_sha256"),
             result=result,
             error_code=payload.get("error_code"),
+            failure_head_sha=payload.get("failure_head_sha"),
+            worktree_clean=payload.get("worktree_clean"),
             session_generation_id=payload.get("session_generation_id"),
             session_generation=payload.get("session_generation"),
             agent_policy_digest=payload.get("agent_policy_digest"),

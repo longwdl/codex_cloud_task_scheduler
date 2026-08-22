@@ -7,6 +7,10 @@ from typing import Iterable
 from uuid import uuid4
 
 from codex_dispatcher.ci_evidence import CiEvidenceError, CiEvidenceImporter
+from codex_dispatcher.completion_gate import (
+    CompletionGateStatus,
+    build_completion_gate_snapshot,
+)
 from codex_dispatcher.config import Config, RepositoryConfig
 from codex_dispatcher.git_bundle_verifier import GitBundleVerificationError
 from codex_dispatcher.git_publisher import (
@@ -20,6 +24,8 @@ from codex_dispatcher.runner_transport import (
     RunnerTransportRejected,
 )
 from codex_dispatcher.scheduler import DryRunPlan, build_ssh_dry_run_plan
+from codex_dispatcher.handoffs import build_publication_evidence
+from codex_dispatcher.prompt_builder import build_canonical_input_snapshot
 from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_dispatch_planning import (
     SshDispatchPlanningError,
@@ -31,6 +37,7 @@ from codex_dispatcher.ssh_dispatch_planning import (
     validate_ssh_active_generation_continuity,
 )
 from codex_dispatcher.state_store import StateStore
+from codex_dispatcher.task_spec import TaskSpecError, parse_task_spec
 from codex_dispatcher.trackers.base import Tracker, TrackerTask
 from codex_dispatcher.turn_orchestration import (
     OfflineTurnOrchestrator,
@@ -260,7 +267,10 @@ class OfflineSshDispatchService:
                             "active session generation has incomplete prompt receipts"
                         )
                     prior_turn = generation_turns[-1]
-                    if (
+                    context_failure_rotation = (
+                        self._context_failure_rotation_required(prior_turn)
+                    )
+                    if not context_failure_rotation and (
                         prior_turn.result_status is None
                         or prior_turn.result_summary is None
                     ):
@@ -279,8 +289,9 @@ class OfflineSshDispatchService:
                     delivered_context_sha256 = (
                         prompt_inputs[-1].cumulative_approved_context_sha256
                     )
-                    prior_status = prior_turn.result_status
-                    prior_summary = prior_turn.result_summary
+                    if not context_failure_rotation:
+                        prior_status = prior_turn.result_status
+                        prior_summary = prior_turn.result_summary
                     validate_ssh_active_generation_continuity(
                         task=task,
                         repository=repository,
@@ -360,6 +371,7 @@ class OfflineSshDispatchService:
                         current_generation_number=generation.generation_number,
                         expected_current_policy_sha256=generation.policy_sha256,
                         new_policy_sha256=session_runtime.agent_policy_digest,
+                        new_role=generation.role,
                         rotation_reason=rotation_reason,
                         new_session_generation_id=next_session_generation_id,
                         handoff=handoff,
@@ -477,6 +489,10 @@ class OfflineSshDispatchService:
     ) -> str | None:
         runtime = self._config.session_runtime
         assert runtime is not None
+        if generation_turns and self._context_failure_rotation_required(
+            generation_turns[-1]
+        ):
+            return "context_failure"
         if len(generation_turns) >= runtime.max_turns_per_session:
             return "turn_budget"
         if not runtime.use_incremental_resume_prompts and generation_turns:
@@ -525,6 +541,20 @@ class OfflineSshDispatchService:
             return "session_age"
         return None
 
+    def _context_failure_rotation_required(self, turn: Turn) -> bool:
+        receipt = self._store.get_turn_context_failure(turn.turn_id)
+        return (
+            turn.state is TurnState.INTERRUPTED
+            and turn.error_code == "session_context_failure_clean"
+            and turn.output_sha256 is None
+            and turn.output_head_sha is None
+            and turn.result_status is None
+            and turn.result_summary is None
+            and receipt is not None
+            and receipt.head_sha == turn.input_head_sha
+            and receipt.worktree_clean
+        )
+
     def publish_checkpoint(
         self,
         turn_id: str,
@@ -560,6 +590,241 @@ class OfflineSshDispatchService:
         ):
             return self._orchestrator.reject_publication(turn_id)
 
+    def evaluate_completion_gate(
+        self, task: TrackerTask, turn_id: str
+    ) -> TurnProgress:
+        """Evaluate one v2 completion candidate against exact trusted evidence."""
+        turn = self._store.get_turn(turn_id)
+        if turn is None:
+            raise KeyError(f"turn not found: {turn_id}")
+        work_item = self._store.get_work_item(turn.work_item_id)
+        if work_item is None:
+            raise KeyError(f"work item not found: {turn.work_item_id}")
+        if (
+            task.repository != work_item.repository
+            or task.issue_number != work_item.issue_number
+            or turn.state is not TurnState.PUBLISHED
+            or turn.result_status != "completed"
+            or turn.output_head_sha is None
+        ):
+            return self._orchestrator.reject_completion_candidate(
+                turn_id, error_code="completion_candidate_identity_invalid"
+            )
+        generation = self._store.get_turn_session_generation(turn_id)
+        prompt_input = self._store.get_turn_prompt_input(turn_id)
+        if (
+            generation is None
+            or generation.policy_sha256 is None
+            or prompt_input is None
+        ):
+            return self._orchestrator.reject_completion_candidate(
+                turn_id, error_code="completion_input_receipt_missing"
+            )
+        generation_head_sha = (
+            generation.last_published_sha or generation.start_head_sha
+        )
+        if (
+            work_item.last_published_sha != turn.output_head_sha
+            or generation_head_sha != turn.output_head_sha
+        ):
+            return self._orchestrator.reject_completion_candidate(
+                turn_id, error_code="completion_head_unpublished"
+            )
+        try:
+            task_spec = parse_task_spec(task.body)
+            inputs = build_canonical_input_snapshot(
+                issue_title=task.title,
+                task_spec=task_spec,
+            )
+        except (TaskSpecError, ValueError):
+            return self._orchestrator.reject_completion_candidate(
+                turn_id, error_code="completion_task_spec_invalid"
+            )
+        if (
+            inputs.task_spec_sha256 != prompt_input.task_spec_sha256
+            or inputs.issue_content_sha256 != prompt_input.issue_content_sha256
+            or task_spec.allowed_paths != turn.issue_allowed_paths
+        ):
+            return self._orchestrator.reject_completion_candidate(
+                turn_id, error_code="completion_task_spec_changed"
+            )
+        try:
+            publication = build_publication_evidence(
+                work_item=work_item,
+                published_checkpoints=(
+                    self._store.list_work_item_publication_checkpoints(
+                        work_item.work_item_id
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            return self._orchestrator.reject_completion_candidate(
+                turn_id, error_code="completion_publication_evidence_invalid"
+            )
+        if self._ci_evidence_importer is None:
+            return self._orchestrator.reject_completion_candidate(
+                turn_id, error_code="completion_ci_evidence_unavailable"
+            )
+        observed_at = datetime.now(timezone.utc).isoformat()
+        try:
+            actions_evidence = self._ci_evidence_importer.import_for_head(
+                repository=work_item.repository,
+                task_branch=work_item.task_branch,
+                head_sha=turn.output_head_sha,
+                required_checks=self._repository(work_item.repository).required_checks,
+                observed_at=observed_at,
+            )
+        except CiEvidenceError:
+            return self._orchestrator.reject_completion_candidate(
+                turn_id, error_code="completion_ci_evidence_ambiguous"
+            )
+        try:
+            snapshot = build_completion_gate_snapshot(
+                work_item=work_item,
+                turn=turn,
+                task_spec=task_spec,
+                task_spec_sha256=inputs.task_spec_sha256,
+                required_checks=self._repository(
+                    work_item.repository
+                ).required_checks,
+                publication=publication,
+                actions_evidence=actions_evidence,
+                observed_at=observed_at,
+            )
+            work_item, turn, _ = self._store.record_turn_completion_gate(snapshot)
+        except (TypeError, ValueError):
+            return self._orchestrator.reject_completion_candidate(
+                turn_id, error_code="completion_evidence_invalid"
+            )
+        return TurnProgress(work_item, turn)
+
+    def requires_fresh_final_audit(self, turn_id: str) -> bool:
+        """Return whether a passed implementation candidate must start fresh audit."""
+        runtime = self._config.session_runtime
+        if runtime is None or not runtime.rotate_before_final_audit:
+            return False
+        gate = self._store.get_turn_completion_gate(turn_id)
+        generation = self._store.get_turn_session_generation(turn_id)
+        return (
+            gate is not None
+            and gate.status is CompletionGateStatus.PASSED
+            and generation is not None
+            and generation.role is SessionGenerationRole.IMPLEMENTATION
+        )
+
+    def run_fresh_final_audit(
+        self,
+        task: TrackerTask,
+        *,
+        comments: Iterable[object] = (),
+        turn_id: str | None = None,
+    ) -> TurnProgress:
+        """Rotate a passed implementation candidate into an independent Audit Turn."""
+        comments = tuple(comments)
+        runtime = self._config.session_runtime
+        if runtime is None or not runtime.rotate_before_final_audit:
+            raise FinalAuditPreparationError("fresh_final_audit_not_enabled")
+        work_item = self._store.get_work_item_by_issue(
+            task.repository, task.issue_number
+        )
+        if work_item is None:
+            raise FinalAuditPreparationError("final_audit_work_item_missing")
+        generations = self._store.list_session_generations(work_item.work_item_id)
+        live = self._store.get_live_session_generation(work_item.work_item_id)
+        if live is None:
+            raise FinalAuditPreparationError("final_audit_generation_missing")
+        if live.role is SessionGenerationRole.AUDIT:
+            if live.state is not SessionGenerationState.PLANNED:
+                raise FinalAuditPreparationError(
+                    "final_audit_generation_state_invalid"
+                )
+            return self.run_claimed_turn(
+                task, comments=comments, turn_id=turn_id
+            )
+        if live.role is not SessionGenerationRole.IMPLEMENTATION:
+            raise FinalAuditPreparationError("final_audit_source_role_invalid")
+        if len(generations) >= runtime.max_session_generations:
+            raise FinalAuditPreparationError("final_audit_generation_budget_exhausted")
+        turns = self._store.list_turns(work_item.work_item_id)
+        if not turns:
+            raise FinalAuditPreparationError("final_audit_source_turn_missing")
+        source_turn = turns[-1]
+        gate = self._store.get_turn_completion_gate(source_turn.turn_id)
+        if (
+            source_turn.state is not TurnState.FINISHED
+            or source_turn.result_status != "completed"
+            or gate is None
+            or gate.status is not CompletionGateStatus.PASSED
+            or self._store.get_turn_session_generation(source_turn.turn_id) != live
+            or work_item.state not in {WorkItemState.REVIEW, WorkItemState.READY}
+        ):
+            raise FinalAuditPreparationError("final_audit_source_evidence_invalid")
+        if self._ci_evidence_importer is None or work_item.last_published_sha is None:
+            raise FinalAuditPreparationError("final_audit_ci_evidence_unavailable")
+        created_at = datetime.now(timezone.utc).isoformat()
+        repository = self._repository(work_item.repository)
+        try:
+            actions_evidence = self._ci_evidence_importer.import_for_head(
+                repository=work_item.repository,
+                task_branch=work_item.task_branch,
+                head_sha=work_item.last_published_sha,
+                required_checks=repository.required_checks,
+                observed_at=created_at,
+            )
+        except CiEvidenceError as exc:
+            raise FinalAuditPreparationError(
+                "final_audit_ci_evidence_ambiguous"
+            ) from exc
+        next_generation_id = f"sg_{uuid4().hex}"
+        try:
+            handoff = build_ssh_session_handoff_snapshot(
+                task=task,
+                repository=repository,
+                work_item=work_item,
+                from_generation=live,
+                to_session_generation_id=next_generation_id,
+                to_generation_number=live.generation_number + 1,
+                to_agent_policy_sha256=runtime.agent_policy_digest,
+                rotation_reason="completion_candidate",
+                published_checkpoints=(
+                    self._store.list_work_item_publication_checkpoints(
+                        work_item.work_item_id
+                    )
+                ),
+                source_turn=source_turn,
+                source_agent_result=self._store.get_turn_agent_result(
+                    source_turn.turn_id
+                ),
+                comments=comments,
+                created_at=created_at,
+                actions_evidence=actions_evidence,
+            )
+        except SshDispatchPlanningError as exc:
+            raise FinalAuditPreparationError(
+                "final_audit_handoff_invalid"
+            ) from exc
+        if work_item.state is WorkItemState.REVIEW:
+            work_item = self._store.update_work_item_state(
+                work_item.work_item_id, WorkItemState.READY
+            )
+        try:
+            self._store.rotate_session_generation(
+                work_item.work_item_id,
+                current_session_generation_id=live.session_generation_id,
+                current_generation_number=live.generation_number,
+                expected_current_policy_sha256=live.policy_sha256,
+                new_policy_sha256=runtime.agent_policy_digest,
+                new_role=SessionGenerationRole.AUDIT,
+                rotation_reason="completion_candidate",
+                new_session_generation_id=next_generation_id,
+                handoff=handoff,
+            )
+        except (TypeError, ValueError) as exc:
+            raise FinalAuditPreparationError(
+                "final_audit_rotation_invalid"
+            ) from exc
+        return self.run_claimed_turn(task, comments=comments, turn_id=turn_id)
+
     def reconcile_turn(self, turn_id: str) -> TurnProgress:
         """Reconcile one ambiguous active Turn without replaying its Prompt."""
         return self._orchestrator.reconcile_turn(turn_id)
@@ -573,3 +838,11 @@ class OfflineSshDispatchService:
 
 class CheckpointPublicationInterrupted(RuntimeError):
     """Raised when retry must reconcile a possibly successful publication."""
+
+
+class FinalAuditPreparationError(RuntimeError):
+    """A bounded fail-closed reason for fresh Audit generation preparation."""
+
+    def __init__(self, error_code: str) -> None:
+        super().__init__(error_code)
+        self.error_code = error_code

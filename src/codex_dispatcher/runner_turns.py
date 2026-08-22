@@ -15,6 +15,7 @@ from codex_dispatcher.codex_jsonl import (
     MAX_EVENT_BYTES,
     CodexJsonlError,
     CodexTerminalStatus,
+    is_context_failure,
     parse_codex_jsonl,
 )
 from codex_dispatcher.delegation_evidence import (
@@ -578,6 +579,11 @@ class RunnerTurnExecutor:
         if command.returncode != 0 or summary.status is not (
             CodexTerminalStatus.COMPLETED
         ):
+            if is_context_failure(summary):
+                return self._context_failure_reply(
+                    request,
+                    session_id=summary.session_id,
+                )
             return self._failed_reply(
                 request,
                 "codex_turn_failed",
@@ -642,6 +648,35 @@ class RunnerTurnExecutor:
             usage=summary.usage,
             delegation_receipt=delegation_receipt,
             **self._v2_reply_fields(request),
+        )
+
+    def _context_failure_reply(
+        self,
+        request: RunnerRequest,
+        *,
+        session_id: str,
+    ) -> RunnerTurnReply:
+        """Return trusted post-process Git evidence for bounded context failures."""
+        try:
+            checkpoint = self._workspace.checkpoint_state(request.work_item_id)
+        except RunnerWorkspaceError:
+            return self._failed_reply(
+                request,
+                "session_context_failure_state_unverified",
+                session_id=session_id,
+            )
+        if not checkpoint.worktree_clean:
+            error_code = "session_context_failure_dirty_worktree"
+        elif checkpoint.head_sha != request.input_head_sha:
+            error_code = "session_context_failure_unpublished_head"
+        else:
+            error_code = "session_context_failure_clean"
+        return self._failed_reply(
+            request,
+            error_code,
+            session_id=session_id,
+            failure_head_sha=checkpoint.head_sha,
+            worktree_clean=checkpoint.worktree_clean,
         )
 
     def _docker_authentication_is_ready(
@@ -715,6 +750,8 @@ class RunnerTurnExecutor:
         error_code: str,
         *,
         session_id: str | None = None,
+        failure_head_sha: str | None = None,
+        worktree_clean: bool | None = None,
     ) -> RunnerTurnReply:
         assert request.turn_id is not None
         return RunnerTurnReply(
@@ -724,6 +761,8 @@ class RunnerTurnExecutor:
             RunnerTurnRemoteState.FAILED,
             session_id=session_id,
             error_code=error_code,
+            failure_head_sha=failure_head_sha,
+            worktree_clean=worktree_clean,
             **cls._v2_reply_fields(request),
         )
 

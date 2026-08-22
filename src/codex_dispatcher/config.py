@@ -473,11 +473,6 @@ def _parse_session_runtime(value: Any) -> SessionRuntimeConfig:
         table["rotate_before_final_audit"],
         "session_runtime.rotate_before_final_audit",
     )
-    if rotate_before_final_audit:
-        raise ValueError(
-            "session_runtime.rotate_before_final_audit=true is not supported; "
-            "fresh audit generation is not implemented"
-        )
     return SessionRuntimeConfig(
         protocol_version=protocol_version,
         agent_policy_digest=_lowercase_sha256(

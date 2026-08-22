@@ -53,6 +53,9 @@ class FakeTurnFixture:
     result: AgentResult
     artifact: bytes | None = None
     usage: CodexTurnUsage = CodexTurnUsage(0, 0, 0, 0, 0)
+    error_code: str | None = None
+    failure_head_sha: str | None = None
+    worktree_clean: bool | None = None
 
 
 @dataclass(slots=True)
@@ -239,26 +242,42 @@ class FakeSshRunnerTransport:
             ):
                 raise RunnerTransportRejected("fake Runner resume session conflict")
             session_id = current.session_id
-        result_json = agent_result_to_json(fixture.result)
-        reply = RunnerTurnReply(
-            operation=request.operation,
-            work_item_id=request.work_item_id,
-            turn_id=request.turn_id,
-            state=RunnerTurnRemoteState.FINISHED,
-            session_id=session_id,
-            head_sha=fixture.head_sha,
-            output_sha256=sha256(result_json.encode("utf-8")).hexdigest(),
-            result=fixture.result,
-            version=request.version,
-            session_generation_id=request.session_generation_id,
-            session_generation=request.session_generation,
-            agent_policy_digest=request.agent_policy_digest,
-            usage=(
-                fixture.usage
-                if request.version == NEXT_PROTOCOL_VERSION
-                else None
-            ),
-        )
+        if fixture.error_code is None:
+            result_json = agent_result_to_json(fixture.result)
+            reply = RunnerTurnReply(
+                operation=request.operation,
+                work_item_id=request.work_item_id,
+                turn_id=request.turn_id,
+                state=RunnerTurnRemoteState.FINISHED,
+                session_id=session_id,
+                head_sha=fixture.head_sha,
+                output_sha256=sha256(result_json.encode("utf-8")).hexdigest(),
+                result=fixture.result,
+                version=request.version,
+                session_generation_id=request.session_generation_id,
+                session_generation=request.session_generation,
+                agent_policy_digest=request.agent_policy_digest,
+                usage=(
+                    fixture.usage
+                    if request.version == NEXT_PROTOCOL_VERSION
+                    else None
+                ),
+            )
+        else:
+            reply = RunnerTurnReply(
+                operation=request.operation,
+                work_item_id=request.work_item_id,
+                turn_id=request.turn_id,
+                state=RunnerTurnRemoteState.FAILED,
+                session_id=session_id,
+                error_code=fixture.error_code,
+                failure_head_sha=fixture.failure_head_sha,
+                worktree_clean=fixture.worktree_clean,
+                version=request.version,
+                session_generation_id=request.session_generation_id,
+                session_generation=request.session_generation,
+                agent_policy_digest=request.agent_policy_digest,
+            )
         current.head_sha = fixture.head_sha
         self._turn_replies[(request.work_item_id, request.turn_id)] = reply
         if fixture.artifact is not None:
@@ -287,6 +306,8 @@ class FakeSshRunnerTransport:
                 output_sha256=reply.output_sha256,
                 result=reply.result,
                 error_code=reply.error_code,
+                failure_head_sha=reply.failure_head_sha,
+                worktree_clean=reply.worktree_clean,
                 version=reply.version,
                 session_generation_id=reply.session_generation_id,
                 session_generation=reply.session_generation,
