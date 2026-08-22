@@ -7,6 +7,7 @@ from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from codex_dispatcher.ci_evidence import (
     ActionsEvidenceSnapshot,
@@ -32,6 +33,7 @@ from codex_dispatcher.testing.fakes import FakeTracker
 from codex_dispatcher.trackers.base import TaskState
 from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator
 from codex_dispatcher.work_items import TurnState, WorkItemState
+from codex_dispatcher.work_item_lifecycle import WorkItemArchiveStatus
 from tests.test_scheduler import make_config
 from tests.test_ssh_dispatch_planning import BASE_SHA, claimed_task
 
@@ -107,6 +109,118 @@ def session_runtime_config(**overrides: object) -> SessionRuntimeConfig:
 
 
 class OfflineSshDispatchServiceTests(unittest.TestCase):
+    def test_archive_lost_receipt_reconciles_with_status_before_retry(self) -> None:
+        task = claimed_task()
+        work_item = self.service.resolve_and_prepare(
+            task,
+            base_sha=BASE_SHA,
+            source_bundle=source_bundle(),
+        )
+        head_sha = "f" * 40
+        self.store.record_published_sha(
+            work_item.work_item_id,
+            previous_sha=BASE_SHA,
+            head_sha=head_sha,
+        )
+        # The in-memory fake models the already-published Runner checkpoint.
+        self.transport.set_head(work_item.work_item_id, head_sha)
+        self.store.update_work_item_state(
+            work_item.work_item_id, WorkItemState.RUNNING
+        )
+        self.store.update_work_item_state(
+            work_item.work_item_id, WorkItemState.REVIEW
+        )
+        self.store.update_work_item_state(
+            work_item.work_item_id,
+            WorkItemState.COMPLETED,
+            updated_at="2026-02-01T00:00:00+00:00",
+        )
+        self.transport.interrupt_next(RunnerOperation.ARCHIVE)
+
+        original_invoke = self.transport.invoke
+
+        def invoke_after_durable_ambiguity(*args: object, **kwargs: object):
+            persisted = self.store.get_work_item_archive(work_item.work_item_id)
+            self.assertIsNotNone(persisted)
+            assert persisted is not None
+            self.assertIs(WorkItemArchiveStatus.AMBIGUOUS, persisted.status)
+            return original_invoke(*args, **kwargs)
+
+        with patch.object(self.transport, "invoke", invoke_after_durable_ambiguity):
+            ambiguous = self.service.archive_completed_work_item(
+                work_item.work_item_id,
+                eligible_at="2026-02-08T00:00:00+00:00",
+            )
+        self.assertIs(WorkItemArchiveStatus.AMBIGUOUS, ambiguous.status)
+        self.assertEqual(RunnerOperation.ARCHIVE, self.transport.calls[-1].operation)
+
+        self.transport.reject_next(RunnerOperation.ARCHIVE_STATUS)
+        still_ambiguous = self.service.reconcile_work_item_archive(
+            work_item.work_item_id
+        )
+        self.assertIs(WorkItemArchiveStatus.AMBIGUOUS, still_ambiguous.status)
+
+        archived = self.service.reconcile_work_item_archive(work_item.work_item_id)
+        self.assertIs(WorkItemArchiveStatus.ARCHIVED, archived.status)
+        self.assertEqual(
+            [
+                RunnerOperation.ARCHIVE,
+                RunnerOperation.ARCHIVE_STATUS,
+                RunnerOperation.ARCHIVE_STATUS,
+            ],
+            [call.operation for call in self.transport.calls[-3:]],
+        )
+
+    def test_archive_rejection_requires_status_before_retry(self) -> None:
+        work_item = self.service.resolve_and_prepare(
+            claimed_task(),
+            base_sha=BASE_SHA,
+            source_bundle=source_bundle(),
+        )
+        head_sha = "e" * 40
+        self.store.record_published_sha(
+            work_item.work_item_id,
+            previous_sha=BASE_SHA,
+            head_sha=head_sha,
+        )
+        self.transport.set_head(work_item.work_item_id, head_sha)
+        self.store.update_work_item_state(
+            work_item.work_item_id, WorkItemState.RUNNING
+        )
+        self.store.update_work_item_state(
+            work_item.work_item_id, WorkItemState.REVIEW
+        )
+        self.store.update_work_item_state(
+            work_item.work_item_id,
+            WorkItemState.COMPLETED,
+            updated_at="2026-02-01T00:00:00+00:00",
+        )
+        self.transport.reject_next(RunnerOperation.ARCHIVE)
+
+        ambiguous = self.service.archive_completed_work_item(
+            work_item.work_item_id,
+            eligible_at="2026-02-08T00:00:00+00:00",
+        )
+        retry_ready = self.service.reconcile_work_item_archive(
+            work_item.work_item_id
+        )
+        archived = self.service.archive_completed_work_item(
+            work_item.work_item_id,
+            eligible_at="2026-02-08T00:00:00+00:00",
+        )
+
+        self.assertIs(WorkItemArchiveStatus.AMBIGUOUS, ambiguous.status)
+        self.assertIs(WorkItemArchiveStatus.PREPARED, retry_ready.status)
+        self.assertIs(WorkItemArchiveStatus.ARCHIVED, archived.status)
+        self.assertEqual(
+            [
+                RunnerOperation.ARCHIVE,
+                RunnerOperation.ARCHIVE_STATUS,
+                RunnerOperation.ARCHIVE,
+            ],
+            [call.operation for call in self.transport.calls[-3:]],
+        )
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.store = StateStore(Path(self.temp_dir.name) / "state.db")

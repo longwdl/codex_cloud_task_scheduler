@@ -323,9 +323,10 @@ class SshControlSweepTests(unittest.TestCase):
         delivery: GitHubDeliveryCoordinator | None = None,
         slack_delivery: SlackDeliveryCoordinator | None = None,
         completion_candidate_hook=None,
+        config=None,
     ) -> SshControlSweep:
         return SshControlSweep(
-            config=make_config(global_max_active=4),
+            config=config or make_config(global_max_active=4),
             store=self.store,
             tracker=tracker,
             dispatch=self.dispatch,
@@ -657,6 +658,66 @@ class SshControlSweepTests(unittest.TestCase):
         self.assertEqual(ControlSweepStatus.IDLE, idle.status)
         self.assertFalse(
             any(call.method in {"upsert_run_comment", "set_state"} for call in tracker.calls)
+        )
+
+    def test_completed_retention_reconciles_archive_receipt_loss_then_idles(self) -> None:
+        tracker = FakeTracker()
+        task = replace(
+            claimed_task(),
+            state=TaskState.COMPLETED,
+            labels=("agent:completed", "exec:ssh-cli", "priority:p1"),
+        )
+        tracker.tasks[task.task_id] = task
+        item = self.dispatch.resolve_and_prepare(
+            claimed_task(),
+            base_sha=BASE_SHA,
+            source_bundle=_bundle(),
+        )
+        head_sha = "d" * 40
+        self.store.record_published_sha(
+            item.work_item_id,
+            previous_sha=BASE_SHA,
+            head_sha=head_sha,
+        )
+        self.transport.set_head(item.work_item_id, head_sha)
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.RUNNING)
+        item = self.store.update_work_item_state(
+            item.work_item_id, WorkItemState.REVIEW
+        )
+        item = self.store.bind_draft_pr(item.work_item_id, 7)
+        item = self.store.update_work_item_state(
+            item.work_item_id,
+            WorkItemState.COMPLETED,
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        tracker.pull_requests[(item.repository, item.task_branch)] = PullRequest(
+            number=7,
+            url="https://github.com/owner/repo/pull/7",
+            branch_name=item.task_branch,
+            title="Codex work",
+            is_draft=False,
+            base_branch=item.base_branch,
+            state=PullRequestState.MERGED,
+            head_sha=head_sha,
+        )
+        config = replace(
+            make_config(global_max_active=4),
+            ssh_runtime=SimpleNamespace(completed_retention_seconds=1),
+        )
+        sweep = self._sweep(tracker, _RecordingSource(), config=config)
+        self.transport.calls.clear()
+        self.transport.interrupt_next(RunnerOperation.ARCHIVE)
+
+        awaiting = sweep.run_once()
+        reconciled = sweep.run_once()
+        idle = sweep.run_once()
+
+        self.assertEqual(ControlSweepStatus.AWAITING_ARCHIVE, awaiting.status)
+        self.assertEqual(ControlSweepStatus.ARCHIVED, reconciled.status)
+        self.assertEqual(ControlSweepStatus.IDLE, idle.status)
+        self.assertEqual(
+            [RunnerOperation.ARCHIVE, RunnerOperation.ARCHIVE_STATUS],
+            [call.operation for call in self.transport.calls],
         )
 
     def test_lost_completion_comment_receipt_retries_projection_only(self) -> None:

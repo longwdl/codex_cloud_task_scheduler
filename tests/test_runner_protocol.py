@@ -182,6 +182,23 @@ class RunnerProtocolTests(unittest.TestCase):
                 with self.assertRaises(RunnerProtocolError):
                     RunnerRequest(operation, WORK_ITEM, version=NEXT_PROTOCOL_VERSION, **fields)
 
+    def test_v2_archive_requests_require_exact_head_and_reject_v1_status(self) -> None:
+        for operation in (
+            RunnerOperation.ARCHIVE,
+            RunnerOperation.ARCHIVE_STATUS,
+        ):
+            request = RunnerRequest(
+                operation,
+                WORK_ITEM,
+                version=NEXT_PROTOCOL_VERSION,
+                expected_head_sha="c" * 40,
+            )
+            self.assertEqual(request, parse_runner_request(request.to_json()))
+            with self.assertRaises(RunnerProtocolError):
+                RunnerRequest(operation, WORK_ITEM, version=NEXT_PROTOCOL_VERSION)
+        with self.assertRaises(RunnerProtocolError):
+            RunnerRequest(RunnerOperation.ARCHIVE_STATUS, WORK_ITEM)
+
     def test_agent_result_is_strict_bounded_and_path_safe(self) -> None:
         payload = {
             "status": "needs_input",

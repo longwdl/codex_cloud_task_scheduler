@@ -801,8 +801,10 @@ Codex tools、wrapper、Schema、配置和 SSH 授权由 root 管理；协议账
 ### 11.4 资源和保留
 
 - 单个 WorkItem 默认磁盘预算 20 GiB；大型项目显式提高。
-- completed WorkItem 默认保留 7 天后归档。
-- 每个 WorkItem 的 `repo/`、`runner-state/` 和 manifest 同生共灭；共享 `CODEX_HOME` 不随单个
+- `completed_retention_seconds` 显式配置后，completed WorkItem 默认保留 7 天再归档；缺省不启用
+  自动清理。
+- 每个 WorkItem 的 `repo/`、`runner-state/`、generation home 和独立 auth copy 同生共灭；Runner
+  registry、永久 archive tombstone、共享 auth seed/policy/tools 及 Control SQLite 不随单个
   WorkItem 清理。
 - 不自动删除 `blocked` 或 `needs_input` WorkItem。
 - Control Host 每日 SQLite online backup，并保留 GitHub/Slack 映射。
@@ -893,6 +895,7 @@ git diff --check
 | AC-067 | exact-HEAD 完成门 | v2 `completed` 只成为 `published` 候选；配置内全部 Actions checks、结构化 AC 和完整 publication ledger 绑定同一远端 HEAD 后才原子进入 finished/review；pending 不重跑 Codex/Publisher，失败或身份/权限歧义 blocked |
 | AC-068 | fresh Final Audit | Implementation gate 通过后使用新 `audit` generation、独立 session、`completion_candidate` Handoff 和明确 Audit prompt；Audit 可提交范围内修复但必须再次通过完成门，崩溃恢复不重复 rotation，generation 预算不足时 blocked |
 | AC-069 | context failure 安全换代 | 只识别有限的 context/compaction 错误；Runner 必须证明 worktree clean 且 HEAD 等于 Turn input，才原子记录 receipt、interrupt Turn 并通过 `context_failure` Handoff 新建 generation，旧 session 不 resume；dirty、moved HEAD 或状态不明均 blocked |
+| AC-070 | completed WorkItem 生命周期和磁盘回收 | 仅显式保留期届满且本地/Issue completed、exact bound PR 在 persisted SHA 合并的单项进入 schema-12 ledger；Runner 在全局锁内证明 clean exact HEAD、全部 Turn finished、v2 容器 inactive 后先写 metadata-bound 永久 tombstone，再原子 staging 并只回收该 WorkItem；SSH 丢回执先 `ARCHIVE_STATUS`，不得盲重放；blocked/needs_input/review/active、registry/tombstone、共享 Runner 状态和完整 Control/GitHub/Slack 证据均保留 |
 
 ### 12.3 Live Fixture 顺序
 

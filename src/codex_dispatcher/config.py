@@ -63,6 +63,7 @@ class SshRuntimeConfig:
     operation_timeout_seconds: int
     assh_proxy_path: Path | None = None
     assh_home: Path | None = None
+    completed_retention_seconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +124,13 @@ def _positive_int(value: Any, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{path} must be a positive integer")
     return value
+
+
+def _retention_seconds(value: Any, path: str) -> int:
+    parsed = _positive_int(value, path)
+    if parsed > 10 * 366 * 24 * 60 * 60:
+        raise ValueError(f"{path} must not exceed ten years")
+    return parsed
 
 
 def _boolean(value: Any, path: str) -> bool:
@@ -334,7 +342,9 @@ def _parse_ssh_runtime(value: Any) -> SshRuntimeConfig:
             "operation_timeout_seconds",
         }
     )
-    optional = frozenset({"assh_proxy_path", "assh_home"})
+    optional = frozenset(
+        {"assh_proxy_path", "assh_home", "completed_retention_seconds"}
+    )
     unknown = set(table) - required - optional
     missing = required - set(table)
     if unknown:
@@ -403,6 +413,14 @@ def _parse_ssh_runtime(value: Any) -> SshRuntimeConfig:
         assh_home=(
             _absolute_path(table["assh_home"], "ssh_runtime.assh_home")
             if home_present
+            else None
+        ),
+        completed_retention_seconds=(
+            _retention_seconds(
+                table["completed_retention_seconds"],
+                "ssh_runtime.completed_retention_seconds",
+            )
+            if "completed_retention_seconds" in table
             else None
         ),
     )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from datetime import datetime, timezone
 from hashlib import sha256
 
 from codex_dispatcher.codex_jsonl import CodexTurnUsage
@@ -13,11 +14,14 @@ from codex_dispatcher.runner_protocol import (
     parse_agent_result,
 )
 from codex_dispatcher.runner_transport import (
+    RunnerArchiveReply,
+    RunnerArchiveState,
     RunnerAck,
     RunnerExportReply,
     RunnerTurnRemoteState,
     RunnerTurnReply,
     parse_runner_ack,
+    parse_runner_archive_reply,
     parse_runner_export_reply,
     parse_runner_turn_reply,
 )
@@ -307,6 +311,36 @@ class RunnerTransportContractTests(unittest.TestCase):
         self.assertEqual(artifact, parsed.validate_artifact(artifact))
         with self.assertRaisesRegex(RunnerProtocolError, "hash"):
             parsed.validate_artifact(b"other-artifact!")
+
+    def test_archive_replies_are_strict_and_operation_bound(self) -> None:
+        archived_at = datetime.now(timezone.utc).isoformat()
+        reply = RunnerArchiveReply(
+            RunnerOperation.ARCHIVE,
+            WORK_ITEM,
+            "c" * 40,
+            RunnerArchiveState.ARCHIVED,
+            archived_at=archived_at,
+            reclaimed_bytes=42,
+        )
+        self.assertEqual(reply, parse_runner_archive_reply(reply.to_json()))
+        active = RunnerArchiveReply(
+            RunnerOperation.ARCHIVE_STATUS,
+            WORK_ITEM,
+            "c" * 40,
+            RunnerArchiveState.ACTIVE,
+        )
+        self.assertEqual(active, parse_runner_archive_reply(active.to_json()))
+        payload = json.loads(reply.to_json())
+        payload["unexpected"] = True
+        with self.assertRaises(RunnerProtocolError):
+            parse_runner_archive_reply(json.dumps(payload))
+        with self.assertRaises(RunnerProtocolError):
+            RunnerArchiveReply(
+                RunnerOperation.ARCHIVE,
+                WORK_ITEM,
+                "c" * 40,
+                RunnerArchiveState.ARCHIVING,
+            )
 
 
 if __name__ == "__main__":

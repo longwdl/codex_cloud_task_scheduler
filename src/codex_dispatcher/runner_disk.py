@@ -122,6 +122,22 @@ class FusedWorkItemDisk:
         self._validate_image(path)
         return True
 
+    def assert_turn_admission(self) -> None:
+        """Reject a new Turn below the fixed host reserve or 15% free space."""
+        self._prepare_image_root()
+        try:
+            filesystem = os.statvfs(self._runtime.image_directory)
+        except OSError as exc:
+            raise RunnerDiskError("host free space is unavailable") from exc
+        capacity = filesystem.f_blocks * filesystem.f_frsize
+        available = filesystem.f_bavail * filesystem.f_frsize
+        if (
+            capacity <= 0
+            or available < self._runtime.host_reserve_bytes
+            or available * 100 < capacity * 15
+        ):
+            raise RunnerDiskError("host free space is below the Turn admission boundary")
+
     def ensure_mounted(self, work_item_id: str, mountpoint: Path) -> None:
         work_item_id = validate_work_item_id(work_item_id)
         self._prepare_image_root()
@@ -190,6 +206,55 @@ class FusedWorkItemDisk:
             raise RunnerDiskError("WorkItem disk image could not be committed") from exc
         self.ensure_mounted(work_item_id, mountpoint)
 
+    def archive(self, work_item_id: str, mountpoint: Path) -> int:
+        """Unmount and reclaim one exact image after a durable workspace tombstone."""
+        work_item_id = validate_work_item_id(work_item_id)
+        self._prepare_image_root()
+        self._validate_mountpoint_path(mountpoint)
+        image = self._image_path(work_item_id)
+        archived_image = self._archive_directory() / f"{work_item_id}.ext4"
+        image_exists = image.exists() or image.is_symlink()
+        archived_exists = archived_image.exists() or archived_image.is_symlink()
+        if image_exists and archived_exists:
+            raise RunnerDiskError("WorkItem archive image state is ambiguous")
+        if image_exists:
+            self._validate_image(image)
+        if archived_exists:
+            self._validate_image(archived_image)
+
+        record = self._mount_record(mountpoint)
+        if record is not None:
+            if not image_exists:
+                raise RunnerDiskError("archived WorkItem image remains mounted")
+            self._validate_mount_record(record, image=image, mountpoint=mountpoint)
+            self._unmount(mountpoint)
+        self._ensure_empty_mountpoint(mountpoint)
+
+        if image_exists:
+            try:
+                os.replace(image, archived_image)
+                self._fsync_directory(self._runtime.image_directory)
+                self._fsync_directory(self._archive_directory())
+            except OSError as exc:
+                raise RunnerDiskError(
+                    "WorkItem disk image could not enter archive staging"
+                ) from exc
+            archived_exists = True
+        if archived_exists:
+            try:
+                archived_image.unlink()
+                self._fsync_directory(self._archive_directory())
+            except OSError as exc:
+                raise RunnerDiskError("WorkItem disk image could not be reclaimed") from exc
+        try:
+            mountpoint.rmdir()
+            mountpoint.parent.rmdir()
+        except OSError:
+            # Parent cleanup is cosmetic. The protected image is already reclaimed,
+            # and a non-empty or concurrently inspected directory must be preserved.
+            pass
+        return self._runtime.image_size_bytes
+
     def _prepare_image_root(self) -> None:
         self._protected_directory(self._runtime.image_directory, "disk image directory")
         staging = self._staging_directory()
@@ -198,6 +263,12 @@ class FusedWorkItemDisk:
         except OSError as exc:
             raise RunnerDiskError("disk staging directory is unavailable") from exc
         self._protected_directory(staging, "disk staging directory")
+        archive = self._archive_directory()
+        try:
+            archive.mkdir(mode=0o700, exist_ok=True)
+        except OSError as exc:
+            raise RunnerDiskError("disk archive directory is unavailable") from exc
+        self._protected_directory(archive, "disk archive directory")
 
     def _reject_staging_ambiguity(self, work_item_id: str) -> None:
         staging = self._staging_directory()
@@ -481,6 +552,9 @@ class FusedWorkItemDisk:
 
     def _staging_directory(self) -> Path:
         return self._runtime.image_directory / ".staging"
+
+    def _archive_directory(self) -> Path:
+        return self._runtime.image_directory / ".archive"
 
     @staticmethod
     def _available_bytes(path: Path) -> int:

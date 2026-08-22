@@ -349,6 +349,29 @@ Issue comment while preserving any durable Slack permalink, and only then change
 `agent:completed`. If either GitHub write loses its receipt, the next sweep retries only this Issue
 projection; it cannot invoke the Runner or Publisher, create another PR, or reopen the WorkItem.
 The dispatcher never performs the merge, closes the Issue, deletes the branch, or bypasses checks.
+
+Completed workspace reclamation is a separate, explicitly configured lifecycle. When
+`completed_retention_seconds` is absent it is disabled. After the retention interval, recovery again
+requires the local `completed` tombstone, the completed Issue, and the exact bound merged PR at
+`last_published_sha`. It then prepares one schema-12 archive record and sends a protocol-v2
+`ARCHIVE(expected_head_sha)` request for at most one WorkItem in the sweep. Before crossing SSH,
+Control durably marks the request `ambiguous`; a lost response or generic Runner rejection cannot
+prove that no tombstone/staging effect occurred. The next sweep therefore sends only
+`ARCHIVE_STATUS` before deciding whether an idempotent archive continuation is allowed. The Control
+database retains the request digest, Runner receipt digest, reclaimed byte count, GitHub/Slack
+bindings, and all WorkItem/Turn evidence.
+
+The Runner accepts archive operations only under its global operation lock. Before its first
+destructive step it proves the registry identity, exact clean branch HEAD, every durable Turn record
+is finished, and every deterministic v2 container is absent or stopped. It then writes a permanent
+metadata-bound tombstone, atomically stages exactly that WorkItem directory or ext4 image, reclaims
+the staged object, and records the final receipt. `prepared` or `archiving` tombstones are resumable;
+an archived WorkItem can never be prepared or executed again. The registry and tombstone remain,
+while the per-WorkItem `repo/`, `runner-state/`, generation homes, and auth copy are reclaimed.
+Runner-wide policy, tools, shared auth seed, and Control evidence are never part of this deletion.
+`blocked`, `waiting_input`, `review`, active, dirty, moved-HEAD, or externally ambiguous WorkItems are
+not eligible.
+
 Likewise, an ambiguous Slack root response is reconciled before Codex starts. An ambiguous terminal
 Slack response is retried from the durable Turn and outbox identity after the commit/PR work is
 already complete; it cannot restart Codex, repeat a push, or create another PR. The terminal Issue
@@ -382,6 +405,8 @@ shell fragment from the runner or issue.
 - Only the Publisher can push, and only an exact verified SHA to the recorded task branch.
 - Only an already-human-merged, exact bound PR can move a WorkItem to the terminal `completed`
   tombstone; that tombstone cannot be reactivated.
+- Only an explicitly retained, exact merged `completed` WorkItem can enter the Runner archive
+  lifecycle; the permanent Runner tombstone and complete Control ledger survive disk reclamation.
 - No force push, ref deletion, tag write, protected-branch write, merge, deployment, or release.
 - Slack is never an input or control channel.
 - Unknown external state is never success and is never resolved by blind replay.

@@ -49,6 +49,7 @@ publisher_temporary_root = "/var/lib/codex-dispatcher/publisher-temporary"
 runner_root = "/srv/codex-runner/work-items"
 connect_timeout_seconds = 10
 operation_timeout_seconds = 3900
+completed_retention_seconds = 604800
 '''
 
 SLACK_RUNTIME = '''
@@ -120,7 +121,6 @@ class ConfigTests(unittest.TestCase):
                     'allowed_paths = [".github/workflows"]',
                 )
             )
-
     def test_optional_ssh_runtime_is_strict_and_secret_free(self) -> None:
         configured = VALID.replace(
             'codex_version = "0.1.0"',
@@ -132,6 +132,29 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(Path("/usr/bin/ssh"), runtime.ssh_path)
         self.assertEqual("/srv/codex-runner/work-items", runtime.runner_root)
         self.assertIsNone(runtime.assh_proxy_path)
+        self.assertEqual(604800, runtime.completed_retention_seconds)
+
+        without_retention = self._load(
+            (configured + SSH_RUNTIME).replace(
+                "completed_retention_seconds = 604800\n", ""
+            )
+        ).ssh_runtime
+        assert without_retention is not None
+        self.assertIsNone(without_retention.completed_retention_seconds)
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            self._load(
+                (configured + SSH_RUNTIME).replace(
+                    "completed_retention_seconds = 604800",
+                    "completed_retention_seconds = 0",
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "ten years"):
+            self._load(
+                (configured + SSH_RUNTIME).replace(
+                    "completed_retention_seconds = 604800",
+                    "completed_retention_seconds = 9999999999",
+                )
+            )
 
         with self.assertRaisesRegex(ValueError, "configured together"):
             self._load(

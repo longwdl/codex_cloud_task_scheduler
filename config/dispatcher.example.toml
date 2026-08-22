@@ -27,6 +27,8 @@ publisher_temporary_root = "/var/lib/codex-dispatcher/publisher-temporary"
 runner_root = "/srv/codex-runner/work-items"
 connect_timeout_seconds = 10
 operation_timeout_seconds = 3900
+# Omit to disable automatic reclamation. Seven days is the reviewed default.
+completed_retention_seconds = 604800
 
 # Protocol v2 session generations are disabled when this table is absent.
 # Keep it commented until the matching Control Host and Runner v2 runtime wiring

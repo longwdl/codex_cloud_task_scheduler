@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from hashlib import sha256
 from typing import Any, Protocol
@@ -106,6 +107,110 @@ class RunnerAck:
                 "state": "ok",
             }
         )
+
+
+class RunnerArchiveState(StrEnum):
+    ACTIVE = "active"
+    ARCHIVING = "archiving"
+    ARCHIVED = "archived"
+
+
+@dataclass(frozen=True, slots=True)
+class RunnerArchiveReply:
+    operation: RunnerOperation
+    work_item_id: str
+    expected_head_sha: str
+    state: RunnerArchiveState
+    archived_at: str | None = None
+    reclaimed_bytes: int | None = None
+    version: int = NEXT_PROTOCOL_VERSION
+
+    def __post_init__(self) -> None:
+        if self.operation not in {
+            RunnerOperation.ARCHIVE,
+            RunnerOperation.ARCHIVE_STATUS,
+        }:
+            raise RunnerProtocolError("operation does not return an archive reply")
+        if self.version != NEXT_PROTOCOL_VERSION:
+            raise RunnerProtocolError("unsupported Runner archive response version")
+        validate_work_item_id(self.work_item_id)
+        validate_git_sha(self.expected_head_sha, "expected_head_sha")
+        if not isinstance(self.state, RunnerArchiveState):
+            raise RunnerProtocolError("Runner archive state is invalid")
+        if self.state is RunnerArchiveState.ARCHIVED:
+            if not isinstance(self.archived_at, str):
+                raise RunnerProtocolError("archived Runner reply requires archived_at")
+            try:
+                parsed = datetime.fromisoformat(self.archived_at)
+            except ValueError as exc:
+                raise RunnerProtocolError("Runner archived_at is invalid") from exc
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise RunnerProtocolError("Runner archived_at must include a timezone")
+            if (
+                type(self.reclaimed_bytes) is not int
+                or self.reclaimed_bytes < 0
+            ):
+                raise RunnerProtocolError(
+                    "archived Runner reply requires non-negative reclaimed_bytes"
+                )
+        elif self.archived_at is not None or self.reclaimed_bytes is not None:
+            raise RunnerProtocolError(
+                "non-archived Runner reply cannot contain archive receipt fields"
+            )
+        if (
+            self.operation is RunnerOperation.ARCHIVE
+            and self.state is not RunnerArchiveState.ARCHIVED
+        ):
+            raise RunnerProtocolError("ARCHIVE must return a completed archive receipt")
+
+    def to_json(self) -> str:
+        payload: dict[str, object] = {
+            "version": self.version,
+            "op": self.operation.value,
+            "work_item_id": self.work_item_id,
+            "expected_head_sha": self.expected_head_sha,
+            "state": self.state.value,
+        }
+        if self.archived_at is not None:
+            payload["archived_at"] = self.archived_at
+        if self.reclaimed_bytes is not None:
+            payload["reclaimed_bytes"] = self.reclaimed_bytes
+        return _dump(payload)
+
+
+def parse_runner_archive_reply(value: str | bytes) -> RunnerArchiveReply:
+    payload = _load(value)
+    base = {
+        "version",
+        "op",
+        "work_item_id",
+        "expected_head_sha",
+        "state",
+    }
+    try:
+        operation = RunnerOperation(payload.get("op"))
+        state = RunnerArchiveState(payload.get("state"))
+    except (TypeError, ValueError) as exc:
+        raise RunnerProtocolError("Runner archive response identity is invalid") from exc
+    expected = (
+        base | {"archived_at", "reclaimed_bytes"}
+        if state is RunnerArchiveState.ARCHIVED
+        else base
+    )
+    if set(payload) != expected:
+        raise RunnerProtocolError("Runner archive response fields are invalid")
+    try:
+        return RunnerArchiveReply(
+            operation=operation,
+            work_item_id=payload["work_item_id"],
+            expected_head_sha=payload["expected_head_sha"],
+            state=state,
+            archived_at=payload.get("archived_at"),
+            reclaimed_bytes=payload.get("reclaimed_bytes"),
+            version=payload["version"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise RunnerProtocolError(str(exc)) from exc
 
 
 def parse_runner_ack(value: str | bytes) -> RunnerAck:

@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from codex_dispatcher.command_runner import CommandResult
@@ -57,6 +58,43 @@ def runtime(root: Path) -> tuple[WorkItemDiskRuntime, Path]:
 
 
 class RunnerDiskTests(unittest.TestCase):
+    def test_turn_admission_requires_reserve_and_fifteen_percent_free(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            configured, work_items = runtime(root)
+            disk = FusedWorkItemDisk(configured, work_items_root=work_items)
+            accepted = SimpleNamespace(
+                f_blocks=1024, f_frsize=1024 * 1024, f_bavail=205
+            )
+            low = SimpleNamespace(
+                f_blocks=1024, f_frsize=1024 * 1024, f_bavail=143
+            )
+            with patch("codex_dispatcher.runner_disk.os.statvfs", return_value=accepted):
+                disk.assert_turn_admission()
+            with (
+                patch("codex_dispatcher.runner_disk.os.statvfs", return_value=low),
+                self.assertRaisesRegex(RunnerDiskError, "admission"),
+            ):
+                disk.assert_turn_admission()
+    def test_archive_unmounts_stages_and_reclaims_only_exact_image(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            configured, work_items = runtime(root)
+            disk = FusedWorkItemDisk(configured, work_items_root=work_items)
+            image = configured.image_directory / f"{WORK_ITEM}.ext4"
+            allocate_dense(image)
+            mountpoint = work_items / "owner__repo" / "issue-1"
+            mountpoint.parent.mkdir(mode=0o700)
+            mountpoint.mkdir(mode=0o700)
+            with patch.object(disk, "_mount_record", return_value=None):
+                reclaimed = disk.archive(WORK_ITEM, mountpoint)
+                repeated = disk.archive(WORK_ITEM, mountpoint)
+            self.assertEqual(IMAGE_BYTES, reclaimed)
+            self.assertEqual(IMAGE_BYTES, repeated)
+            self.assertFalse(image.exists())
+            self.assertFalse(
+                (configured.image_directory / ".archive" / image.name).exists()
+            )
     def test_format_preserves_dense_preallocation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

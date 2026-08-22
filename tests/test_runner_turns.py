@@ -15,8 +15,10 @@ from codex_dispatcher.runner_protocol import (
 )
 from codex_dispatcher.runner_service import LinuxRunnerService, serve_one
 from codex_dispatcher.runner_transport import (
+    RunnerArchiveState,
     RunnerTurnRemoteState,
     parse_runner_ack,
+    parse_runner_archive_reply,
     parse_runner_turn_reply,
 )
 from codex_dispatcher.runner_turns import RunnerTurnError, RunnerTurnExecutor
@@ -356,6 +358,39 @@ class RunnerTurnExecutorTests(unittest.TestCase):
             reply = parse_runner_turn_reply(turn_output.payload)
             self.assertEqual(RunnerTurnRemoteState.FINISHED, reply.state)
             self.assertIsNone(turn_output.artifact)
+            assert reply.head_sha is not None
+            archived_output = decode_runner_output(
+                service.handle_frame(
+                    encode_runner_input(
+                        RunnerRequest(
+                            RunnerOperation.ARCHIVE,
+                            WORK_ITEM,
+                            version=NEXT_PROTOCOL_VERSION,
+                            expected_head_sha=reply.head_sha,
+                        )
+                    )
+                )
+            )
+            archived = parse_runner_archive_reply(archived_output.payload)
+            self.assertIs(RunnerArchiveState.ARCHIVED, archived.state)
+            self.assertFalse(
+                (root / "runner" / "owner__repo" / "issue-42").exists()
+            )
+            repeated = parse_runner_archive_reply(
+                decode_runner_output(
+                    service.handle_frame(
+                        encode_runner_input(
+                            RunnerRequest(
+                                RunnerOperation.ARCHIVE,
+                                WORK_ITEM,
+                                version=NEXT_PROTOCOL_VERSION,
+                                expected_head_sha=reply.head_sha,
+                            )
+                        )
+                    )
+                ).payload
+            )
+            self.assertEqual(archived.archived_at, repeated.archived_at)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from hashlib import sha256
 
 from codex_dispatcher.publisher import VerifiedBundle
@@ -16,6 +17,8 @@ from codex_dispatcher.runner_protocol import (
     agent_result_to_json,
 )
 from codex_dispatcher.runner_transport import (
+    RunnerArchiveReply,
+    RunnerArchiveState,
     RunnerAck,
     RunnerExportReply,
     RunnerTransportInterrupted,
@@ -30,7 +33,7 @@ from codex_dispatcher.runner_wire import (
     encode_runner_input,
     encode_runner_output,
 )
-from codex_dispatcher.work_items import WorkItem
+from codex_dispatcher.work_items import WorkItem, validate_git_sha
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,9 +91,16 @@ class FakeSshRunnerTransport:
         self._artifacts: dict[tuple[str, str], bytes] = {}
         self._interrupt_after_effect: set[RunnerOperation] = set()
         self._reject_before_effect: set[RunnerOperation] = set()
+        self._archives: dict[str, RunnerArchiveReply] = {}
 
     def queue_turn(self, work_item_id: str, fixture: FakeTurnFixture) -> None:
         self._fixtures[work_item_id].append(fixture)
+
+    def set_head(self, work_item_id: str, head_sha: str) -> None:
+        current = self._work_items.get(work_item_id)
+        if current is None:
+            raise KeyError(work_item_id)
+        current.head_sha = validate_git_sha(head_sha, "head_sha")
 
     def interrupt_next(self, operation: RunnerOperation) -> None:
         self._interrupt_after_effect.add(operation)
@@ -150,6 +160,10 @@ class FakeSshRunnerTransport:
             output = self._status(request)
         elif request.operation is RunnerOperation.EXPORT:
             output = self._export(request)
+        elif request.operation is RunnerOperation.ARCHIVE:
+            output = self._archive(request)
+        elif request.operation is RunnerOperation.ARCHIVE_STATUS:
+            output = self._archive_status(request)
         else:
             raise RunnerTransportRejected("fake Runner operation is not enabled")
 
@@ -343,6 +357,62 @@ class FakeSshRunnerTransport:
             size_bytes=len(artifact),
         )
         return RunnerWireOutput(reply.to_json().encode("utf-8"), artifact)
+
+    def _archive(self, request: RunnerRequest) -> RunnerWireOutput:
+        assert request.expected_head_sha is not None
+        existing = self._archives.get(request.work_item_id)
+        if existing is not None:
+            if existing.expected_head_sha != request.expected_head_sha:
+                raise RunnerTransportRejected("fake Runner archive identity conflict")
+            reply = RunnerArchiveReply(
+                RunnerOperation.ARCHIVE,
+                existing.work_item_id,
+                existing.expected_head_sha,
+                existing.state,
+                archived_at=existing.archived_at,
+                reclaimed_bytes=existing.reclaimed_bytes,
+            )
+            return RunnerWireOutput(reply.to_json().encode("utf-8"))
+        current = self._work_items.get(request.work_item_id)
+        if current is None or current.head_sha != request.expected_head_sha:
+            raise RunnerTransportRejected("fake Runner archive HEAD conflict")
+        status_reply = RunnerArchiveReply(
+            RunnerOperation.ARCHIVE_STATUS,
+            request.work_item_id,
+            request.expected_head_sha,
+            RunnerArchiveState.ARCHIVED,
+            archived_at=datetime.now(timezone.utc).isoformat(),
+            reclaimed_bytes=8 * 1024 * 1024 * 1024,
+        )
+        self._archives[request.work_item_id] = status_reply
+        del self._work_items[request.work_item_id]
+        reply = RunnerArchiveReply(
+            RunnerOperation.ARCHIVE,
+            status_reply.work_item_id,
+            status_reply.expected_head_sha,
+            status_reply.state,
+            archived_at=status_reply.archived_at,
+            reclaimed_bytes=status_reply.reclaimed_bytes,
+        )
+        return RunnerWireOutput(reply.to_json().encode("utf-8"))
+
+    def _archive_status(self, request: RunnerRequest) -> RunnerWireOutput:
+        assert request.expected_head_sha is not None
+        existing = self._archives.get(request.work_item_id)
+        if existing is not None:
+            if existing.expected_head_sha != request.expected_head_sha:
+                raise RunnerTransportRejected("fake Runner archive identity conflict")
+            return RunnerWireOutput(existing.to_json().encode("utf-8"))
+        current = self._work_items.get(request.work_item_id)
+        if current is None or current.head_sha != request.expected_head_sha:
+            raise RunnerTransportRejected("fake Runner archive status HEAD conflict")
+        reply = RunnerArchiveReply(
+            RunnerOperation.ARCHIVE_STATUS,
+            request.work_item_id,
+            request.expected_head_sha,
+            RunnerArchiveState.ACTIVE,
+        )
+        return RunnerWireOutput(reply.to_json().encode("utf-8"))
 
 
 @dataclass(frozen=True, slots=True)

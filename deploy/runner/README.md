@@ -94,11 +94,28 @@ remove `[session_runtime]` after a v2 WorkItem has started: the legacy
 rollback could start an unrelated v1 session. Generation directories are audit
 state and must not be deleted during rollback.
 
-Releases through schema migration 011 add Handoff, Agent-result, verified
-publication, delegation, completion-gate, and context-failure ledgers. Older
+Releases through schema migration 012 add Handoff, Agent-result, verified
+publication, delegation, completion-gate, context-failure, and completed-WorkItem archive ledgers. Older
 binaries intentionally reject a newer schema. Rolling back such a release
 therefore requires the matching pre-migration SQLite Online Backup; changing
 only the `current` release symlink is unsafe.
+
+## Completed WorkItem archive boundary
+
+Control-side automatic reclamation is disabled unless
+`ssh_runtime.completed_retention_seconds` is present. The reviewed normal value is `604800` (seven
+days). Before sending `ARCHIVE`, Control revalidates the completed Issue and exact merged bound PR,
+and persists the immutable request in schema 12.
+
+The Runner exposes `ARCHIVE` and `ARCHIVE_STATUS` only in protocol v2 and requires the exact
+published HEAD. Under the global lock it validates the permanent registry identity, clean task
+branch, finished Turn records, and inactive v2 containers. It writes
+`work-items/.archives/<work-item-id>.json` before staging and deleting the exact workspace/image.
+Do not manually remove `.registry`, `.archives`, or a partial `.archive-staging`/image `.archive`
+entry: they are recovery evidence. Per-item deletion never includes the policy bundle, tools,
+shared auth seed, Control database, or another WorkItem. A lost receipt must be reconciled with
+`ARCHIVE_STATUS`; a generic rejected response also remains ambiguous because it carries no
+pre-effect/post-effect phase proof. Do not retry deletion with shell commands.
 
 ## SSH contract
 

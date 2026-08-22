@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -7,9 +9,17 @@ from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
 from typing import Iterator
+from unittest.mock import patch
 
-from codex_dispatcher.runner_protocol import RunnerOperation, RunnerRequest
-from codex_dispatcher.runner_transport import parse_runner_export_reply
+from codex_dispatcher.runner_protocol import (
+    NEXT_PROTOCOL_VERSION,
+    RunnerOperation,
+    RunnerRequest,
+)
+from codex_dispatcher.runner_transport import (
+    RunnerArchiveState,
+    parse_runner_export_reply,
+)
 from codex_dispatcher.runner_workspace import RunnerWorkspace, RunnerWorkspaceError
 from codex_dispatcher.source_bundle import GitSourceBundleBuilder
 
@@ -67,6 +77,190 @@ def prepare_request(artifact: bytes, base_sha: str) -> RunnerRequest:
 
 
 class RunnerWorkspaceTests(unittest.TestCase):
+    def test_archive_is_permanent_idempotent_and_head_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact, base_sha = fixture(root)
+            workspace = RunnerWorkspace(
+                git_path=GIT, work_items_root=root / "runner"
+            )
+            prepare = prepare_request(artifact, base_sha)
+            workspace.prepare(prepare, artifact)
+            with self.assertRaisesRegex(RunnerWorkspaceError, "protocol-v2"):
+                workspace.archive(
+                    RunnerRequest(RunnerOperation.ARCHIVE, WORK_ITEM)
+                )
+            status_request = RunnerRequest(
+                RunnerOperation.ARCHIVE_STATUS,
+                WORK_ITEM,
+                version=NEXT_PROTOCOL_VERSION,
+                expected_head_sha=base_sha,
+            )
+            self.assertIs(
+                RunnerArchiveState.ACTIVE,
+                workspace.archive_status(status_request).state,
+            )
+            archive_request = RunnerRequest(
+                RunnerOperation.ARCHIVE,
+                WORK_ITEM,
+                version=NEXT_PROTOCOL_VERSION,
+                expected_head_sha=base_sha,
+            )
+            archived = workspace.archive(archive_request)
+            repeated = workspace.archive(archive_request)
+            self.assertIs(RunnerArchiveState.ARCHIVED, archived.state)
+            self.assertEqual(archived.archived_at, repeated.archived_at)
+            self.assertGreater(archived.reclaimed_bytes or 0, 0)
+            self.assertFalse(
+                (root / "runner" / "owner__repo" / "issue-42").exists()
+            )
+            self.assertTrue(
+                (root / "runner" / ".registry" / f"{WORK_ITEM}.json").is_file()
+            )
+            self.assertIs(
+                RunnerArchiveState.ARCHIVED,
+                workspace.archive_status(status_request).state,
+            )
+            with self.assertRaisesRegex(RunnerWorkspaceError, "permanent"):
+                workspace.prepare(prepare, artifact)
+
+    def test_archive_rejects_dirty_or_wrong_head_before_tombstone(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact, base_sha = fixture(root)
+            workspace = RunnerWorkspace(
+                git_path=GIT, work_items_root=root / "runner"
+            )
+            workspace.prepare(prepare_request(artifact, base_sha), artifact)
+            with self.assertRaisesRegex(RunnerWorkspaceError, "conflicts"):
+                workspace.archive(
+                    RunnerRequest(
+                        RunnerOperation.ARCHIVE,
+                        WORK_ITEM,
+                        version=NEXT_PROTOCOL_VERSION,
+                        expected_head_sha="f" * 40,
+                    )
+                )
+            (workspace.paths(WORK_ITEM).repository / "dirty.txt").write_text(
+                "dirty\n", encoding="utf-8"
+            )
+            with self.assertRaises(RunnerWorkspaceError):
+                workspace.archive(
+                    RunnerRequest(
+                        RunnerOperation.ARCHIVE,
+                        WORK_ITEM,
+                        version=NEXT_PROTOCOL_VERSION,
+                        expected_head_sha=base_sha,
+                    )
+                )
+            self.assertFalse(
+                (root / "runner" / ".archives" / f"{WORK_ITEM}.json").exists()
+            )
+
+    def test_archive_rejects_registry_payload_for_another_work_item(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact, base_sha = fixture(root)
+            workspace = RunnerWorkspace(
+                git_path=GIT, work_items_root=root / "runner"
+            )
+            second_work_item = "wi_" + "b" * 24
+            first_request = prepare_request(artifact, base_sha)
+            second_request = RunnerRequest(
+                RunnerOperation.PREPARE,
+                second_work_item,
+                repository="owner/repo",
+                issue_number=43,
+                task_branch="codex/issue-43-bbbbbbbbbbbb",
+                base_sha=base_sha,
+                source_bundle_sha256=sha256(artifact).hexdigest(),
+                source_bundle_size=len(artifact),
+            )
+            workspace.prepare(first_request, artifact)
+            workspace.prepare(second_request, artifact)
+            first_root = root / "runner" / "owner__repo" / "issue-42"
+            second_root = root / "runner" / "owner__repo" / "issue-43"
+            registry = root / "runner" / ".registry"
+            (registry / f"{WORK_ITEM}.json").write_bytes(
+                (registry / f"{second_work_item}.json").read_bytes()
+            )
+
+            with self.assertRaisesRegex(RunnerWorkspaceError, "filename"):
+                workspace.archive(
+                    RunnerRequest(
+                        RunnerOperation.ARCHIVE,
+                        WORK_ITEM,
+                        version=NEXT_PROTOCOL_VERSION,
+                        expected_head_sha=base_sha,
+                    )
+                )
+
+            self.assertTrue(first_root.is_dir())
+            self.assertTrue(second_root.is_dir())
+            self.assertFalse(
+                (root / "runner" / ".archives" / f"{WORK_ITEM}.json").exists()
+            )
+
+    def test_partial_archive_binds_registry_identity_before_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact, base_sha = fixture(root)
+            workspace = RunnerWorkspace(
+                git_path=GIT, work_items_root=root / "runner"
+            )
+            workspace.prepare(prepare_request(artifact, base_sha), artifact)
+            request = RunnerRequest(
+                RunnerOperation.ARCHIVE,
+                WORK_ITEM,
+                version=NEXT_PROTOCOL_VERSION,
+                expected_head_sha=base_sha,
+            )
+            with (
+                patch.object(
+                    workspace,
+                    "_archive_directory_tree",
+                    side_effect=RunnerWorkspaceError("fixture crash"),
+                ),
+                self.assertRaisesRegex(RunnerWorkspaceError, "fixture crash"),
+            ):
+                workspace.archive(request)
+            registry = root / "runner" / ".registry" / f"{WORK_ITEM}.json"
+            payload = json.loads(registry.read_text(encoding="utf-8"))
+            payload["issue_number"] = 43
+            registry.write_text(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RunnerWorkspaceError, "tombstone"):
+                workspace.archive(request)
+
+    def test_archive_rejects_unexpected_nested_mount_before_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact, base_sha = fixture(root)
+            workspace = RunnerWorkspace(
+                git_path=GIT, work_items_root=root / "runner"
+            )
+            workspace.prepare(prepare_request(artifact, base_sha), artifact)
+            request = RunnerRequest(
+                RunnerOperation.ARCHIVE,
+                WORK_ITEM,
+                version=NEXT_PROTOCOL_VERSION,
+                expected_head_sha=base_sha,
+            )
+            repository = workspace.paths(WORK_ITEM).repository
+            original_ismount = os.path.ismount
+
+            def mounted(path: object) -> bool:
+                return Path(path) == repository or original_ismount(path)
+
+            with (
+                patch("codex_dispatcher.runner_workspace.os.path.ismount", mounted),
+                self.assertRaisesRegex(RunnerWorkspaceError, "mount"),
+            ):
+                workspace.archive(request)
+            self.assertTrue(repository.is_dir())
+
     def test_prepare_is_idempotent_and_creates_no_remote(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

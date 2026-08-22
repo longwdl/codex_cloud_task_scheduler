@@ -31,6 +31,7 @@ from codex_dispatcher.trackers.base import (
 )
 from codex_dispatcher.turn_orchestration import TaskBranchPublisher, TurnProgress
 from codex_dispatcher.work_items import Turn, TurnState, WorkItem, WorkItemState
+from codex_dispatcher.work_item_lifecycle import WorkItemArchiveStatus
 
 
 class SourceSnapshotProvider(Protocol):
@@ -70,6 +71,8 @@ class ControlSweepStatus(StrEnum):
     BLOCKED = "blocked"
     STATE_SYNCHRONIZED = "state_synchronized"
     COMPLETED = "completed"
+    AWAITING_ARCHIVE = "awaiting_archive"
+    ARCHIVED = "archived"
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +236,42 @@ class SshControlSweep:
                 ControlSweepStatus.COMPLETED,
                 updated,
                 work_item=work_item,
+            )
+        if recovery.action is SshRecoveryAction.ARCHIVE_COMPLETED_WORK_ITEM:
+            assert recovery.work_item is not None
+            assert recovery.archive_eligible_at is not None
+            archive = self._dispatch.archive_completed_work_item(
+                recovery.work_item.work_item_id,
+                eligible_at=recovery.archive_eligible_at,
+            )
+            status = (
+                ControlSweepStatus.ARCHIVED
+                if archive.status is WorkItemArchiveStatus.ARCHIVED
+                else ControlSweepStatus.BLOCKED
+                if archive.status is WorkItemArchiveStatus.BLOCKED
+                else ControlSweepStatus.AWAITING_ARCHIVE
+            )
+            return _plan_result(
+                status,
+                recovery,
+                reason=archive.error_code,
+            )
+        if recovery.action is SshRecoveryAction.RECONCILE_WORK_ITEM_ARCHIVE:
+            assert recovery.work_item is not None
+            archive = self._dispatch.reconcile_work_item_archive(
+                recovery.work_item.work_item_id
+            )
+            status = (
+                ControlSweepStatus.ARCHIVED
+                if archive.status is WorkItemArchiveStatus.ARCHIVED
+                else ControlSweepStatus.BLOCKED
+                if archive.status is WorkItemArchiveStatus.BLOCKED
+                else ControlSweepStatus.AWAITING_ARCHIVE
+            )
+            return _plan_result(
+                status,
+                recovery,
+                reason=archive.error_code,
             )
         if recovery.action is SshRecoveryAction.SYNC_TRACKER_STATE:
             assert recovery.task is not None

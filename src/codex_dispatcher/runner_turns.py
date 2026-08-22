@@ -158,6 +158,7 @@ class RunnerTurnExecutor:
                 return self._v2_executing_reply(request, paths)
             return self._unknown_reply(request, "turn_outcome_unresolved")
 
+        self._workspace.assert_turn_admission()
         paths = self._workspace.validate_turn_anchor(
             request.work_item_id, request.input_head_sha
         )
@@ -165,6 +166,52 @@ class RunnerTurnExecutor:
         reply = self._run_codex(request, prompt, paths)
         self._write_record(record_path, _TurnRecord(request, "finished", reply))
         return reply
+
+    def assert_archive_safe(self, work_item_id: str) -> None:
+        """Prove every durable Turn is finished and no exact v2 container is live."""
+        paths = self._workspace.paths(work_item_id)
+        directory = paths.state / "turns"
+        if not directory.exists():
+            if directory.is_symlink():
+                raise RunnerTurnError("Turn record directory is a dangling symlink")
+            return
+        try:
+            directory_stat = directory.lstat()
+            entries = tuple(sorted(directory.iterdir()))
+        except OSError as exc:
+            raise RunnerTurnError("Turn record directory is unavailable") from exc
+        if (
+            not stat.S_ISDIR(directory_stat.st_mode)
+            or directory.is_symlink()
+            or directory_stat.st_mode & 0o022
+        ):
+            raise RunnerTurnError("Turn record directory is invalid")
+        for path in entries:
+            if path.suffix != ".json" or path.name.startswith("."):
+                raise RunnerTurnError("Turn record directory contains unknown state")
+            record = self._read_record(path, required=True)
+            assert record is not None
+            if (
+                record.request.work_item_id != work_item_id
+                or record.state != "finished"
+                or record.reply is None
+            ):
+                raise RunnerTurnError("WorkItem contains an unfinished Turn")
+            if (
+                self._docker_runtime is not None
+                and record.request.version == NEXT_PROTOCOL_VERSION
+            ):
+                try:
+                    running = docker_generation_container_is_running(
+                        runtime=self._docker_runtime,
+                        request=record.request,
+                    )
+                except RunnerDockerError as exc:
+                    raise RunnerTurnError(
+                        "Turn container state cannot be proven inactive"
+                    ) from exc
+                if running:
+                    raise RunnerTurnError("WorkItem Turn container is still running")
 
     def status(self, request: RunnerRequest) -> RunnerTurnReply:
         if request.operation is not RunnerOperation.STATUS:

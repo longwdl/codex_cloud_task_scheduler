@@ -33,6 +33,7 @@ from codex_dispatcher.runner_protocol import (
     agent_result_to_json,
     parse_agent_result,
 )
+from codex_dispatcher.runner_transport import RunnerArchiveReply, RunnerArchiveState
 from codex_dispatcher.slack_reporting import (
     SlackDeliveryReceipt,
     SlackDeliveryRecord,
@@ -59,6 +60,11 @@ from codex_dispatcher.work_items import (
     validate_session_generation_id,
     validate_session_id,
     validate_sha256,
+)
+from codex_dispatcher.work_item_lifecycle import (
+    WorkItemArchive,
+    WorkItemArchiveStatus,
+    validate_archive_error_code,
 )
 
 
@@ -447,6 +453,266 @@ class StateStore:
             self._row_to_work_item(row)
             for row in self._connection.execute(sql, parameters)
         )
+
+    def get_work_item_completed_at(self, work_item_id: str) -> str:
+        work_item = self.get_work_item(work_item_id)
+        if work_item is None:
+            raise KeyError(f"work item not found: {work_item_id}")
+        if work_item.state is not WorkItemState.COMPLETED:
+            raise ValueError("work item is not completed")
+        payload = json.dumps(
+            {"from": WorkItemState.REVIEW.value, "to": WorkItemState.COMPLETED.value},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        row = self._connection.execute(
+            "SELECT event_time FROM work_item_events WHERE work_item_id = ? "
+            "AND event_type = 'work_item_state_changed' AND payload_json = ? "
+            "ORDER BY event_id DESC LIMIT 1",
+            (work_item_id, payload),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("completed WorkItem has no durable completion event")
+        return str(row["event_time"])
+
+    def get_work_item_archive(self, work_item_id: str) -> WorkItemArchive | None:
+        row = self._connection.execute(
+            "SELECT * FROM work_item_archives WHERE work_item_id = ?",
+            (work_item_id,),
+        ).fetchone()
+        return self._row_to_work_item_archive(row) if row is not None else None
+
+    def prepare_work_item_archive(
+        self,
+        work_item_id: str,
+        *,
+        expected_head_sha: str,
+        eligible_at: str,
+        request_sha256: str,
+        updated_at: str | None = None,
+    ) -> WorkItemArchive:
+        now = updated_at or utc_now_iso()
+        candidate = WorkItemArchive(
+            work_item_id,
+            WorkItemArchiveStatus.PREPARED,
+            expected_head_sha,
+            eligible_at,
+            request_sha256,
+            None,
+            None,
+            None,
+            None,
+            None,
+            now,
+            now,
+        )
+        with self._transaction() as connection:
+            work_item_row = connection.execute(
+                "SELECT state, last_published_sha FROM work_items WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone()
+            if work_item_row is None:
+                raise KeyError(f"work item not found: {work_item_id}")
+            if (
+                WorkItemState(work_item_row["state"]) is not WorkItemState.COMPLETED
+                or work_item_row["last_published_sha"] != expected_head_sha
+            ):
+                raise ValueError(
+                    "archive requires a completed WorkItem at its published checkpoint"
+                )
+            placeholders = ", ".join("?" for _ in ACTIVE_TURN_STATES)
+            if connection.execute(
+                f"SELECT 1 FROM turns WHERE state IN ({placeholders}) LIMIT 1",
+                tuple(state.value for state in ACTIVE_TURN_STATES),
+            ).fetchone() is not None:
+                raise ValueError("archive cannot begin while a Turn is active")
+            existing_row = connection.execute(
+                "SELECT * FROM work_item_archives WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone()
+            if existing_row is not None:
+                existing = self._row_to_work_item_archive(existing_row)
+                if (
+                    existing.expected_head_sha != expected_head_sha
+                    or existing.eligible_at != eligible_at
+                    or existing.request_sha256 != request_sha256
+                ):
+                    raise ValueError("archive request conflicts with durable lifecycle identity")
+                return existing
+            connection.execute(
+                "INSERT INTO work_item_archives "
+                "(work_item_id, status, expected_head_sha, eligible_at, request_sha256, "
+                "response_json, response_sha256, reclaimed_bytes, runner_archived_at, "
+                "error_code, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?)",
+                (
+                    candidate.work_item_id,
+                    candidate.status.value,
+                    candidate.expected_head_sha,
+                    candidate.eligible_at,
+                    candidate.request_sha256,
+                    now,
+                    now,
+                ),
+            )
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "work_item_archive_prepared",
+                {
+                    "expected_head_sha": expected_head_sha,
+                    "eligible_at": eligible_at,
+                    "request_sha256": request_sha256,
+                },
+                now,
+            )
+        archived = self.get_work_item_archive(work_item_id)
+        assert archived is not None
+        return archived
+
+    def mark_work_item_archive_ambiguous(
+        self, work_item_id: str, *, updated_at: str | None = None
+    ) -> WorkItemArchive:
+        return self._transition_work_item_archive(
+            work_item_id,
+            from_statuses={WorkItemArchiveStatus.PREPARED, WorkItemArchiveStatus.AMBIGUOUS},
+            to_status=WorkItemArchiveStatus.AMBIGUOUS,
+            updated_at=updated_at,
+        )
+
+    def mark_work_item_archive_retry_ready(
+        self, work_item_id: str, *, updated_at: str | None = None
+    ) -> WorkItemArchive:
+        return self._transition_work_item_archive(
+            work_item_id,
+            from_statuses={WorkItemArchiveStatus.AMBIGUOUS},
+            to_status=WorkItemArchiveStatus.PREPARED,
+            updated_at=updated_at,
+        )
+
+    def block_work_item_archive(
+        self,
+        work_item_id: str,
+        *,
+        error_code: str,
+        updated_at: str | None = None,
+    ) -> WorkItemArchive:
+        error_code = validate_archive_error_code(error_code)
+        return self._transition_work_item_archive(
+            work_item_id,
+            from_statuses={WorkItemArchiveStatus.PREPARED, WorkItemArchiveStatus.AMBIGUOUS},
+            to_status=WorkItemArchiveStatus.BLOCKED,
+            error_code=error_code,
+            updated_at=updated_at,
+        )
+
+    def complete_work_item_archive(
+        self,
+        work_item_id: str,
+        *,
+        reply: RunnerArchiveReply,
+        updated_at: str | None = None,
+    ) -> WorkItemArchive:
+        if (
+            not isinstance(reply, RunnerArchiveReply)
+            or reply.state is not RunnerArchiveState.ARCHIVED
+            or reply.work_item_id != work_item_id
+            or reply.archived_at is None
+            or reply.reclaimed_bytes is None
+        ):
+            raise ValueError("archive completion requires an exact archived Runner reply")
+        now = updated_at or utc_now_iso()
+        response_json = reply.to_json()
+        response_sha256 = sha256(response_json.encode("utf-8")).hexdigest()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM work_item_archives WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"work item archive not found: {work_item_id}")
+            current = self._row_to_work_item_archive(row)
+            if current.status is WorkItemArchiveStatus.ARCHIVED:
+                if current.response_sha256 != response_sha256:
+                    raise ValueError("archive receipt conflicts with durable completion")
+                return current
+            if current.status not in {
+                WorkItemArchiveStatus.PREPARED,
+                WorkItemArchiveStatus.AMBIGUOUS,
+            } or current.expected_head_sha != reply.expected_head_sha:
+                raise ValueError("archive completion conflicts with lifecycle state")
+            connection.execute(
+                "UPDATE work_item_archives SET status = ?, response_json = ?, "
+                "response_sha256 = ?, reclaimed_bytes = ?, runner_archived_at = ?, "
+                "error_code = NULL, updated_at = ? WHERE work_item_id = ?",
+                (
+                    WorkItemArchiveStatus.ARCHIVED.value,
+                    response_json,
+                    response_sha256,
+                    reply.reclaimed_bytes,
+                    reply.archived_at,
+                    now,
+                    work_item_id,
+                ),
+            )
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "work_item_archived",
+                {
+                    "expected_head_sha": reply.expected_head_sha,
+                    "reclaimed_bytes": reply.reclaimed_bytes,
+                    "response_sha256": response_sha256,
+                },
+                now,
+            )
+        archived = self.get_work_item_archive(work_item_id)
+        assert archived is not None
+        return archived
+
+    def _transition_work_item_archive(
+        self,
+        work_item_id: str,
+        *,
+        from_statuses: set[WorkItemArchiveStatus],
+        to_status: WorkItemArchiveStatus,
+        error_code: str | None = None,
+        updated_at: str | None = None,
+    ) -> WorkItemArchive:
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM work_item_archives WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"work item archive not found: {work_item_id}")
+            current = self._row_to_work_item_archive(row)
+            if current.status is to_status:
+                if current.error_code != error_code:
+                    raise ValueError("archive transition conflicts with durable state")
+                return current
+            if current.status not in from_statuses:
+                raise ValueError("archive transition is not allowed")
+            connection.execute(
+                "UPDATE work_item_archives SET status = ?, error_code = ?, "
+                "updated_at = ? WHERE work_item_id = ?",
+                (to_status.value, error_code, now, work_item_id),
+            )
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                f"work_item_archive_{to_status.value}",
+                ({"error_code": error_code} if error_code is not None else {}),
+                now,
+            )
+        transitioned = self.get_work_item_archive(work_item_id)
+        assert transitioned is not None
+        return transitioned
 
     def get_active_turn(self) -> Turn | None:
         """Return the globally unique active Turn, if one exists."""
@@ -3546,6 +3812,12 @@ class StateStore:
                 row["changed_paths_json"], "persisted publication changed paths"
             ),
         )
+
+    @staticmethod
+    def _row_to_work_item_archive(row: sqlite3.Row) -> WorkItemArchive:
+        values = dict(row)
+        values["status"] = WorkItemArchiveStatus(values["status"])
+        return WorkItemArchive(**values)
 
     @staticmethod
     def _row_to_slack_delivery(row: sqlite3.Row) -> SlackDeliveryRecord:

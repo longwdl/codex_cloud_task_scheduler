@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
+from hashlib import sha256
 
 from codex_dispatcher.config import Config
 from codex_dispatcher.scheduler import SSH_CLI_EXECUTOR_LABEL
 from codex_dispatcher.state_store import StateStore
+from codex_dispatcher.runner_protocol import (
+    NEXT_PROTOCOL_VERSION,
+    RunnerOperation,
+    RunnerRequest,
+)
 from codex_dispatcher.trackers.base import (
     PullRequest,
     PullRequestState,
@@ -17,6 +24,7 @@ from codex_dispatcher.trackers.base import (
 )
 from codex_dispatcher.work_items import Turn, TurnState, WorkItem, WorkItemState
 from codex_dispatcher.work_items import SessionGenerationRole
+from codex_dispatcher.work_item_lifecycle import WorkItemArchiveStatus
 
 
 class SshRecoveryAction(StrEnum):
@@ -29,6 +37,8 @@ class SshRecoveryAction(StrEnum):
     RECOVER_ORPHAN_CLAIM = "recover_orphan_claim"
     SYNC_TRACKER_STATE = "sync_tracker_state"
     COMPLETE_MERGED_WORK_ITEM = "complete_merged_work_item"
+    ARCHIVE_COMPLETED_WORK_ITEM = "archive_completed_work_item"
+    RECONCILE_WORK_ITEM_ARCHIVE = "reconcile_work_item_archive"
     BLOCK = "block"
 
 
@@ -41,12 +51,15 @@ class SshRecoveryPlan:
     desired_task_state: TaskState | None = None
     reason: str | None = None
     pull_request: PullRequest | None = None
+    archive_eligible_at: str | None = None
 
 
 def plan_ssh_recovery(
     config: Config,
     store: StateStore,
     tracker: Tracker,
+    *,
+    now: datetime | None = None,
 ) -> SshRecoveryPlan:
     """Return the only safe next recovery action using provider reads only."""
     configured = {repository.slug: repository for repository in config.repositories}
@@ -121,7 +134,12 @@ def plan_ssh_recovery(
         )
         return SshRecoveryPlan(action, task, work_item)
 
-    completion = _plan_merged_completion(store, tracker, configured)
+    observed_at = now or datetime.now(timezone.utc)
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise ValueError("now must include a timezone")
+    completion = _plan_merged_completion(
+        config, store, tracker, configured, observed_at=observed_at
+    )
     if completion is not None:
         return completion
 
@@ -220,9 +238,12 @@ def _plan_fresh_final_audit(
 
 
 def _plan_merged_completion(
+    config: Config,
     store: StateStore,
     tracker: Tracker,
     configured: dict[str, object],
+    *,
+    observed_at: datetime,
 ) -> SshRecoveryPlan | None:
     for work_item in store.list_work_items():
         if work_item.state not in {WorkItemState.REVIEW, WorkItemState.COMPLETED}:
@@ -306,6 +327,16 @@ def _plan_merged_completion(
                     desired_task_state=TaskState.COMPLETED,
                     pull_request=pull_request,
                 )
+            archive = _plan_completed_archive(
+                config,
+                store,
+                task,
+                work_item,
+                pull_request,
+                observed_at=observed_at,
+            )
+            if archive is not None:
+                return archive
             continue
         return SshRecoveryPlan(
             SshRecoveryAction.COMPLETE_MERGED_WORK_ITEM,
@@ -314,6 +345,93 @@ def _plan_merged_completion(
             pull_request=pull_request,
         )
     return None
+
+
+def _plan_completed_archive(
+    config: Config,
+    store: StateStore,
+    task: TrackerTask,
+    work_item: WorkItem,
+    pull_request: PullRequest,
+    *,
+    observed_at: datetime,
+) -> SshRecoveryPlan | None:
+    assert work_item.last_published_sha is not None
+    request = RunnerRequest(
+        RunnerOperation.ARCHIVE,
+        work_item.work_item_id,
+        version=NEXT_PROTOCOL_VERSION,
+        expected_head_sha=work_item.last_published_sha,
+    )
+    request_sha256 = sha256(request.to_json().encode("utf-8")).hexdigest()
+    record = store.get_work_item_archive(work_item.work_item_id)
+    if record is not None:
+        if (
+            record.expected_head_sha != work_item.last_published_sha
+            or record.request_sha256 != request_sha256
+        ):
+            return _blocked(
+                "work_item_archive_identity_conflict",
+                task=task,
+                work_item=work_item,
+                pull_request=pull_request,
+            )
+        if record.status is WorkItemArchiveStatus.ARCHIVED:
+            return None
+        if record.status is WorkItemArchiveStatus.BLOCKED:
+            return _blocked(
+                "work_item_archive_blocked",
+                task=task,
+                work_item=work_item,
+                pull_request=pull_request,
+            )
+        action = (
+            SshRecoveryAction.RECONCILE_WORK_ITEM_ARCHIVE
+            if record.status is WorkItemArchiveStatus.AMBIGUOUS
+            else SshRecoveryAction.ARCHIVE_COMPLETED_WORK_ITEM
+        )
+        return SshRecoveryPlan(
+            action,
+            task=task,
+            work_item=work_item,
+            pull_request=pull_request,
+            archive_eligible_at=record.eligible_at,
+        )
+
+    runtime = config.ssh_runtime
+    if runtime is None or runtime.completed_retention_seconds is None:
+        return None
+    try:
+        completed_at = datetime.fromisoformat(
+            store.get_work_item_completed_at(work_item.work_item_id)
+        )
+    except (RuntimeError, ValueError):
+        return _blocked(
+            "completed_work_item_completion_receipt_invalid",
+            task=task,
+            work_item=work_item,
+            pull_request=pull_request,
+        )
+    if completed_at.tzinfo is None or completed_at.utcoffset() is None:
+        return _blocked(
+            "completed_work_item_completion_receipt_invalid",
+            task=task,
+            work_item=work_item,
+            pull_request=pull_request,
+        )
+    eligible = completed_at + timedelta(
+        seconds=runtime.completed_retention_seconds
+    )
+    eligible_at = eligible.isoformat()
+    if observed_at < eligible:
+        return None
+    return SshRecoveryPlan(
+        SshRecoveryAction.ARCHIVE_COMPLETED_WORK_ITEM,
+        task=task,
+        work_item=work_item,
+        pull_request=pull_request,
+        archive_eligible_at=eligible_at,
+    )
 
 
 def _completion_pull_request_error(

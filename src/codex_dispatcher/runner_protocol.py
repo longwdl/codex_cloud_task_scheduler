@@ -40,6 +40,7 @@ class RunnerOperation(StrEnum):
     EXPORT = "export"
     STOP = "stop"
     ARCHIVE = "archive"
+    ARCHIVE_STATUS = "archive_status"
 
 
 _V1_REQUEST_FIELDS = {
@@ -98,6 +99,12 @@ _V2_REQUEST_FIELDS = {
     | _V2_GENERATION_FIELDS,
     RunnerOperation.STOP: _V1_REQUEST_FIELDS[RunnerOperation.STOP]
     | _V2_GENERATION_FIELDS,
+    RunnerOperation.ARCHIVE: frozenset(
+        {"version", "op", "work_item_id", "expected_head_sha"}
+    ),
+    RunnerOperation.ARCHIVE_STATUS: frozenset(
+        {"version", "op", "work_item_id", "expected_head_sha"}
+    ),
 }
 
 
@@ -246,7 +253,12 @@ def parse_runner_request(value: str | bytes) -> RunnerRequest:
 
 def _request_fields(version: int, operation: RunnerOperation) -> frozenset[str]:
     if version == PROTOCOL_VERSION:
-        return _V1_REQUEST_FIELDS[operation]
+        try:
+            return _V1_REQUEST_FIELDS[operation]
+        except KeyError as exc:
+            raise RunnerProtocolError(
+                "unsupported Runner protocol version or operation"
+            ) from exc
     if version == NEXT_PROTOCOL_VERSION and operation in _V2_REQUEST_FIELDS:
         return _V2_REQUEST_FIELDS[operation]
     raise RunnerProtocolError("unsupported Runner protocol version or operation")

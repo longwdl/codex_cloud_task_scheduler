@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from hashlib import sha256
 from importlib.resources import files
 from pathlib import Path
 
@@ -17,6 +18,13 @@ from codex_dispatcher.runner_protocol import (
     AgentResultStatus,
     TestResult,
     TestStatus,
+    NEXT_PROTOCOL_VERSION,
+    RunnerOperation,
+    RunnerRequest,
+)
+from codex_dispatcher.runner_transport import (
+    RunnerArchiveReply,
+    RunnerArchiveState,
 )
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.work_items import (
@@ -29,6 +37,7 @@ from codex_dispatcher.work_items import (
     WorkItem,
     WorkItemState,
 )
+from codex_dispatcher.work_item_lifecycle import WorkItemArchiveStatus
 
 
 SESSION = "123e4567-e89b-12d3-a456-426614174000"
@@ -84,6 +93,82 @@ def make_ready(store: StateStore, item: WorkItem) -> WorkItem:
 
 
 class WorkItemStateStoreTests(unittest.TestCase):
+    def test_completed_work_item_archive_ledger_is_durable_and_strict(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                work_item = make_item(12)
+                store.create_work_item(work_item)
+                for state in (
+                    WorkItemState.PREPARING,
+                    WorkItemState.READY,
+                    WorkItemState.RUNNING,
+                    WorkItemState.REVIEW,
+                ):
+                    store.update_work_item_state(work_item.work_item_id, state)
+                head_sha = "b" * 40
+                store.record_published_sha(
+                    work_item.work_item_id,
+                    previous_sha=work_item.base_sha,
+                    head_sha=head_sha,
+                )
+                completed_at = "2026-02-01T00:00:00+00:00"
+                store.update_work_item_state(
+                    work_item.work_item_id,
+                    WorkItemState.COMPLETED,
+                    updated_at=completed_at,
+                )
+                self.assertEqual(
+                    completed_at,
+                    store.get_work_item_completed_at(work_item.work_item_id),
+                )
+                request = RunnerRequest(
+                    RunnerOperation.ARCHIVE,
+                    work_item.work_item_id,
+                    version=NEXT_PROTOCOL_VERSION,
+                    expected_head_sha=head_sha,
+                )
+                prepared = store.prepare_work_item_archive(
+                    work_item.work_item_id,
+                    expected_head_sha=head_sha,
+                    eligible_at="2026-02-08T00:00:00+00:00",
+                    request_sha256=sha256(
+                        request.to_json().encode("utf-8")
+                    ).hexdigest(),
+                )
+                self.assertIs(WorkItemArchiveStatus.PREPARED, prepared.status)
+                ambiguous = store.mark_work_item_archive_ambiguous(
+                    work_item.work_item_id
+                )
+                self.assertIs(WorkItemArchiveStatus.AMBIGUOUS, ambiguous.status)
+                store.mark_work_item_archive_retry_ready(work_item.work_item_id)
+                reply = RunnerArchiveReply(
+                    RunnerOperation.ARCHIVE,
+                    work_item.work_item_id,
+                    head_sha,
+                    RunnerArchiveState.ARCHIVED,
+                    archived_at="2026-02-08T00:01:00+00:00",
+                    reclaimed_bytes=1024,
+                )
+                archived = store.complete_work_item_archive(
+                    work_item.work_item_id, reply=reply
+                )
+                self.assertIs(WorkItemArchiveStatus.ARCHIVED, archived.status)
+                self.assertEqual(1024, archived.reclaimed_bytes)
+                self.assertEqual(
+                    archived,
+                    store.complete_work_item_archive(
+                        work_item.work_item_id, reply=reply
+                    ),
+                )
+                with self.assertRaises(ValueError):
+                    store.prepare_work_item_archive(
+                        work_item.work_item_id,
+                        expected_head_sha="c" * 40,
+                        eligible_at=prepared.eligible_at,
+                        request_sha256=prepared.request_sha256,
+                    )
+
     def test_runner_prepare_ack_provenance_survives_later_terminal_states(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             with StateStore(Path(temp_dir) / "state.db") as store:
@@ -142,7 +227,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 ).fetchall()
                 legacy_runs = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
                 self.assertEqual(
-            [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)],
+            [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)],
                     versions,
                 )
             self.assertEqual(0, legacy_runs)
@@ -211,7 +296,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
                 self.assertEqual(
-            [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)],
+            [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)],
                     versions,
                 )
 

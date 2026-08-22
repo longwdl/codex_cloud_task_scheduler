@@ -4,28 +4,41 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from codex_dispatcher.command_runner import CommandResult, run_command
 from codex_dispatcher.runner_disk import FusedWorkItemDisk, RunnerDiskError
-from codex_dispatcher.runner_protocol import RunnerOperation, RunnerRequest
+from codex_dispatcher.runner_protocol import (
+    NEXT_PROTOCOL_VERSION,
+    RunnerOperation,
+    RunnerRequest,
+)
 from codex_dispatcher.runner_transport import (
     MAX_ARTIFACT_BYTES,
+    RunnerArchiveReply,
+    RunnerArchiveState,
     RunnerAck,
     RunnerExportReply,
     RunnerWireOutput,
 )
 from codex_dispatcher.source_bundle import SOURCE_BUNDLE_REF
-from codex_dispatcher.work_items import validate_git_sha, validate_work_item_id
+from codex_dispatcher.work_items import (
+    validate_git_sha,
+    validate_sha256,
+    validate_work_item_id,
+)
 
 
 _METADATA_VERSION = 1
 _MAX_METADATA_BYTES = 16 * 1024
+_ARCHIVE_RECORD_VERSION = 1
 
 
 class RunnerWorkspaceError(RuntimeError):
@@ -65,6 +78,27 @@ class RunnerWorkspaceMetadata:
             "task_branch": self.task_branch,
             "base_sha": self.base_sha,
             "source_bundle_sha256": self.source_bundle_sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _ArchiveRecord:
+    work_item_id: str
+    expected_head_sha: str
+    metadata_sha256: str
+    state: str
+    reclaimed_bytes: int
+    archived_at: str | None
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "version": _ARCHIVE_RECORD_VERSION,
+            "work_item_id": self.work_item_id,
+            "expected_head_sha": self.expected_head_sha,
+            "metadata_sha256": self.metadata_sha256,
+            "state": self.state,
+            "reclaimed_bytes": self.reclaimed_bytes,
+            "archived_at": self.archived_at,
         }
 
 
@@ -119,6 +153,7 @@ class RunnerWorkspace:
         )
         paths = self._paths_for_metadata(metadata)
         self._prepare_root()
+        self._require_not_archived(request.work_item_id)
         if paths.root.is_symlink():
             raise RunnerWorkspaceError("WorkItem directory must not be a symbolic link")
         if self._work_item_disk is not None:
@@ -178,7 +213,9 @@ class RunnerWorkspace:
         return RunnerAck(RunnerOperation.PREPARE, request.work_item_id)
 
     def paths(self, work_item_id: str) -> RunnerWorkspacePaths:
-        metadata = self._read_registry(validate_work_item_id(work_item_id), required=True)
+        work_item_id = validate_work_item_id(work_item_id)
+        self._require_not_archived(work_item_id)
+        metadata = self._read_registry(work_item_id, required=True)
         assert metadata is not None
         paths = self._paths_for_metadata(metadata)
         self._ensure_bounded_mount(metadata.work_item_id, paths.root)
@@ -186,7 +223,9 @@ class RunnerWorkspace:
         return paths
 
     def metadata(self, work_item_id: str) -> RunnerWorkspaceMetadata:
-        metadata = self._read_registry(validate_work_item_id(work_item_id), required=True)
+        work_item_id = validate_work_item_id(work_item_id)
+        self._require_not_archived(work_item_id)
+        metadata = self._read_registry(work_item_id, required=True)
         assert metadata is not None
         return metadata
 
@@ -197,6 +236,14 @@ class RunnerWorkspace:
         self._ensure_bounded_mount(metadata.work_item_id, paths.root)
         self._validate_prepared(paths, metadata, expected_head=input_head_sha)
         return paths
+
+    def assert_turn_admission(self) -> None:
+        if self._work_item_disk is None:
+            return
+        try:
+            self._work_item_disk.assert_turn_admission()
+        except RunnerDiskError as exc:
+            raise RunnerWorkspaceError("Runner disk admission rejected the Turn") from exc
 
     def current_head(self, work_item_id: str, *, require_clean: bool = True) -> str:
         metadata = self.metadata(work_item_id)
@@ -284,6 +331,146 @@ class RunnerWorkspace:
             size_bytes=len(artifact),
         )
         return RunnerWireOutput(manifest.to_json().encode("utf-8"), artifact)
+
+    def archive_status(self, request: RunnerRequest) -> RunnerArchiveReply:
+        if (
+            request.operation is not RunnerOperation.ARCHIVE_STATUS
+            or request.version != NEXT_PROTOCOL_VERSION
+            or request.expected_head_sha is None
+        ):
+            raise RunnerWorkspaceError(
+                "request must be a protocol-v2 ARCHIVE_STATUS operation"
+            )
+        self._prepare_root()
+        record = self._read_archive_record(request.work_item_id, required=False)
+        if record is None:
+            metadata = self._read_registry(request.work_item_id, required=True)
+            assert metadata is not None
+            head = self._current_head_for_archive(metadata)
+            if head != request.expected_head_sha:
+                raise RunnerWorkspaceError(
+                    "WorkItem HEAD conflicts with the archive checkpoint"
+                )
+            return RunnerArchiveReply(
+                RunnerOperation.ARCHIVE_STATUS,
+                request.work_item_id,
+                request.expected_head_sha,
+                RunnerArchiveState.ACTIVE,
+            )
+        self._validate_archive_request(record, request)
+        if record.state == "archived":
+            assert record.archived_at is not None
+            return RunnerArchiveReply(
+                RunnerOperation.ARCHIVE_STATUS,
+                record.work_item_id,
+                record.expected_head_sha,
+                RunnerArchiveState.ARCHIVED,
+                archived_at=record.archived_at,
+                reclaimed_bytes=record.reclaimed_bytes,
+            )
+        return RunnerArchiveReply(
+            RunnerOperation.ARCHIVE_STATUS,
+            record.work_item_id,
+            record.expected_head_sha,
+            RunnerArchiveState.ARCHIVING,
+        )
+
+    def archive_requires_safety_preflight(self, request: RunnerRequest) -> bool:
+        """Return true only before the first durable Runner archive tombstone."""
+        self._validate_archive_operation(request, RunnerOperation.ARCHIVE)
+        self._prepare_root()
+        record = self._read_archive_record(request.work_item_id, required=False)
+        if record is None:
+            return True
+        self._validate_archive_request(record, request)
+        return False
+
+    def archive(self, request: RunnerRequest) -> RunnerArchiveReply:
+        self._validate_archive_operation(request, RunnerOperation.ARCHIVE)
+        self._prepare_root()
+        record = self._read_archive_record(request.work_item_id, required=False)
+        if record is None:
+            metadata = self._read_registry(request.work_item_id, required=True)
+            assert metadata is not None
+            head = self._current_head_for_archive(metadata)
+            if head != request.expected_head_sha:
+                raise RunnerWorkspaceError(
+                    "WorkItem HEAD conflicts with the archive checkpoint"
+                )
+            paths = self._paths_for_metadata(metadata)
+            if self._work_item_disk is None:
+                self._reject_nested_mounts(paths.root)
+            reclaimed_bytes = (
+                0
+                if self._work_item_disk is not None
+                else self._directory_size(paths.root)
+            )
+            record = _ArchiveRecord(
+                request.work_item_id,
+                request.expected_head_sha,
+                self._metadata_sha256(metadata),
+                "prepared",
+                reclaimed_bytes,
+                None,
+            )
+            self._write_archive_record(record)
+        else:
+            self._validate_archive_request(record, request)
+            if record.state == "archived":
+                assert record.archived_at is not None
+                return RunnerArchiveReply(
+                    RunnerOperation.ARCHIVE,
+                    record.work_item_id,
+                    record.expected_head_sha,
+                    RunnerArchiveState.ARCHIVED,
+                    archived_at=record.archived_at,
+                    reclaimed_bytes=record.reclaimed_bytes,
+                )
+
+        metadata = self._read_registry(request.work_item_id, required=True)
+        assert metadata is not None
+        if self._metadata_sha256(metadata) != record.metadata_sha256:
+            raise RunnerWorkspaceError(
+                "WorkItem registry identity conflicts with archive tombstone"
+            )
+        paths = self._paths_for_metadata(metadata)
+        archiving = _ArchiveRecord(
+            record.work_item_id,
+            record.expected_head_sha,
+            record.metadata_sha256,
+            "archiving",
+            record.reclaimed_bytes,
+            None,
+        )
+        self._write_archive_record(archiving)
+        try:
+            if self._work_item_disk is not None:
+                reclaimed_bytes = self._work_item_disk.archive(
+                    request.work_item_id, paths.root
+                )
+            else:
+                self._archive_directory_tree(paths.root, request.work_item_id)
+                reclaimed_bytes = record.reclaimed_bytes
+        except RunnerDiskError as exc:
+            raise RunnerWorkspaceError("WorkItem disk archive failed") from exc
+        completed = _ArchiveRecord(
+            record.work_item_id,
+            record.expected_head_sha,
+            record.metadata_sha256,
+            "archived",
+            reclaimed_bytes,
+            datetime.now(timezone.utc).isoformat(),
+        )
+        self._write_archive_record(completed)
+        assert completed.archived_at is not None
+        return RunnerArchiveReply(
+            RunnerOperation.ARCHIVE,
+            completed.work_item_id,
+            completed.expected_head_sha,
+            RunnerArchiveState.ARCHIVED,
+            archived_at=completed.archived_at,
+            reclaimed_bytes=completed.reclaimed_bytes,
+        )
 
     def _prepare_bounded(
         self,
@@ -513,6 +700,11 @@ class RunnerWorkspace:
         registry.mkdir(mode=0o700, exist_ok=True)
         if registry.is_symlink() or not registry.is_dir():
             raise RunnerWorkspaceError("Runner registry directory is invalid")
+        for name in (".archives", ".archive-staging"):
+            directory = self._root / name
+            directory.mkdir(mode=0o700, exist_ok=True)
+            if directory.is_symlink() or not directory.is_dir():
+                raise RunnerWorkspaceError("Runner archive directory is invalid")
 
     def _registry_path(self, work_item_id: str) -> Path:
         return self._root / ".registry" / f"{validate_work_item_id(work_item_id)}.json"
@@ -524,12 +716,206 @@ class RunnerWorkspace:
     def _read_registry(
         self, work_item_id: str, *, required: bool
     ) -> RunnerWorkspaceMetadata | None:
+        work_item_id = validate_work_item_id(work_item_id)
         path = self._registry_path(work_item_id)
         if not path.exists():
             if required:
                 raise RunnerWorkspaceError("WorkItem is not registered on this Runner")
             return None
-        return self._read_metadata(path)
+        metadata = self._read_metadata(path)
+        if metadata.work_item_id != work_item_id:
+            raise RunnerWorkspaceError("WorkItem registry filename conflicts with metadata")
+        return metadata
+
+    def _require_not_archived(self, work_item_id: str) -> None:
+        record = self._read_archive_record(work_item_id, required=False)
+        if record is not None:
+            raise RunnerWorkspaceError("WorkItem has entered permanent archive lifecycle")
+
+    def _archive_record_path(self, work_item_id: str) -> Path:
+        return self._root / ".archives" / f"{validate_work_item_id(work_item_id)}.json"
+
+    def _write_archive_record(self, record: _ArchiveRecord) -> None:
+        self._write_json(self._archive_record_path(record.work_item_id), record.to_mapping())
+
+    def _read_archive_record(
+        self, work_item_id: str, *, required: bool
+    ) -> _ArchiveRecord | None:
+        path = self._archive_record_path(work_item_id)
+        if not path.exists():
+            if path.is_symlink():
+                raise RunnerWorkspaceError("WorkItem archive record is a dangling symlink")
+            if required:
+                raise RunnerWorkspaceError("WorkItem archive record is unavailable")
+            return None
+        try:
+            record_stat = path.lstat()
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise RunnerWorkspaceError("WorkItem archive record is unavailable") from exc
+        if (
+            not stat.S_ISREG(record_stat.st_mode)
+            or path.is_symlink()
+            or record_stat.st_mode & 0o022
+            or not raw
+            or len(raw) > _MAX_METADATA_BYTES
+            or b"\x00" in raw
+        ):
+            raise RunnerWorkspaceError("WorkItem archive record exceeds its safe boundary")
+        try:
+            payload = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise RunnerWorkspaceError("WorkItem archive record is malformed") from exc
+        if not isinstance(payload, dict) or set(payload) != {
+            "version",
+            "work_item_id",
+            "expected_head_sha",
+            "metadata_sha256",
+            "state",
+            "reclaimed_bytes",
+            "archived_at",
+        }:
+            raise RunnerWorkspaceError("WorkItem archive record fields are invalid")
+        try:
+            record_work_item_id = validate_work_item_id(payload["work_item_id"])
+            expected_head_sha = validate_git_sha(
+                payload["expected_head_sha"], "expected_head_sha"
+            )
+            metadata_sha256 = payload["metadata_sha256"]
+            validate_sha256(metadata_sha256, "metadata_sha256")
+        except (TypeError, ValueError) as exc:
+            raise RunnerWorkspaceError("WorkItem archive record identity is invalid") from exc
+        state = payload["state"]
+        reclaimed_bytes = payload["reclaimed_bytes"]
+        archived_at = payload["archived_at"]
+        if (
+            payload["version"] != _ARCHIVE_RECORD_VERSION
+            or record_work_item_id != validate_work_item_id(work_item_id)
+            or state not in {"prepared", "archiving", "archived"}
+            or type(reclaimed_bytes) is not int
+            or reclaimed_bytes < 0
+            or (state == "archived") != isinstance(archived_at, str)
+            or (archived_at is not None and not isinstance(archived_at, str))
+        ):
+            raise RunnerWorkspaceError("WorkItem archive record values are invalid")
+        if archived_at is not None:
+            try:
+                parsed = datetime.fromisoformat(archived_at)
+            except ValueError as exc:
+                raise RunnerWorkspaceError("WorkItem archive timestamp is invalid") from exc
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise RunnerWorkspaceError("WorkItem archive timestamp has no timezone")
+        return _ArchiveRecord(
+            record_work_item_id,
+            expected_head_sha,
+            metadata_sha256,
+            state,
+            reclaimed_bytes,
+            archived_at,
+        )
+
+    @staticmethod
+    def _validate_archive_request(
+        record: _ArchiveRecord, request: RunnerRequest
+    ) -> None:
+        if (
+            record.work_item_id != request.work_item_id
+            or record.expected_head_sha != request.expected_head_sha
+        ):
+            raise RunnerWorkspaceError("WorkItem archive request conflicts with tombstone")
+
+    @staticmethod
+    def _validate_archive_operation(
+        request: RunnerRequest, operation: RunnerOperation
+    ) -> None:
+        if (
+            request.operation is not operation
+            or request.version != NEXT_PROTOCOL_VERSION
+            or request.expected_head_sha is None
+        ):
+            raise RunnerWorkspaceError(
+                f"request must be a protocol-v2 {operation.value.upper()} operation"
+            )
+
+    def _current_head_for_archive(self, metadata: RunnerWorkspaceMetadata) -> str:
+        paths = self._paths_for_metadata(metadata)
+        self._ensure_bounded_mount(metadata.work_item_id, paths.root)
+        self._validate_directory_identity(paths, metadata)
+        return self._current_head_without_registry(paths, metadata)
+
+    @staticmethod
+    def _metadata_sha256(metadata: RunnerWorkspaceMetadata) -> str:
+        encoded = json.dumps(
+            metadata.to_mapping(),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return sha256(encoded).hexdigest()
+
+    def _archive_directory_tree(self, root: Path, work_item_id: str) -> None:
+        staging_root = self._root / ".archive-staging"
+        staged = staging_root / f"{validate_work_item_id(work_item_id)}.workspace"
+        source_exists = root.exists() or root.is_symlink()
+        staged_exists = staged.exists() or staged.is_symlink()
+        if source_exists and staged_exists:
+            raise RunnerWorkspaceError("WorkItem archive staging state is ambiguous")
+        if source_exists:
+            if root.is_symlink() or not root.is_dir():
+                raise RunnerWorkspaceError("WorkItem archive source is invalid")
+            self._reject_nested_mounts(root)
+            try:
+                os.rename(root, staged)
+                self._fsync_directory(root.parent)
+                self._fsync_directory(staging_root)
+            except OSError as exc:
+                raise RunnerWorkspaceError(
+                    "WorkItem directory could not enter archive staging"
+                ) from exc
+            staged_exists = True
+        if staged_exists:
+            if staged.is_symlink() or not staged.is_dir() or staged.parent != staging_root:
+                raise RunnerWorkspaceError("WorkItem archive staging identity is invalid")
+            self._reject_nested_mounts(staged)
+            try:
+                shutil.rmtree(staged)
+                self._fsync_directory(staging_root)
+            except OSError as exc:
+                raise RunnerWorkspaceError("WorkItem directory could not be reclaimed") from exc
+        try:
+            root.parent.rmdir()
+        except OSError:
+            pass
+
+    @staticmethod
+    def _directory_size(root: Path) -> int:
+        total = 0
+        try:
+            for current, directories, files in os.walk(root, followlinks=False):
+                for name in (*directories, *files):
+                    total += (Path(current) / name).lstat().st_size
+        except OSError as exc:
+            raise RunnerWorkspaceError("WorkItem disk usage could not be measured") from exc
+        return total
+
+    @staticmethod
+    def _reject_nested_mounts(root: Path) -> None:
+        try:
+            if os.path.ismount(root):
+                raise RunnerWorkspaceError(
+                    "WorkItem archive source contains an unexpected mount"
+                )
+            for current, directories, _ in os.walk(root, followlinks=False):
+                for name in directories:
+                    candidate = Path(current) / name
+                    if not candidate.is_symlink() and os.path.ismount(candidate):
+                        raise RunnerWorkspaceError(
+                            "WorkItem archive source contains an unexpected mount"
+                        )
+        except OSError as exc:
+            raise RunnerWorkspaceError(
+                "WorkItem archive mount topology is unavailable"
+            ) from exc
 
     def _read_metadata(self, path: Path) -> RunnerWorkspaceMetadata:
         try:
@@ -596,6 +982,7 @@ class RunnerWorkspace:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
+            self._fsync_directory(path.parent)
         except OSError as exc:
             raise RunnerWorkspaceError("WorkItem metadata could not be persisted") from exc
         finally:
@@ -603,6 +990,17 @@ class RunnerWorkspace:
                 temporary.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError as exc:
+            raise RunnerWorkspaceError("Runner state directory could not be synchronized") from exc
 
     @staticmethod
     def _write_bytes(path: Path, content: bytes) -> None:

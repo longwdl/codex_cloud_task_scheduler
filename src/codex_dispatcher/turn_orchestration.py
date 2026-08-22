@@ -21,16 +21,22 @@ from codex_dispatcher.runner_protocol import (
     RunnerRequest,
 )
 from codex_dispatcher.runner_transport import (
+    RunnerArchiveState,
     RunnerTransport,
     RunnerTransportInterrupted,
     RunnerTransportRejected,
     RunnerTurnRemoteState,
     RunnerTurnReply,
     parse_runner_ack,
+    parse_runner_archive_reply,
     parse_runner_export_reply,
     parse_runner_turn_reply,
 )
 from codex_dispatcher.state_store import StateStore
+from codex_dispatcher.work_item_lifecycle import (
+    WorkItemArchive,
+    WorkItemArchiveStatus,
+)
 from codex_dispatcher.work_items import (
     PromptKind,
     SessionGeneration,
@@ -138,6 +144,98 @@ class OfflineTurnOrchestrator:
         ):
             raise RunnerProtocolError("Runner preparation acknowledgement identity is invalid")
         return self._store.update_work_item_state(work_item_id, WorkItemState.READY)
+
+    def archive_completed_work_item(
+        self, work_item_id: str, *, eligible_at: str
+    ) -> WorkItemArchive:
+        work_item = self._require_work_item(work_item_id)
+        if (
+            work_item.state is not WorkItemState.COMPLETED
+            or work_item.last_published_sha is None
+        ):
+            raise TurnOrchestrationError(
+                "Runner archive requires a completed published WorkItem"
+            )
+        request = RunnerRequest(
+            RunnerOperation.ARCHIVE,
+            work_item_id,
+            version=NEXT_PROTOCOL_VERSION,
+            expected_head_sha=work_item.last_published_sha,
+        )
+        record = self._store.prepare_work_item_archive(
+            work_item_id,
+            expected_head_sha=work_item.last_published_sha,
+            eligible_at=eligible_at,
+            request_sha256=sha256(request.to_json().encode("utf-8")).hexdigest(),
+        )
+        if record.status in {
+            WorkItemArchiveStatus.ARCHIVED,
+            WorkItemArchiveStatus.BLOCKED,
+            WorkItemArchiveStatus.AMBIGUOUS,
+        }:
+            return record
+        # Commit the uncertain in-flight state before crossing the SSH boundary.
+        # A crash before invoke is then reconciled as ACTIVE by ARCHIVE_STATUS;
+        # a crash after acceptance is reconciled as ARCHIVING/ARCHIVED.
+        record = self._store.mark_work_item_archive_ambiguous(work_item_id)
+        try:
+            output = self._transport.invoke(request)
+        except RunnerTransportInterrupted:
+            return record
+        except RunnerTransportRejected:
+            # The Runner may reject after persisting its tombstone or staging the
+            # workspace, so exit status alone is not proof of a no-effect failure.
+            return record
+        if output.artifact is not None:
+            return record
+        try:
+            reply = parse_runner_archive_reply(output.payload)
+        except RunnerProtocolError:
+            return record
+        if (
+            reply.operation is not RunnerOperation.ARCHIVE
+            or reply.work_item_id != work_item_id
+            or reply.expected_head_sha != work_item.last_published_sha
+            or reply.state is not RunnerArchiveState.ARCHIVED
+        ):
+            return record
+        return self._store.complete_work_item_archive(work_item_id, reply=reply)
+
+    def reconcile_work_item_archive(self, work_item_id: str) -> WorkItemArchive:
+        record = self._store.get_work_item_archive(work_item_id)
+        if record is None:
+            raise TurnOrchestrationError("WorkItem has no durable archive request")
+        if record.status is not WorkItemArchiveStatus.AMBIGUOUS:
+            return record
+        request = RunnerRequest(
+            RunnerOperation.ARCHIVE_STATUS,
+            work_item_id,
+            version=NEXT_PROTOCOL_VERSION,
+            expected_head_sha=record.expected_head_sha,
+        )
+        try:
+            output = self._transport.invoke(request)
+        except RunnerTransportInterrupted:
+            return record
+        except RunnerTransportRejected:
+            # Lock contention and post-tombstone I/O failures share the generic
+            # rejection channel. Preserve ambiguity and retry only STATUS.
+            return record
+        if output.artifact is not None:
+            return record
+        try:
+            reply = parse_runner_archive_reply(output.payload)
+        except RunnerProtocolError:
+            return record
+        if (
+            reply.operation is not RunnerOperation.ARCHIVE_STATUS
+            or reply.work_item_id != work_item_id
+            or reply.expected_head_sha != record.expected_head_sha
+        ):
+            return record
+        if reply.state is RunnerArchiveState.ARCHIVED:
+            return self._store.complete_work_item_archive(work_item_id, reply=reply)
+        return self._store.mark_work_item_archive_retry_ready(work_item_id)
 
     def run_turn(
         self,

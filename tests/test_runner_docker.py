@@ -1371,11 +1371,47 @@ class RunnerDockerExecutionTests(unittest.TestCase):
                         )
                     )
                     labels.pop(DOCKER_LABEL_POLICY_DIGEST)
+                    with self.assertRaisesRegex(
+                        RunnerDockerError, "identity"
+                    ):
+                        docker_generation_container_is_running(
+                            runtime=runtime,
+                            request=request,
+                        )
+                missing = (
+                    "Error response from daemon: No such container: "
+                    f"codex-{TURN_ONE}\n"
+                )
+                with (
+                    patch(
+                        "codex_dispatcher.runner_docker._expected_rootless_socket",
+                        return_value=socket_path,
+                    ),
+                    patch(
+                        "codex_dispatcher.runner_docker.run_command",
+                        return_value=CommandResult(1, "", missing),
+                    ),
+                ):
                     self.assertFalse(
                         docker_generation_container_is_running(
                             runtime=runtime,
                             request=request,
                         )
+                    )
+                with (
+                    patch(
+                        "codex_dispatcher.runner_docker._expected_rootless_socket",
+                        return_value=socket_path,
+                    ),
+                    patch(
+                        "codex_dispatcher.runner_docker.run_command",
+                        return_value=CommandResult(1, "", "daemon unavailable\n"),
+                    ),
+                    self.assertRaisesRegex(RunnerDockerError, "inspection"),
+                ):
+                    docker_generation_container_is_running(
+                        runtime=runtime,
+                        request=request,
                     )
             finally:
                 listener.close()

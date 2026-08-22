@@ -3,8 +3,16 @@ from __future__ import annotations
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 
+from codex_dispatcher.runner_protocol import (
+    NEXT_PROTOCOL_VERSION,
+    RunnerOperation,
+    RunnerRequest,
+)
 from codex_dispatcher.ssh_recovery import SshRecoveryAction, plan_ssh_recovery
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.testing.fakes import FakeTracker
@@ -73,6 +81,76 @@ def pull_request_for(
 
 
 class SshRecoveryTests(unittest.TestCase):
+    def test_completed_retention_plans_one_archive_and_reconciles_ambiguity(self) -> None:
+        work_item = review_item()
+        self.store.create_work_item(work_item)
+        completed = self.store.update_work_item_state(
+            work_item.work_item_id,
+            WorkItemState.COMPLETED,
+            updated_at="2026-01-10T00:00:00+00:00",
+        )
+        self.tracker.tasks["42"] = task_in(TaskState.COMPLETED)
+        self.tracker.pull_requests[(completed.repository, completed.task_branch)] = (
+            pull_request_for(completed, PullRequestState.MERGED)
+        )
+        configured = replace(
+            self.config,
+            ssh_runtime=SimpleNamespace(completed_retention_seconds=7 * 24 * 3600),
+        )
+
+        retained = plan_ssh_recovery(
+            configured,
+            self.store,
+            self.tracker,
+            now=datetime(2026, 1, 16, tzinfo=timezone.utc),
+        )
+        self.assertEqual(SshRecoveryAction.IDLE, retained.action)
+        planned = plan_ssh_recovery(
+            configured,
+            self.store,
+            self.tracker,
+            now=datetime(2026, 1, 17, tzinfo=timezone.utc),
+        )
+        self.assertEqual(SshRecoveryAction.ARCHIVE_COMPLETED_WORK_ITEM, planned.action)
+        self.assertEqual("2026-01-17T00:00:00+00:00", planned.archive_eligible_at)
+
+        request = RunnerRequest(
+            RunnerOperation.ARCHIVE,
+            completed.work_item_id,
+            version=NEXT_PROTOCOL_VERSION,
+            expected_head_sha=completed.last_published_sha,
+        )
+        self.store.prepare_work_item_archive(
+            completed.work_item_id,
+            expected_head_sha=completed.last_published_sha or "",
+            eligible_at=planned.archive_eligible_at or "",
+            request_sha256=sha256(request.to_json().encode("utf-8")).hexdigest(),
+        )
+        disabled = replace(configured, ssh_runtime=None)
+        durable = plan_ssh_recovery(
+            disabled,
+            self.store,
+            self.tracker,
+            now=datetime(2026, 1, 11, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            SshRecoveryAction.ARCHIVE_COMPLETED_WORK_ITEM,
+            durable.action,
+        )
+        self.assertEqual(planned.archive_eligible_at, durable.archive_eligible_at)
+
+        self.store.mark_work_item_archive_ambiguous(completed.work_item_id)
+        reconcile = plan_ssh_recovery(
+            disabled,
+            self.store,
+            self.tracker,
+            now=datetime(2026, 1, 11, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            SshRecoveryAction.RECONCILE_WORK_ITEM_ARCHIVE,
+            reconcile.action,
+        )
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.store = StateStore(Path(self.temp_dir.name) / "state.db")

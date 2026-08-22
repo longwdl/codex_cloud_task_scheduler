@@ -698,15 +698,26 @@ def docker_generation_container_is_running(
         max_output_bytes=64 * 1024,
         env={"DOCKER_CONFIG": str(runtime.cli_config_directory)},
     )
-    if result.returncode != 0:
-        return False
     if (
         result.timed_out
         or result.error is not None
         or result.stdout_truncated
         or result.stderr_truncated
-        or result.stderr
     ):
+        raise RunnerDockerError("Docker container inspection failed")
+    if result.returncode != 0:
+        missing_messages = {
+            f"Error response from daemon: No such container: {container_name}",
+            f"Error: No such object: {container_name}",
+        }
+        if (
+            result.returncode == 1
+            and not result.stdout.strip()
+            and result.stderr.strip() in missing_messages
+        ):
+            return False
+        raise RunnerDockerError("Docker container inspection failed")
+    if result.stderr:
         raise RunnerDockerError("Docker container inspection failed")
     try:
         payload = json.loads(result.stdout, object_pairs_hook=_unique_object)
@@ -733,7 +744,7 @@ def docker_generation_container_is_running(
         DOCKER_LABEL_TURN: request.turn_id,
         DOCKER_LABEL_POLICY_DIGEST: request.agent_policy_digest,
     }
-    return bool(
+    identity_matches = bool(
         payload.get("Name") == f"/{container_name}"
         and isinstance(config, dict)
         and config.get("Image") == runtime.image
@@ -743,14 +754,28 @@ def docker_generation_container_is_running(
         and host_config.get("NetworkMode") == DOCKER_NETWORK
         and isinstance(networks, dict)
         and set(networks) == {DOCKER_NETWORK}
-        and isinstance(state, dict)
-        and state.get("Running") is True
-        and state.get("Paused") is False
-        and state.get("Restarting") is False
-        and state.get("Dead") is False
-        and type(state.get("Pid")) is int
-        and state["Pid"] > 0
     )
+    if not identity_matches or not isinstance(state, dict):
+        raise RunnerDockerError("Docker container identity is invalid")
+    running = state.get("Running")
+    paused = state.get("Paused")
+    restarting = state.get("Restarting")
+    dead = state.get("Dead")
+    pid = state.get("Pid")
+    if (
+        type(running) is not bool
+        or type(paused) is not bool
+        or type(restarting) is not bool
+        or type(dead) is not bool
+        or type(pid) is not int
+        or paused
+        or restarting
+        or dead
+        or (running and pid <= 0)
+        or (not running and pid != 0)
+    ):
+        raise RunnerDockerError("Docker container state is invalid")
+    return running
 
 
 def _seed_work_item_auth(

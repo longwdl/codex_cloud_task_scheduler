@@ -86,6 +86,9 @@ The environment-independent core now additionally contains:
   Implementation-to-Audit Handoff;
 - bounded context/compaction failure classification with Runner checkpoint evidence, atomic clean
   generation retirement, and fail-closed dirty or moved-HEAD handling.
+- an explicitly configured completed-WorkItem retention policy, schema-12 archive ledger, strict
+  protocol-v2 archive/status recovery, and permanent Runner tombstones around exact per-item disk
+  reclamation.
 
 The fixed OpenSSH argv/byte-stream adapter is covered by isolated unit tests, and the installed
 Runner protocol has also completed the disposable SSH/real-Codex fixture recorded in
