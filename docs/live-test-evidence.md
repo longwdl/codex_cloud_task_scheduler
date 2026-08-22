@@ -3,6 +3,59 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Completed WorkItem lifecycle and disk reclamation release — 2026-08-23
+
+Commit `aef09f5ea9d4c78a9b8d86dedb972a2423274382` added the explicitly enabled completed-WorkItem
+retention policy, schema-12 archive ledger, strict protocol-v2 `ARCHIVE`/`ARCHIVE_STATUS` recovery,
+permanent Runner tombstones, exact workspace/image staging and reclamation, and new-Turn host disk
+admission. Control durably records an ambiguous request before crossing SSH and treats a generic
+Runner rejection as outcome-ambiguous because the protocol does not prove whether it occurred
+before or after tombstone/staging effects. Only a strict status reply can authorize continuation.
+
+The exact Git archive SHA-256 was
+`66d1dddf27a091a614c8e45b77188d800638eca786dc26cd9c0c4bdeda5be044`. All 499 tests,
+`compileall`, and `git diff --check` passed locally. Exact archive copies passed the same 499 tests,
+compilation, and wrapper syntax checks as the real `codex-dispatcher` Python 3.14 and
+`codex-runner` Python 3.12 accounts. The first target commands exposed only test-harness invocation
+errors: the Control attempt used the administrator home instead of the service-owned staging root,
+and the first Runner attempt was split by nested SSH quoting. Both temporary copies were cleaned;
+the corrected service-owned, `umask 077` runs passed completely before either `current` link moved.
+An independent Sol review found and verified fixes for tombstone replay, pre-SSH durability,
+retention/config drift, registry filename/payload identity, and rejection-after-effect recovery; it
+reported no remaining P0/P1.
+
+Before switching, both hosts ran
+`a52cdf86548aa6780f048e2f35c1755e3e03cdaf`. The Dispatcher timer was stopped and its current
+oneshot allowed to finish naturally. SQLite returned `integrity_check=ok`, schema 11, zero active
+Turns, and five completed WorkItems. Pre-migration Online Backup
+`state-20260822T163027.788365Z.db` was mode `0600`, passed integrity at schema 11, and had zero
+active Turns. The candidate read-only preflight was strict `idle` with `external_writes=false`.
+The Control configuration deliberately omitted `completed_retention_seconds`, so installing this
+release could not select a real WorkItem for deletion.
+
+Runner prechecks found its global lock available, zero running rootless-Docker containers, zero
+archive/tombstone staging entries, and 22,548,459,520 available bytes. Its candidate loaded the
+real protected configuration as `rootless_docker` with the bounded WorkItem disk and trusted Sol
+policy bundle. Runner `current` moved first and passed an empty-frame forced-command rejection
+smoke test without changing configuration, policy, registry, workspace, or image state. Control
+then moved to the same release. The first manually observed write-enabled sweep returned strict
+`idle` and applied only additive migration 012.
+
+Post-switch SQLite returned `integrity_check=ok`, zero foreign-key violations, schema 12, zero
+archive records, zero active Turns, and the same five completed WorkItems. Runner still had zero
+running containers and an available global lock. Post-migration Online Backup
+`state-20260822T164226.306160Z.db` was mode `0600`, passed integrity at schema 12, and contained
+zero archive records. Both Dispatcher and backup timers were restored active/enabled; the first
+normal timer-triggered sweep at `2026-08-23 00:43:46 CST` was also strict `idle`.
+
+No live WorkItem was archived in this rollout. Unit fault injection covers the protocol transitions
+and exact-object deletion boundaries, but the real ext4 host was not crashed between individual
+unmount/rename/unlink/fsync instructions. No Issue, PR, branch, GitHub Actions, Slack message,
+merge, default branch, release tag, network policy, credential, or production repository changed.
+Binary rollback requires stopping the Dispatcher timer and restoring both `current` links to
+`a52cdf8`; because the live database is now schema 12, rollback to schema-11 code also requires
+restoring the validated pre-migration backup rather than moving only the symlink.
+
 ## Completion gate, fresh Audit, and context-failure release — 2026-08-22
 
 Commit `a52cdf86548aa6780f048e2f35c1755e3e03cdaf` added the durable protocol-v2
