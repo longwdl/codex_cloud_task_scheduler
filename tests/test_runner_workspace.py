@@ -271,7 +271,8 @@ class RunnerWorkspaceTests(unittest.TestCase):
             workspace = RunnerWorkspace(git_path=GIT, work_items_root=root / "runner")
             archive_dir = root / "runner" / ".archives"
             archive_dir.mkdir(parents=True, mode=0o700)
-            archive_dir.joinpath(f"{WORK_ITEM}.json").write_text(
+            archive_path = archive_dir / f"{WORK_ITEM}.json"
+            archive_path.write_text(
                 json.dumps(
                     {
                         "version": 1,
@@ -287,6 +288,7 @@ class RunnerWorkspaceTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            archive_path.chmod(0o600)
 
             reply = workspace.archive_status(
                 RunnerRequest(
