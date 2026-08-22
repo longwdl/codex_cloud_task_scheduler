@@ -3,6 +3,100 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Structured Handoff and fresh-session Bootstrap fixture — 2026-08-22
+
+This checkpoint deployed schema 8 and exercised a real context-pressure replacement from
+SessionGeneration 2 to 3. It proves the structured Dispatcher/Git Handoff, explicit untrusted
+advisory boundary, first-Turn binding, fresh-session Bootstrap, and unattended recovery behavior
+against the dedicated private Fixture. It does not claim CI or acceptance evidence that the
+Dispatcher cannot mechanically observe.
+
+Commit `d89d73a7b9f712422b73f0dfab7832d76e26d179` added canonical Handoff persistence, complete
+AgentResult receipts, verified publication checkpoints, the generation-first-Turn Handoff binding,
+and the Bootstrap contract. Its Git archive SHA-256 was
+`18e98960121b1eda7b2a0439b22650f4eeac93df68ef36547080dfdb1e69e3dc`. Root-owned candidates were
+installed on both hosts, normalized to remove group/world write permission, and tested from
+service-owned mode-`0700` copies with `umask 077`. All 449 tests and `compileall` passed independently
+under both the `codex-dispatcher` and `codex-runner` accounts.
+
+Before activation, the Dispatcher timer was stopped, the service was inactive, SQLite had no active
+Turn and returned `integrity_check=ok`, the Runner global lock was available, and read-only preflight
+was strictly `idle`. The mode-`0600` schema-7 Online Backup
+`state-20260822T080447.699639Z.db` passed integrity checking and contained no active Turn. Runner and
+Control Host `current` then moved to the exact candidate. New-release preflight migrated only its
+disposable snapshot and left the source database at schema 7. The following manually observed idle
+sweep additively migrated the source to schema 8; `integrity_check`, `foreign_key_check`, active-Turn
+count, and all four new tables were clean. Restoring the schema-7 backup together with the prior
+`df707c5` releases remains the old-binary rollback path.
+
+Private Fixture Issue
+[`#28`](https://github.com/longwdl/codex-dispatcher-fixture/issues/28) and Draft PR
+[`#29`](https://github.com/longwdl/codex-dispatcher-fixture/pull/29) already had one active generation
+2 Turn. One reviewed maintainer context created Turn 4
+`turn_4890f0e336994ec69938543bcef5928e` in the same generation. It used 160,440 input tokens,
+finished `completed`, and published checkpoint
+`c6156bcb51d2fd872fa20f7c367ab4caa9127cfb`. Schema 8 atomically retained its complete AgentResult
+receipt and publication evidence: bundle SHA-256
+`4ef31a8bdd2081ee588163226acb98dfed3ee12361205f4e54784e447771e0fc`, exactly `README.md`, one
+commit, and 15,605 bytes. Actions run
+[`32561639445`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32561639445)
+completed successfully for that exact head.
+
+The next reviewed context encountered the configured context-pressure threshold before another
+Turn. In one SQLite transaction the Dispatcher retired generation 2, planned generation 3
+`sg_66642add15ec4cf38a559411826d2dfb`, and inserted Handoff
+`handoff_f007e71932114bff9d4c23a979312359` with SHA-256
+`333cda1f2bfb1b9341a308713d36f4c676c02798b9acac3ffe1401d5963bd739`. The immediately following
+Full START created Turn `turn_3dcb2ba461b8451bae2e9894c2115edb` and durably bound that exact
+Handoff; no Delta Turn can replay it.
+
+The Handoff's trusted facts named the exact WorkItem, Issue revision, branch, base, source and target
+generations, current head `c6156bcb51d2fd872fa20f7c367ab4caa9127cfb`, and the verified
+`README.md` path. Acceptance remained `unverified` with no invented evidence, and required check
+`fixture` remained `not_observed`. `publication_evidence_complete=false` truthfully recorded that
+the schema-8 checkpoint ledger does not backfill the earlier schema-7 prefix. The complete Turn 4
+AgentResult was present only under `untrusted_advisory`; a decoded provenance check proved its
+summary matched the source receipt and was absent from every trusted-fact string.
+
+Turn 5's generation-3 Bootstrap verified the branch, prior head, clean worktree, recent history, and
+README-only scope before editing. Its summary explicitly identified the old advisory's “no further
+local action” as stale and superseded by the new reviewed instruction. The Turn finished
+`completed`, with a distinct Codex session, at checkpoint
+`f6e450d5ec60d866e8cd20f17ee97ebfe194598d`. The Runner's mode-`0600` durable record was `finished`,
+bound generation 3 and the same checkpoint, and had no error code. The Dispatcher retained a second
+complete AgentResult and publication checkpoint. Actions run
+[`32561861958`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32561861958)
+completed successfully for the final head.
+
+The final Issue-state verification exposed an independent long-Timeline boundary: the complete
+Issue Timeline had grown to 66,198 bytes, just over the existing 65,536-byte `gh` output cap. The
+review label, status comment, publication, Slack receipt, local terminal state, and Runner terminal
+record had already succeeded, but verification correctly failed closed with
+`gh command output was truncated`. No Prompt was replayed. Commit
+`3e709aea68c1cb4d17991002b10d4923d4f45840` retained the same 64-KiB boundary and used fixed `gh
+--jq` projection to emit only the required ready-label event, timestamp, actor login, and label
+name. The exact live projection was 575 bytes. Adapter, recovery, preflight, all 449 local tests, and
+all 449 tests on both Linux hosts passed before both releases moved to this commit. Its Git archive
+SHA-256 was `d2395b2ce425b206f1ad49fd18dce98a1f926407d915be439427b88fdb389499`.
+
+Post-fix read-only preflight, one manually observed sweep, and the first timer-triggered sweep were
+all strictly `idle`. Final SQLite schema 8 returned `integrity_check=ok`, zero foreign-key
+violations, and zero active Turns; Issue #28 had three generations, five Turns, two schema-8
+AgentResults, two publication checkpoints, one Handoff, and one first-Turn binding. All six Slack
+outbox records for the WorkItem were delivered to the configured Fixture channel, including the
+Turn 4 and Turn 5 replies. The Issue was `agent:review`; PR #29 remained open and Draft, its five
+commits changed only `README.md`, and its final head matched the task branch. Fixture `main` remained
+`7ee18770d9faec6845f1dc4e32082dcc595c2832`.
+
+Both hosts now run release `3e709aea68c1cb4d17991002b10d4923d4f45840`; the Dispatcher and
+backup timers are enabled and active. Post-canary backup
+`state-20260822T083044.925189Z.db` is mode `0600`, passed `integrity_check`, and contains the exact
+Handoff. Immediate rollback is to stop the Dispatcher timer and restore both `current` symlinks to
+`d89d73a`; that release reads schema 8. Rollback to `df707c5` additionally requires restoring the
+validated schema-7 backup. No credential, Prompt, private key, full Runner output, merge, release,
+tag, force-push, branch deletion, Fixture-main update, sshd change, firewall change, or higher-value
+repository admission occurred.
+
 ## Per-WorkItem auth isolation and unattended completion fixture — 2026-08-22
 
 This checkpoint deployed the independently writable per-WorkItem Codex authentication boundary,
