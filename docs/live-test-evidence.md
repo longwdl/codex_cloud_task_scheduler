@@ -3,6 +3,40 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Rejected PREPARE reactivation fix — 2026-08-22
+
+Commit `c6ba48e31a914919bf3324c9a54bd43be6f9b17e` fixes the fail-closed reactivation gap exposed by
+Fixture Issue #34. Control now treats the durable `preparing -> ready` event as PREPARE ACK
+provenance. A blocked or paused WorkItem without that provenance loads an exact source bundle from
+its persisted Base SHA before GitHub claim, returns to `preparing`, and retries idempotent PREPARE;
+START is possible only after the new acknowledgement is durable. A later Turn-blocked WorkItem with
+existing provenance continues directly through normal reactivation and is not re-prepared.
+
+The regression reproduces `PREPARE(rejected) -> PREPARE -> START -> RESUME`, also proving that an
+exact-source failure occurs before another claim and that ordinary blocked-Turn recovery performs no
+additional source read or PREPARE. All 468 tests and `compileall` passed locally. The root-owned
+staged Control release passed the 81 directly related tests as the real `codex-dispatcher` account
+under the service Python 3.14 runtime, shell syntax checks, matching local/remote SHA-256 checks for
+the changed runtime files, and systemd unit verification. The release archive SHA-256 was
+`e47b7820270c0bb427f656a5e9b80aada24ad017dc0f4cf3f8689038dbb0fc9e`.
+
+Before the switch, SQLite returned `integrity_check=ok` with zero active Turns, and Online Backup
+`state-20260822T111750.956151Z.db` was mode `0600` and passed its own integrity check. Control
+`current` moved atomically from `c7d3e0b40194a72990d5828f81fbc463a19997f5` to `c6ba48e`. The
+new-release read-only preflight returned strict `idle` with `external_writes=false`; the following
+normal oneshot also returned `idle`. Post-switch SQLite still had zero active Turns, Online Backup
+`state-20260822T112301.390824Z.db` was mode `0600` and valid, and both Dispatcher and backup timers
+were active.
+
+Live durable state distinguishes the original rejected attempt from a prepared WorkItem: Issue #34
+remains `blocked` with `prepare_ack=0`, while successful Issue #35 remains `review` with
+`prepare_ack=1`. Issue #34 was deliberately not reactivated during this rollout. The Runner had
+31,155,351,552 free bytes; creating its expected approximately 8-GiB WorkItem image would drop the
+host below the configured 25-GiB new-admission boundary and block subsequent new fixture work. No
+Runner release, protocol, configuration, workspace, GitHub Issue, branch, pull request, or Slack
+state changed during this fix rollout. Binary rollback is the previous Control symlink; there was
+no schema migration.
+
 ## Exact-head Actions evidence and structured AC fixture — 2026-08-22
 
 Commit `c7d3e0b40194a72990d5828f81fbc463a19997f5` added the bounded GitHub Actions
