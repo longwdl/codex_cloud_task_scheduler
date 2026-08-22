@@ -3,6 +3,75 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Exact-head Actions evidence and structured AC fixture — 2026-08-22
+
+Commit `c7d3e0b40194a72990d5828f81fbc463a19997f5` added the bounded GitHub Actions
+evidence importer, strict structured acceptance predicates, schema-2 Handoff writer, and
+schema-1 Handoff reader compatibility. The source archive SHA-256 was
+`a0a98d98ec33d56986ee7f52a8d6ee9a5f1ea2842bcf0ea1b0913425b79b7ee9`. All 463 tests and
+`compileall` passed locally. The root-owned Control Host candidate additionally passed the 43
+directly affected tests as the real `codex-dispatcher` account, read-only bytecode compilation,
+shell syntax checking, and systemd unit verification. Attempts to run the complete suite from
+immutable or unusually long target-host test roots exposed only test-fixture ownership and Unix
+socket path assumptions; they were not counted as passing target-host runs. No Runner source or
+wire-protocol file changed, so the Runner release was deliberately left unchanged.
+
+Before activation the system Dispatcher timer and service were stopped, SQLite had no active Turn,
+and read-only preflight was strictly `idle`. Online backup
+`state-20260822T092213.792891Z.db` was mode `0600` and passed `integrity_check`. The Control Host
+`current` symlink was then atomically moved from release
+`3e709aea68c1cb4d17991002b10d4923d4f45840` to the exact `c7d3e0b` release. A new-release
+read-only preflight again returned `idle` without an external write. There was no SQLite schema
+migration; database schema remained 8.
+
+The first canary attempt, Fixture Issue
+[`#34`](https://github.com/longwdl/codex-dispatcher-fixture/issues/34), proved two independent
+fail-closed boundaries before an Agent ran. PREPARE first rejected because the Runner had only
+22,566,002,688 bytes available while an 8-GiB WorkItem image plus the configured 16-GiB host
+reserve required 25,769,803,776 bytes. After one explicitly selected completed fixture image was
+retired, a generic blocked-to-ready reactivation sent START without repeating the rejected PREPARE;
+the Runner rejected the missing registry/image identity and Control retained the Turn as
+`runner_request_rejected`. Issue #34 remains `agent:blocked` with no task branch, PR, checkpoint, or
+Actions run. This is an existing preparation-retry state-machine gap, not evidence against the new
+importer, and must be fixed separately without weakening Runner admission.
+
+The clean canary used Fixture Issue
+[`#35`](https://github.com/longwdl/codex-dispatcher-fixture/issues/35), WorkItem
+`wi_dbe8e403948af08923dfad91`, task branch `codex/issue-35-dbe8e403948a`, and Draft PR
+[`#36`](https://github.com/longwdl/codex-dispatcher-fixture/pull/36). During the manually isolated
+test only, `max_turns_per_session` was changed from 4 to 1 so the second reviewed context had to
+rotate; the original config was restored byte-for-byte before normal scheduling resumed. Turn 1
+`turn_80cffd7084104a838fb997575d3a1fe2` finished `needs_input` and published only `README.md` at
+checkpoint `6da05673e416799d8327f8b0664f811cf657c20e`. GitHub Actions run
+[`32565897345`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32565897345) was the
+unique `pull_request` run named `fixture` for the exact task branch and exact checkpoint, and
+finished `completed/success`.
+
+After the maintainer supplied `/codex-context finalize`, the one-Turn budget retired generation 1
+`sg_c88dd25e1b5b4b6cadc9d320a59a8f96` and created generation 2
+`sg_3669f64043734fb48f50a1bc14a9133c`. Before that transaction committed, the importer read the
+exact remote task ref on both sides of the bounded Actions listing. Handoff
+`handoff_c7fbcd52902f4e598cf7744a447ab7d9` persisted schema version 2 with provider
+`github_actions`, exact HEAD `6da05673e416799d8327f8b0664f811cf657c20e`, exact run ID
+`32565897345`, required check `fixture=passed`, aggregate acceptance `passed`, and zero remaining
+items. All three issue predicates passed from dispatcher-owned evidence:
+`required-check: fixture`, `changed-paths-within-allowed`, and `task-head-published`. Agent output
+remained only in the separate untrusted advisory.
+
+Turn 2 `turn_7433e51213514bf898bca2ba840c3d73` started from the same published checkpoint in the new
+generation, made no further change, and finished `completed`. Issue #35 reached `agent:review`; PR
+#36 remained open and Draft at the exact checkpoint; its single Actions run remained successful.
+Fixture `main` remained `7ee18770d9faec6845f1dc4e32082dcc595c2832`. No merge, release, tag,
+deployment, force-push, branch deletion, workflow edit, or default-branch update occurred.
+
+Two explicitly selected completed fixture Runner workspaces, Issues #24 and #26, were unmounted and
+their individual 8-GiB images plus Runner registry files were deleted after proving the global lock
+available and zero running containers. Their GitHub assets and complete Control SQLite audit remain;
+their local Runner workspaces are not recoverable. This restored 31,155,769,344 bytes of free space,
+above the existing admission boundary, while preserving every review, blocked, and active canary
+workspace. Rollback of the Control binary is to stop the timer and point `current` back to
+`3e709aea`; because schema stayed at 8, no database restoration is required for binary rollback.
+
 ## Structured Handoff and fresh-session Bootstrap fixture — 2026-08-22
 
 This checkpoint deployed schema 8 and exercised a real context-pressure replacement from
