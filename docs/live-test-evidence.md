@@ -114,10 +114,12 @@ not expose a local-JSON absence reconciliation command. Post-checks found schema
 zero foreign-key errors, zero active Turns, zero live completed generations, zero absence rows,
 zero remaining images, zero staging entries, and zero containers. Runner available space increased
 from 22,524,895,232 to 74,064,961,536 bytes; Turn and new-image admission both passed with zero
-shortfall. A normal post-deploy sweep returned strict `idle`, and both Dispatcher and backup timers
-were restored active. Binary rollback remains the previous `aef09f5` links, but schema rollback also
-requires the validated pre-migration backup because schema 13 is additive and old code is unaware
-of the new terminal overlay.
+shortfall. Post-operation Online Backup `state-20260822T191713.622788Z.db` was mode `0600`, schema
+13, `integrity_check=ok`, with zero foreign-key errors and zero active Turns. A normal post-deploy
+sweep returned strict `idle`, and both Dispatcher and backup timers were restored active. Binary
+rollback remains the previous `aef09f5` links, but schema rollback also requires the validated
+pre-migration backup because schema 13 is additive and old code is unaware of the new terminal
+overlay.
 
 ## Completed WorkItem lifecycle and disk reclamation release — 2026-08-23
 
