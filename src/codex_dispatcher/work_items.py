@@ -115,8 +115,12 @@ _WORK_ITEM_TRANSITIONS: Final[dict[WorkItemState, frozenset[WorkItemState]]] = {
             WorkItemState.PAUSED,
         }
     ),
-    WorkItemState.BLOCKED: frozenset({WorkItemState.READY, WorkItemState.PAUSED}),
-    WorkItemState.PAUSED: frozenset({WorkItemState.READY, WorkItemState.BLOCKED}),
+    WorkItemState.BLOCKED: frozenset(
+        {WorkItemState.PREPARING, WorkItemState.READY, WorkItemState.PAUSED}
+    ),
+    WorkItemState.PAUSED: frozenset(
+        {WorkItemState.PREPARING, WorkItemState.READY, WorkItemState.BLOCKED}
+    ),
     WorkItemState.COMPLETED: frozenset(),
 }
 

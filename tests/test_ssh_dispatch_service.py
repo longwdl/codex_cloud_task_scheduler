@@ -123,6 +123,44 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
             self.store.get_work_item_by_issue("owner/repo", 42),
         )
 
+    def test_rejected_prepare_reactivation_retries_prepare_before_start(self) -> None:
+        self.transport.reject_next(RunnerOperation.PREPARE)
+
+        rejected = self.service.resolve_and_prepare(
+            claimed_task(), base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+
+        self.assertEqual(WorkItemState.BLOCKED, rejected.state)
+        self.assertFalse(
+            self.store.runner_preparation_was_acknowledged(rejected.work_item_id)
+        )
+        self.assertEqual((), self.store.list_turns(rejected.work_item_id))
+
+        retried = self.service.resolve_and_prepare(
+            claimed_task(), base_sha="b" * 40, source_bundle=source_bundle()
+        )
+
+        self.assertEqual(WorkItemState.READY, retried.state)
+        self.assertTrue(
+            self.store.runner_preparation_was_acknowledged(retried.work_item_id)
+        )
+        self.transport.queue_turn(
+            retried.work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, blocked_result()),
+        )
+        progress = self.service.run_claimed_turn(
+            claimed_task(), turn_id="turn_" + "f" * 32
+        )
+        self.assertEqual(TurnState.BLOCKED, progress.turn.state)
+        self.assertEqual(
+            [
+                RunnerOperation.PREPARE,
+                RunnerOperation.PREPARE,
+                RunnerOperation.START,
+            ],
+            [call.operation for call in self.transport.calls],
+        )
+
     def test_turn_runs_from_frozen_plan_and_reactivation_reuses_session(self) -> None:
         item = self.service.resolve_and_prepare(
             claimed_task(), base_sha=BASE_SHA, source_bundle=source_bundle()

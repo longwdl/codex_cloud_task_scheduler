@@ -84,12 +84,16 @@ class FakeSshRunnerTransport:
         self._turn_replies: dict[tuple[str, str], RunnerTurnReply] = {}
         self._artifacts: dict[tuple[str, str], bytes] = {}
         self._interrupt_after_effect: set[RunnerOperation] = set()
+        self._reject_before_effect: set[RunnerOperation] = set()
 
     def queue_turn(self, work_item_id: str, fixture: FakeTurnFixture) -> None:
         self._fixtures[work_item_id].append(fixture)
 
     def interrupt_next(self, operation: RunnerOperation) -> None:
         self._interrupt_after_effect.add(operation)
+
+    def reject_next(self, operation: RunnerOperation) -> None:
+        self._reject_before_effect.add(operation)
 
     def invoke(
         self,
@@ -127,6 +131,10 @@ class FakeSshRunnerTransport:
                 request.agent_policy_digest,
             )
         )
+
+        if request.operation in self._reject_before_effect:
+            self._reject_before_effect.remove(request.operation)
+            raise RunnerTransportRejected("fake Runner definitively rejected the request")
 
         if request.operation is RunnerOperation.PREPARE:
             assert source_artifact is not None

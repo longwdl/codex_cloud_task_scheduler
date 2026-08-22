@@ -77,6 +77,34 @@ def make_ready(store: StateStore, item: WorkItem) -> WorkItem:
 
 
 class WorkItemStateStoreTests(unittest.TestCase):
+    def test_runner_prepare_ack_provenance_survives_later_terminal_states(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                rejected = make_item(2)
+                store.create_work_item(rejected)
+                self.assertFalse(
+                    store.runner_preparation_was_acknowledged(rejected.work_item_id)
+                )
+                store.update_work_item_state(
+                    rejected.work_item_id, WorkItemState.PREPARING
+                )
+                store.update_work_item_state(rejected.work_item_id, WorkItemState.BLOCKED)
+                self.assertFalse(
+                    store.runner_preparation_was_acknowledged(rejected.work_item_id)
+                )
+                store.update_work_item_state(
+                    rejected.work_item_id, WorkItemState.PREPARING
+                )
+                store.update_work_item_state(rejected.work_item_id, WorkItemState.READY)
+                store.update_work_item_state(rejected.work_item_id, WorkItemState.PAUSED)
+                self.assertTrue(
+                    store.runner_preparation_was_acknowledged(rejected.work_item_id)
+                )
+
+                with self.assertRaises(KeyError):
+                    store.runner_preparation_was_acknowledged("wi_" + "f" * 24)
+
     def test_migration_upgrades_an_existing_version_one_database_additively(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "legacy.db"

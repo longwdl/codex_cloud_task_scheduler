@@ -280,6 +280,13 @@ an Issue claimed without a recoverable base. The intended transfer is:
 8. The Dispatcher finds or creates the one same-repository Draft PR by exact task branch, reads it
    back, binds its number in SQLite, and then upserts the fixed Issue status metadata.
 
+The durable `preparing -> ready` WorkItem event is the Control Host's proof that the Runner returned
+the exact PREPARE acknowledgement. If PREPARE was definitively rejected, a later maintainer-approved
+reactivation of the blocked or paused WorkItem rebuilds an exact bundle from the persisted Base SHA
+before claim, moves the WorkItem back to `preparing`, and retries idempotent PREPARE. It cannot send
+START until a new acknowledgement is durable. A blocked WorkItem that already has the acknowledgement
+provenance follows the normal Turn reactivation path and is never re-prepared.
+
 The Issue allowlist used in step 6 is stored with the Turn before Codex starts. Publication recovery
 never reparses a later Issue body to widen that frozen policy. An ambiguous push remains
 `checkpointing` and retries by remote read-back without restarting Codex. If the verified remote SHA

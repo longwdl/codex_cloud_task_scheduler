@@ -70,6 +70,15 @@ class WorkItemDomainTests(unittest.TestCase):
         with self.assertRaises(InvalidStateTransition):
             item.transition_to(WorkItemState.READY)
 
+    def test_pre_ack_blocked_or_paused_item_can_return_only_to_preparing(self) -> None:
+        for state in (WorkItemState.BLOCKED, WorkItemState.PAUSED):
+            with self.subTest(state=state):
+                item = work_item().transition_to(state)
+                self.assertEqual(
+                    WorkItemState.PREPARING,
+                    item.transition_to(WorkItemState.PREPARING).state,
+                )
+
     def test_verified_existing_branch_binding_is_preserved_across_migration(self) -> None:
         item = WorkItem.from_existing_branch_binding(
             repository="owner/repo",

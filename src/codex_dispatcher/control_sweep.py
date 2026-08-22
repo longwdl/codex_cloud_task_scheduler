@@ -146,11 +146,23 @@ class SshControlSweep:
                     work_item=existing,
                     reason="completed_work_item_cannot_be_reactivated",
                 )
-            source_bundle = (
-                None
-                if existing is not None
-                else self._source.current(task.repository, repository.base_branch)
+            preparation_retry = (
+                existing is not None
+                and existing.state in {WorkItemState.BLOCKED, WorkItemState.PAUSED}
+                and not self._store.runner_preparation_was_acknowledged(
+                    existing.work_item_id
+                )
             )
+            if existing is None:
+                source_bundle = self._source.current(
+                    task.repository, repository.base_branch
+                )
+            elif preparation_retry:
+                source_bundle = self._source.exact(
+                    existing.repository, existing.base_sha
+                )
+            else:
+                source_bundle = None
             claimed = self._tracker.claim(
                 task.repository,
                 task.task_id,

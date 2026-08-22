@@ -464,6 +464,31 @@ class StateStore:
             ).fetchone()[0]
         )
 
+    def runner_preparation_was_acknowledged(self, work_item_id: str) -> bool:
+        """Return whether an exact Runner PREPARE ACK reached durable WorkItem state."""
+        row = self._connection.execute(
+            "SELECT 1 FROM work_items WHERE work_item_id = ?", (work_item_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"work item not found: {work_item_id}")
+        prepared_transition = json.dumps(
+            {
+                "from": WorkItemState.PREPARING.value,
+                "to": WorkItemState.READY.value,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return (
+            self._connection.execute(
+                "SELECT 1 FROM work_item_events WHERE work_item_id = ? "
+                "AND event_type = 'work_item_state_changed' AND payload_json = ? LIMIT 1",
+                (work_item_id, prepared_transition),
+            ).fetchone()
+            is not None
+        )
+
     def update_work_item_state(
         self, work_item_id: str, state: WorkItemState, *, updated_at: str | None = None
     ) -> WorkItem:

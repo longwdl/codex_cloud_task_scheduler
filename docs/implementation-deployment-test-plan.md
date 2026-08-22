@@ -245,11 +245,19 @@ discovered
 任意非 completed 状态
   → blocked | paused
 
-blocked | paused | waiting_input | review
+blocked | paused
+  → preparing  # 没有持久 PREPARE ACK
+  → ready      # 已有持久 PREPARE ACK
+
+waiting_input | review
   → ready
 ```
 
 `completed` 是终态。自动化不得把 completed WorkItem 重新打开；新工作使用新 Issue。
+`preparing → ready` 的持久状态事件是 Runner 精确 PREPARE ACK 的 provenance。PREPARE 明确
+拒绝后，人工重新 `agent:ready` 必须从持久化 `base_sha` 重建 exact source bundle，并先回到
+`preparing`；不得把通用 `blocked → ready` 误当成 Runner 已准备完成。读取 exact bundle 失败
+发生在 claim 之前，不改变 Issue 或 WorkItem 状态。
 
 ### 5.2 Turn 状态
 
@@ -871,6 +879,7 @@ git diff --check
 | AC-062 | Handoff 崩溃恢复 | rotation 后、START 前中断时恢复同一 planned generation/Handoff；START 回执歧义仍只用 STATUS，不生成第二次 START |
 | AC-063 | Actions/CI exact-HEAD 导入 | rotation 前后两次读取 task ref 保持精确 HEAD；只接受唯一同仓库、同分支、同 HEAD、`pull_request` 事件和配置 workflow 名的 run；权限失败、ref 漂移、重复同名或畸形响应均拒绝 rotation |
 | AC-064 | 结构化 AC 判定 | 只判定配置内 required check、完整 publication ledger 的路径集合和 durable published HEAD；普通文本及证据不完整保持 `unverified`，AgentResult 永不升级为验收证据；Handoff v1 保持可读 |
+| AC-065 | PREPARE 明确拒绝后人工重试 | 没有 `preparing→ready` ACK provenance 的 blocked/paused WorkItem 在 claim 前读取持久 base 的 exact bundle，原子回到 preparing，幂等 PREPARE 成功后才允许 START；exact source 失败不 claim，已有 ACK 的 Turn-blocked WorkItem 不重复 PREPARE |
 
 ### 12.3 Live Fixture 顺序
 

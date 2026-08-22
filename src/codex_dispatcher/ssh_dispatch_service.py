@@ -98,11 +98,18 @@ class OfflineSshDispatchService:
         """Persist/recover the unique WorkItem and idempotently prepare its Runner repo."""
         repository = self._repository(task.repository)
         existing = self._store.get_work_item_by_issue(task.repository, task.issue_number)
+        preparation_acknowledged = (
+            self._store.runner_preparation_was_acknowledged(existing.work_item_id)
+            if existing is not None
+            and existing.state in {WorkItemState.BLOCKED, WorkItemState.PAUSED}
+            else None
+        )
         resolution = resolve_ssh_work_item(
             task=task,
             repository=repository,
             base_sha=base_sha,
             existing_work_item=existing,
+            runner_preparation_acknowledged=preparation_acknowledged,
             runner_root=runner_root,
             created_at=created_at,
         )
@@ -127,6 +134,13 @@ class OfflineSshDispatchService:
             )
         if needs_prepare:
             assert source_bundle is not None
+            if resolution.work_item.state in {
+                WorkItemState.BLOCKED,
+                WorkItemState.PAUSED,
+            }:
+                self._store.update_work_item_state(
+                    resolution.work_item.work_item_id, WorkItemState.PREPARING
+                )
             return self._orchestrator.prepare_work_item(
                 resolution.work_item.work_item_id,
                 source_bundle=source_bundle.artifact,

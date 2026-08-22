@@ -145,24 +145,70 @@ class SshDispatchPlanningTests(unittest.TestCase):
         ready = preparing.transition_to(WorkItemState.READY)
         running = ready.transition_to(WorkItemState.RUNNING)
         recoverable = (
-            (discovered, WorkItemAction.PREPARE),
-            (preparing, WorkItemAction.RETRY_PREPARE),
-            (running.transition_to(WorkItemState.WAITING_INPUT), WorkItemAction.REACTIVATE),
-            (running.transition_to(WorkItemState.REVIEW), WorkItemAction.REACTIVATE),
-            (running.transition_to(WorkItemState.BLOCKED), WorkItemAction.REACTIVATE),
-            (discovered.transition_to(WorkItemState.PAUSED), WorkItemAction.REACTIVATE),
+            (discovered, WorkItemAction.PREPARE, None),
+            (preparing, WorkItemAction.RETRY_PREPARE, None),
+            (
+                running.transition_to(WorkItemState.WAITING_INPUT),
+                WorkItemAction.REACTIVATE,
+                None,
+            ),
+            (
+                running.transition_to(WorkItemState.REVIEW),
+                WorkItemAction.REACTIVATE,
+                None,
+            ),
+            (
+                running.transition_to(WorkItemState.BLOCKED),
+                WorkItemAction.REACTIVATE,
+                True,
+            ),
+            (ready.transition_to(WorkItemState.PAUSED), WorkItemAction.REACTIVATE, True),
         )
 
-        for item, action in recoverable:
+        for item, action, preparation_acknowledged in recoverable:
             with self.subTest(state=item.state):
                 resolution = resolve_ssh_work_item(
                     task=claimed_task(),
                     repository=self.repository,
                     base_sha="b" * 40,
                     existing_work_item=item,
+                    runner_preparation_acknowledged=preparation_acknowledged,
                 )
                 self.assertIs(item, resolution.work_item)
                 self.assertEqual(action, resolution.action)
+
+    def test_blocked_or_paused_before_prepare_ack_retries_prepare(self) -> None:
+        discovered = WorkItem.new(
+            repository="owner/repo",
+            issue_number=42,
+            issue_node_id="I_kwDOFixture42",
+            base_branch="main",
+            base_sha=BASE_SHA,
+        )
+        states = (
+            discovered.transition_to(WorkItemState.BLOCKED),
+            discovered.transition_to(WorkItemState.PAUSED),
+        )
+
+        for item in states:
+            with self.subTest(state=item.state):
+                resolution = resolve_ssh_work_item(
+                    task=claimed_task(),
+                    repository=self.repository,
+                    base_sha=BASE_SHA,
+                    existing_work_item=item,
+                    runner_preparation_acknowledged=False,
+                )
+                self.assertEqual(WorkItemAction.RETRY_PREPARE, resolution.action)
+                with self.assertRaisesRegex(
+                    SshDispatchPlanningError, "preparation provenance"
+                ):
+                    resolve_ssh_work_item(
+                        task=claimed_task(),
+                        repository=self.repository,
+                        base_sha=BASE_SHA,
+                        existing_work_item=item,
+                    )
 
     def test_running_and_completed_work_items_fail_closed(self) -> None:
         running = ready_work_item().transition_to(WorkItemState.RUNNING)

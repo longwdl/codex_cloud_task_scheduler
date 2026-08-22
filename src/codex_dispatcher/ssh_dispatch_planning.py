@@ -95,6 +95,7 @@ def resolve_ssh_work_item(
     repository: RepositoryConfig,
     base_sha: str,
     existing_work_item: WorkItem | None = None,
+    runner_preparation_acknowledged: bool | None = None,
     runner_root: str = "/srv/codex-runner/work-items",
     created_at: str | None = None,
 ) -> WorkItemResolution:
@@ -121,14 +122,16 @@ def resolve_ssh_work_item(
         )
 
     _validate_existing_binding(task, repository, existing_work_item, runner_root)
+    if runner_preparation_acknowledged is not None and type(
+        runner_preparation_acknowledged
+    ) is not bool:
+        raise TypeError("runner_preparation_acknowledged must be a bool or None")
     action_by_state = {
         WorkItemState.DISCOVERED: WorkItemAction.PREPARE,
         WorkItemState.PREPARING: WorkItemAction.RETRY_PREPARE,
         WorkItemState.READY: WorkItemAction.START_TURN,
         WorkItemState.WAITING_INPUT: WorkItemAction.REACTIVATE,
         WorkItemState.REVIEW: WorkItemAction.REACTIVATE,
-        WorkItemState.BLOCKED: WorkItemAction.REACTIVATE,
-        WorkItemState.PAUSED: WorkItemAction.REACTIVATE,
     }
     if existing_work_item.state is WorkItemState.COMPLETED:
         raise SshDispatchPlanningError(
@@ -138,10 +141,21 @@ def resolve_ssh_work_item(
         raise SshDispatchPlanningError(
             "running WorkItem must be reconciled before another Turn"
         )
-    try:
-        action = action_by_state[existing_work_item.state]
-    except KeyError as exc:  # pragma: no cover - enum exhaustiveness guard
-        raise SshDispatchPlanningError("unsupported WorkItem state") from exc
+    if existing_work_item.state in {WorkItemState.BLOCKED, WorkItemState.PAUSED}:
+        if runner_preparation_acknowledged is None:
+            raise SshDispatchPlanningError(
+                "blocked or paused WorkItem requires Runner preparation provenance"
+            )
+        action = (
+            WorkItemAction.REACTIVATE
+            if runner_preparation_acknowledged
+            else WorkItemAction.RETRY_PREPARE
+        )
+    else:
+        try:
+            action = action_by_state[existing_work_item.state]
+        except KeyError as exc:  # pragma: no cover - enum exhaustiveness guard
+            raise SshDispatchPlanningError("unsupported WorkItem state") from exc
     return WorkItemResolution(
         existing_work_item,
         task_spec,

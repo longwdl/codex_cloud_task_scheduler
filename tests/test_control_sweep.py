@@ -140,6 +140,12 @@ class _FailingSource(_RecordingSource):
         raise RuntimeError("fixture source refresh failed")
 
 
+class _FailingExactSource(_RecordingSource):
+    def exact(self, repository: str, base_sha: str) -> SourceBundle:
+        super().exact(repository, base_sha)
+        raise RuntimeError("fixture exact source refresh failed")
+
+
 class _RecordingTracker(FakeTracker):
     def __init__(self, events: list[str]) -> None:
         super().__init__()
@@ -832,6 +838,112 @@ class SshControlSweepTests(unittest.TestCase):
                 RunnerOperation.START,
             ],
             [call.operation for call in self.transport.calls],
+        )
+
+    def test_rejected_prepare_reactivation_retries_prepare_before_start(self) -> None:
+        tracker = FakeTracker()
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        source = _RecordingSource()
+        self.transport.reject_next(RunnerOperation.PREPARE)
+        sweep = self._sweep(tracker, source)
+
+        rejected = sweep.run_once(turn_id=TURN_ID)
+
+        self.assertEqual(ControlSweepStatus.BLOCKED, rejected.status)
+        item = self.store.get_work_item_by_issue(task.repository, task.issue_number)
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertEqual(WorkItemState.BLOCKED, item.state)
+        self.assertFalse(
+            self.store.runner_preparation_was_acknowledged(item.work_item_id)
+        )
+        self.assertEqual((), self.store.list_turns(item.work_item_id))
+
+        followup = replace(
+            tracker.tasks[task.task_id],
+            state=TaskState.READY,
+            labels=("agent:ready", "exec:ssh-cli", "priority:p1"),
+            ready_approved_by="alice",
+            updated_at="2026-08-13T02:00:00Z",
+        )
+        tracker.ready_tasks = (followup,)
+        tracker.tasks[task.task_id] = followup
+        claim_count = sum(call.method == "claim" for call in tracker.calls)
+        with self.assertRaisesRegex(RuntimeError, "exact source refresh failed"):
+            self._sweep(tracker, _FailingExactSource()).run_once(turn_id=TURN_ID)
+        self.assertEqual(
+            claim_count,
+            sum(call.method == "claim" for call in tracker.calls),
+        )
+        still_blocked = self.store.get_work_item(item.work_item_id)
+        self.assertIsNotNone(still_blocked)
+        assert still_blocked is not None
+        self.assertEqual(WorkItemState.BLOCKED, still_blocked.state)
+        self.assertEqual(
+            [RunnerOperation.PREPARE],
+            [call.operation for call in self.transport.calls],
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, _blocked_result()),
+        )
+
+        retried = sweep.run_once(turn_id=TURN_ID)
+
+        self.assertEqual(ControlSweepStatus.BLOCKED, retried.status)
+        self.assertTrue(
+            self.store.runner_preparation_was_acknowledged(item.work_item_id)
+        )
+        self.assertEqual(
+            [
+                RunnerOperation.PREPARE,
+                RunnerOperation.PREPARE,
+                RunnerOperation.START,
+            ],
+            [call.operation for call in self.transport.calls],
+        )
+        self.assertEqual(
+            [
+                ("current", "owner/repo", "main"),
+                ("exact", "owner/repo", BASE_SHA),
+            ],
+            source.calls,
+        )
+
+        turn_followup = replace(
+            tracker.tasks[task.task_id],
+            state=TaskState.READY,
+            labels=("agent:ready", "exec:ssh-cli", "priority:p1"),
+            ready_approved_by="alice",
+            updated_at="2026-08-13T03:00:00Z",
+        )
+        tracker.ready_tasks = (turn_followup,)
+        tracker.tasks[task.task_id] = turn_followup
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, _blocked_result()),
+        )
+
+        blocked_turn_reactivation = sweep.run_once(turn_id="turn_" + "2" * 32)
+
+        self.assertEqual(ControlSweepStatus.BLOCKED, blocked_turn_reactivation.status)
+        self.assertEqual(
+            [
+                RunnerOperation.PREPARE,
+                RunnerOperation.PREPARE,
+                RunnerOperation.START,
+                RunnerOperation.RESUME,
+            ],
+            [call.operation for call in self.transport.calls],
+        )
+        self.assertEqual(
+            [
+                ("current", "owner/repo", "main"),
+                ("exact", "owner/repo", BASE_SHA),
+            ],
+            source.calls,
         )
 
     def test_interrupted_start_is_reconciled_without_prompt_replay(self) -> None:
