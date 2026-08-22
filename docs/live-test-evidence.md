@@ -3,6 +3,68 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Trusted Sol delegation receipt canary — 2026-08-22
+
+Commit `e4c528ccd009940a15a248f5ffd18b116429250a` made the Runner's primary
+`gpt-5.6-sol`/`xhigh` thread responsible for selecting among the pinned Spark, Luna, Terra, and Sol
+specialist profiles, restricted delegation to direct children, and added a metadata-only protocol-v2
+receipt derived from the isolated Codex `state_5.sqlite` edge and token delta. The receipt verifies
+the exact Codex version, role, model, reasoning effort, edge status, and per-Turn child token usage;
+it contains no prompt, agent message, tool argument, or model output. Additive migration 009 stores
+the canonical receipt and digest atomically with the terminal Turn.
+
+The exact Git archive SHA-256 was
+`2cc62b09b069c85067c0e3b67a9f0cb5ba74a915fa9b42bc00105354d447838a`. All 476 tests,
+`compileall`, and `git diff --check` passed locally. The same 476 tests and compilation passed from
+exact-byte writable staging copies under the real `codex-dispatcher` and `codex-runner` accounts on
+their respective Python 3.14 and 3.12 runtimes. Directly running the whole suite from the immutable
+Control release produced only nine known test-fixture write errors where tests intentionally create
+temporary directories below their source root; no runtime assertion failed. Matching SHA-256 values
+for the new observer, migration, and policy manifest were read independently on both hosts.
+
+Before switching, the Dispatcher timer was stopped, both services were inactive, SQLite reported
+`integrity_check=ok`, schema 8, and zero active Turns. Online Backup
+`state-20260822T132740.489798Z.db` was mode `0600` and independently passed integrity at schema 8.
+Both prior release/configuration/policy boundaries were preserved in root-only rollback directories.
+The archive was initially staged under an incorrectly prefilled long-SHA directory name; this was
+detected before either `current` link, configuration, or schema changed. Both candidate directories
+were renamed to the actual full commit SHA above and the unchanged archive bytes were reverified.
+
+The Runner switched first, installed policy digest
+`ac698244f3546e13574118fe72b132250353f42d79d614fe059d445e5449a946`, and read back primary Sol
+plus all four exact role/model/effort profiles through the production configuration loader. Control
+then switched to the same release and digest. Its first normal sweep was strictly `idle`, migrated
+only the additive schema 9 table, and left zero active Turns.
+
+The live canary reused existing Fixture Issue
+[`#34`](https://github.com/longwdl/codex-dispatcher-fixture/issues/34) and its existing bounded
+Runner image. A maintainer context requested two independent read-only verification work packages
+without selecting a model. Policy change retired generation 2 and created generation 3
+`sg_2c074df0dae940058789eb57ef60f50f` through the normal `policy_changed` Handoff
+`handoff_c6f91f00171d47d880be6617d86ad20a`. The exact-head Actions importer retained run
+[`32573230842`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32573230842) at
+checkpoint `78000887b8e4a9c1979d9bac68e174df0cbd6091`, and all three structured acceptance criteria
+remained `passed`.
+
+Primary session `01a029b1-9f5e-7353-89a7-fa2bda9de5a6` autonomously selected two different direct
+children: `terra_worker` on `gpt-5.6-terra`/`medium` and `spark_worker` on
+`gpt-5.3-codex-spark`/`medium`. Independent Runner state read-back matched the Control receipt:
+43,298 and 109,834 child tokens respectively, both edges rooted directly at the Sol session, exact
+Codex CLI `0.147.0`, and receipt SHA-256
+`2404ee36db1a6be78b296a376f4067c921ff15848ac7f2d9e299baa1ac70267c`. Turn
+`turn_fb971ef3814743c785712e89d11aaed3` finished `completed` with a clean worktree and unchanged
+checkpoint. Issue #34 returned to `agent:review`; Draft PR
+[`#37`](https://github.com/longwdl/codex-dispatcher-fixture/pull/37) stayed open and Draft at that
+exact head, while Fixture `main` remained `7ee18770d9faec6845f1dc4e32082dcc595c2832`.
+
+An immediate repeated normal sweep was strictly `idle`. Post-canary Online Backup
+`state-20260822T134306.553406Z.db` was mode `0600`, passed integrity at schema 9, and contained the
+single delegation receipt. Dispatcher and backup timers were restored active. Binary/config rollback
+requires stopping the Dispatcher timer and restoring both hosts' prior `current` links and policy
+digests together; rollback to schema-8 code additionally uses the validated pre-migration backup.
+No merge, release tag, force-push, branch deletion, Issue close, default-branch update, production
+access, network-policy change, or unrelated WorkItem mutation occurred.
+
 ## Rejected PREPARE reactivation fix — 2026-08-22
 
 Commit `c6ba48e31a914919bf3324c9a54bd43be6f9b17e` fixes the fail-closed reactivation gap exposed by
