@@ -3,6 +3,71 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Completed WorkItem live reclamation canary — 2026-08-23
+
+The first real reclamation canary used completed Fixture Issue
+[`#12`](https://github.com/longwdl/codex-dispatcher-fixture/issues/12), merged PR
+[`#13`](https://github.com/longwdl/codex-dispatcher-fixture/pull/13), and WorkItem
+`wi_594a1305a087ff78a0ab32f8`. Control already held one finished Turn, the exact task branch
+`codex/issue-12-594a1305a087`, and published HEAD
+`41e67598b506dcbfeac00e5871a812e6e9874078`. Runner read-back found the original registry and
+pre-bounded workspace intact: registry and `workspace.json` matched, the branch and HEAD were exact,
+and the worktree was clean. GitHub read-back independently found the Issue `agent:completed` and PR
+#13 merged from the exact task branch and published HEAD.
+
+The WorkItem predated bounded ext4 disks, so it had no image. The host had 22,545,264,640 available
+bytes, below the configured 8-GiB-image-plus-16-GiB-reserve admission boundary; the reserve was not
+lowered. With the Dispatcher timer stopped, no active Turn or container, and the Runner global lock
+held, the migration temporarily loaned the allocated image of already-blocked Fixture Issue #20.
+Both source trees were first copied to mode-protected Runner-local backups and compared. The #12
+tree was then installed into a newly formatted, dense, mode-`0600`, 8-GiB ext4 image using the same
+root ownership, mount, fsck, and identity constraints as normal provisioning. Stable content SHA-256
+was `9b68cafd42e0f08df35e52b7a6b8f420a8fb8ce8ce0f37a014ac23b5d9cd6808`; the comparison excluded
+only ext4 `lost+found`, Git's mutable `.git/index`, and fuse2fs `.fuse_hidden*` unlink artifacts.
+
+The migration failed closed twice before acceptance. The first attempt stopped after format/mount
+and before copying because a raw filesystem root lacked the owner/mode adjustment performed by
+normal `provision()`. The recovery applied that same adjustment and copied from the verified backup.
+A later byte-tree comparison rejected the expected Git index stat-cache update and one fuse2fs
+hidden unlink file; path-level comparison found those were the only differences, after which the
+stable-tree boundary above, exact branch/HEAD, clean worktree, and metadata identity all passed.
+Neither stop invoked `ARCHIVE` or changed Control state.
+
+Pre-canary Online Backup `state-20260822T171800.915615Z.db` was mode `0600`, passed
+`integrity_check`, was schema 12, and contained zero active Turns and zero archive rows. Control
+temporarily set `completed_retention_seconds=1`, reloaded the protected configuration successfully,
+and ran exactly one normal systemd sweep. The sweep returned `archived` for Issue #12. The original
+configuration was immediately restored at SHA-256
+`9bd4feaf06ec2c34a772ed89de56df8fddfea6f41676697ce0d07b65c20b0ae5`; automatic retention is
+again absent.
+
+Control's durable row is `archived`, binds expected HEAD
+`41e67598b506dcbfeac00e5871a812e6e9874078`, and records 8,589,934,592 reclaimed bytes and Runner
+time `2026-08-22T17:23:04.242245+00:00`. Runner's permanent tombstone matches the WorkItem and HEAD,
+has metadata SHA-256 `12982f3e0487bf417907b1c870579a26dbffa3b89daf4045de5a27f7e1a89a8f`, and is `archived`. The final
+image, image archive entry, workspace, and all staging entries are absent; the permanent registry is
+retained as designed.
+
+After reclamation, Issue #20 was reprovisioned at its original registry identity from the protected
+backup. Its stable tree SHA-256 remained
+`c48719d761e82425294f6fb408166b671cc84065996f745d1846759136b812ae`, its clean HEAD remained
+`f5037925502905fd3d22a807df7291ba1004bab9`, and its replacement image is again a dense 8-GiB
+regular file. The sensitive workspace backups were then deleted exactly; only a sanitized mode-`0600`
+evidence JSON remains under Runner `run/`. A repeated ordinary sweep with retention disabled was
+strict `idle`.
+
+Post-canary Online Backup `state-20260822T172641.390390Z.db` was mode `0600`, passed integrity and
+foreign-key checks at schema 12, and contained exactly one archived row and zero active Turns.
+Runner had an available global lock, zero running containers, six final images, empty image/workspace
+staging directories, and 22,545,313,792 available bytes (26.79%). Both timers were restored
+active/enabled; the first resumed timer-triggered sweep at `2026-08-23 01:27:37 CST` was also strict
+`idle`. No Issue label, PR, branch, merge, GitHub Actions run, Slack message, source release, network
+policy, or credential changed during this canary.
+
+The #12 workspace deletion is intentionally irreversible: restoring either SQLite backup does not
+restore the reclaimed image. Control rollback remains possible for database or binary faults, and
+Issue #20 was fully restored before timer activation, but there is no retained #12 workspace backup.
+
 ## Completed WorkItem lifecycle and disk reclamation release — 2026-08-23
 
 Commit `aef09f5ea9d4c78a9b8d86dedb972a2423274382` added the explicitly enabled completed-WorkItem
