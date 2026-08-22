@@ -358,43 +358,57 @@ class GitHubCliTracker:
         )
 
     def _last_ready_label_actor(self, repository: str, issue_number: int) -> str | None:
-        events = self._json_command(
+        events = self._json_lines_command(
             (
-                self._gh_path, "api", "--method", "GET", "--paginate", "--slurp",
+                self._gh_path, "api", "--method", "GET", "--paginate",
                 "-H", "Accept: application/vnd.github+json",
                 f"/repos/{repository}/issues/{issue_number}/timeline?per_page=100",
+                "--jq",
+                (
+                    '.[] | select(.event == "labeled" and '
+                    '.label.name == "agent:ready") | '
+                    "{event,created_at,actor:{login:.actor.login},"
+                    "label:{name:.label.name}}"
+                ),
             )
         )
-        if not isinstance(events, list):
-            return None
         latest: tuple[datetime, str] | None = None
-        for page in events:
-            if not isinstance(page, list):
+        for event in events:
+            if not isinstance(event, dict):
                 return None
-            for event in page:
-                if not isinstance(event, dict):
-                    return None
-                if event.get("event") != "labeled":
-                    continue
-                label = event.get("label")
-                if not isinstance(label, dict) or label.get("name") != "agent:ready":
-                    continue
-                actor = event.get("actor")
-                created_at = event.get("created_at")
-                if not isinstance(actor, dict):
-                    return None
-                login = actor.get("login")
-                if not isinstance(login, str) or not login or not isinstance(created_at, str):
-                    return None
-                try:
-                    occurred_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-                except ValueError:
-                    return None
-                if occurred_at.tzinfo is None:
-                    return None
-                if latest is None or occurred_at > latest[0]:
-                    latest = (occurred_at, login)
+            if event.get("event") != "labeled":
+                return None
+            label = event.get("label")
+            if not isinstance(label, dict) or label.get("name") != "agent:ready":
+                return None
+            actor = event.get("actor")
+            created_at = event.get("created_at")
+            if not isinstance(actor, dict):
+                return None
+            login = actor.get("login")
+            if not isinstance(login, str) or not login or not isinstance(created_at, str):
+                return None
+            try:
+                occurred_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if occurred_at.tzinfo is None:
+                return None
+            if latest is None or occurred_at > latest[0]:
+                latest = (occurred_at, login)
         return None if latest is None else latest[1]
+
+    def _json_lines_command(self, argv: tuple[str, ...]) -> tuple[Any, ...]:
+        result = self._command(argv)
+        values: list[Any] = []
+        for line in result.stdout.splitlines():
+            if not line:
+                raise GitHubCliTrackerError("gh returned malformed JSON Lines")
+            try:
+                values.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise GitHubCliTrackerError("gh returned malformed JSON Lines") from exc
+        return tuple(values)
 
     def _json_command(self, argv: tuple[str, ...]) -> Any:
         result = self._command(argv)

@@ -26,6 +26,10 @@ def result(payload: object) -> CommandResult:
     return CommandResult(0, json.dumps(payload), "")
 
 
+def json_lines_result(*payloads: object) -> CommandResult:
+    return CommandResult(0, "\n".join(json.dumps(payload) for payload in payloads), "")
+
+
 def issue(*, number: int = 12, labels: object | None = None) -> dict[str, object]:
     return {
         "id": f"I_kwDOFixture{number}",
@@ -81,21 +85,19 @@ class GitHubCliTrackerTests(unittest.TestCase):
             config_directories.append(config_directory)
             if argv[1:3] == ("issue", "list"):
                 return result([issue()])
-            return result(
-                [[
-                    {
-                        "event": "labeled",
-                        "created_at": "2026-08-13T01:00:00Z",
-                        "label": {"name": "agent:ready"},
-                        "actor": {"login": "alice"},
-                    },
-                    {
-                        "event": "labeled",
-                        "created_at": "2026-08-13T02:00:00Z",
-                        "label": {"name": "agent:ready"},
-                        "actor": {"login": "bob"},
-                    },
-                ]]
+            return json_lines_result(
+                {
+                    "event": "labeled",
+                    "created_at": "2026-08-13T01:00:00Z",
+                    "label": {"name": "agent:ready"},
+                    "actor": {"login": "alice"},
+                },
+                {
+                    "event": "labeled",
+                    "created_at": "2026-08-13T02:00:00Z",
+                    "label": {"name": "agent:ready"},
+                    "actor": {"login": "bob"},
+                },
             )
 
         with patch("codex_dispatcher.trackers.github_cli.run_command", side_effect=fake_run):
@@ -112,6 +114,8 @@ class GitHubCliTrackerTests(unittest.TestCase):
         self.assertEqual("api", calls[1][1])
         self.assertEqual("GET", calls[1][3])
         self.assertIn("/repos/owner/repo/issues/12/timeline?per_page=100", calls[1])
+        self.assertIn("--jq", calls[1])
+        self.assertNotIn("--slurp", calls[1])
         environment = keyword_arguments[0]["env"]
         assert isinstance(environment, dict)
         self.assertEqual("1", environment["GH_PROMPT_DISABLED"])
@@ -126,7 +130,7 @@ class GitHubCliTrackerTests(unittest.TestCase):
         )
         with patch(
             "codex_dispatcher.trackers.github_cli.run_command",
-            side_effect=[result([dispatching]), result([])],
+            side_effect=[result([dispatching]), json_lines_result()],
         ) as runner:
             tasks = GitHubCliTracker(gh_path=GH).list_open_tasks(
                 REPOSITORY, TaskState.DISPATCHING
@@ -148,11 +152,11 @@ class GitHubCliTrackerTests(unittest.TestCase):
             "codex_dispatcher.trackers.github_cli.run_command",
             side_effect=[
                 result([issue()]),
-                result([[{
+                json_lines_result({
                     "event": "labeled",
                     "created_at": "2026-08-13T02:00:00Z",
                     "label": {"name": "agent:ready"},
-                }]]),
+                }),
             ],
         ):
             tasks = GitHubCliTracker(gh_path=GH).list_ready_tasks(REPOSITORY)
@@ -234,7 +238,7 @@ class GitHubCliTrackerTests(unittest.TestCase):
     def test_get_task_and_json_command_failure(self) -> None:
         with patch(
             "codex_dispatcher.trackers.github_cli.run_command",
-            side_effect=[result(issue()), result([])],
+            side_effect=[result(issue()), json_lines_result()],
         ) as runner:
             task = GitHubCliTracker(gh_path=GH).get_task(REPOSITORY, "12")
         self.assertIsNotNone(task)
@@ -278,15 +282,15 @@ class GitHubCliTrackerTests(unittest.TestCase):
             "codex_dispatcher.trackers.github_cli.run_command",
             side_effect=[
                 result(ready),
-                result([[{
+                json_lines_result({
                     "event": "labeled",
                     "created_at": "2026-08-13T02:00:00Z",
                     "label": {"name": "agent:ready"},
                     "actor": {"login": "alice"},
-                }]]),
+                }),
                 result({"number": 12}),
                 result(dispatching),
-                result([]),
+                json_lines_result(),
             ],
         ) as runner:
             claimed = GitHubCliTracker(gh_path=GH).claim(
@@ -307,7 +311,7 @@ class GitHubCliTrackerTests(unittest.TestCase):
         paused = issue(labels=[label("agent:paused"), label("exec:cloud")])
         with patch(
             "codex_dispatcher.trackers.github_cli.run_command",
-            side_effect=[result(paused), result([])],
+            side_effect=[result(paused), json_lines_result()],
         ) as runner:
             claimed = GitHubCliTracker(gh_path=GH).claim(
                 REPOSITORY, "12", "worker", approved_by=("alice",)
@@ -318,12 +322,12 @@ class GitHubCliTrackerTests(unittest.TestCase):
     def test_claim_requires_explicit_trusted_ready_approver(self) -> None:
         with patch(
             "codex_dispatcher.trackers.github_cli.run_command",
-            side_effect=[result(issue()), result([[{
+            side_effect=[result(issue()), json_lines_result({
                 "event": "labeled",
                 "created_at": "2026-08-13T02:00:00Z",
                 "label": {"name": "agent:ready"},
                 "actor": {"login": "mallory"},
-            }]])],
+            })],
         ) as runner:
             claimed = GitHubCliTracker(gh_path=GH).claim(
                 REPOSITORY, "12", "worker", approved_by=("alice",)
