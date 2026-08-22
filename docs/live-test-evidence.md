@@ -71,6 +71,10 @@ their local Runner workspaces are not recoverable. This restored 31,155,769,344 
 above the existing admission boundary, while preserving every review, blocked, and active canary
 workspace. Rollback of the Control binary is to stop the timer and point `current` back to
 `3e709aea`; because schema stayed at 8, no database restoration is required for binary rollback.
+The restored timer's first real sweep was strictly `idle`, and both the Dispatcher and backup
+timers were enabled and active. Post-canary Online Backup
+`state-20260822T095716.230081Z.db` was mode `0600`, passed `integrity_check`, and contained the exact
+schema-2 Handoff.
 
 ## Structured Handoff and fresh-session Bootstrap fixture — 2026-08-22
 
