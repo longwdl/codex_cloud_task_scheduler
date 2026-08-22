@@ -91,6 +91,11 @@ remove `[session_runtime]` after a v2 WorkItem has started: the legacy
 rollback could start an unrelated v1 session. Generation directories are audit
 state and must not be deleted during rollback.
 
+Releases with schema migration 008 add the Handoff, Agent-result, and verified
+publication ledgers. Older binaries intentionally reject that newer schema.
+Rolling back such a release therefore requires the matching pre-migration
+SQLite Online Backup; changing only the `current` release symlink is unsafe.
+
 ## SSH contract
 
 Install `codex-runner-sshd.conf` only after creating the account and fixed wrapper. The key file must

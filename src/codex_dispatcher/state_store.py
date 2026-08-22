@@ -14,6 +14,16 @@ from pathlib import Path
 from typing import Any
 
 from codex_dispatcher.domain import Run, RunState, utc_now_iso
+from codex_dispatcher.handoffs import (
+    PublishedCheckpoint,
+    SessionHandoffSnapshot,
+    validate_handoff_id,
+)
+from codex_dispatcher.runner_protocol import (
+    AgentResult,
+    agent_result_to_json,
+    parse_agent_result,
+)
 from codex_dispatcher.slack_reporting import (
     SlackDeliveryReceipt,
     SlackDeliveryRecord,
@@ -699,6 +709,7 @@ class StateStore:
         approved_context_sha256: str,
         issue_allowed_paths: tuple[str, ...],
         input_head_sha: str,
+        handoff_id: str | None = None,
         expected_turn_number: int | None = None,
         turn_id: str | None = None,
         created_at: str | None = None,
@@ -734,6 +745,34 @@ class StateStore:
             if generation.state is SessionGenerationState.PLANNED:
                 if prompt_kind is not PromptKind.FULL:
                     raise ValueError("a planned SessionGeneration requires a full prompt")
+                if generation.generation_number == 1:
+                    if handoff_id is not None:
+                        raise ValueError("the first SessionGeneration cannot bind a handoff")
+                else:
+                    if handoff_id is None:
+                        raise ValueError("a replacement SessionGeneration requires a handoff")
+                    validate_handoff_id(handoff_id)
+                    row = connection.execute(
+                        "SELECT * FROM session_handoffs WHERE handoff_id = ? "
+                        "AND to_session_generation_id = ?",
+                        (handoff_id, generation.session_generation_id),
+                    ).fetchone()
+                    if row is None:
+                        raise ValueError("replacement SessionGeneration handoff is missing")
+                    handoff = self._row_to_session_handoff(row)
+                    if (
+                        handoff.work_item_id != work_item_id
+                        or handoff.to_generation_number != generation.generation_number
+                        or handoff.current_head_sha != input_head_sha
+                        or handoff.issue_revision != issue_revision
+                        or handoff.issue_content_sha256 != issue_content_sha256
+                        or handoff.task_spec_sha256 != task_spec_sha256
+                        or handoff.approved_context_sha256 != approved_context_sha256
+                        or handoff.to_agent_policy_sha256 != policy_sha256
+                    ):
+                        raise ValueError(
+                            "replacement SessionGeneration handoff conflicts with Turn inputs"
+                        )
                 baseline_was_recorded = generation.baseline_issue_revision is not None
                 generation = generation.record_baseline(
                     issue_revision=issue_revision,
@@ -801,6 +840,8 @@ class StateStore:
                         "concurrent session generation baseline/start update detected"
                     )
             elif generation.state is SessionGenerationState.ACTIVE:
+                if handoff_id is not None:
+                    raise ValueError("an active SessionGeneration cannot replay a handoff")
                 if prompt_kind is not PromptKind.DELTA:
                     raise ValueError("an active SessionGeneration requires a delta prompt")
                 if generation.codex_session_id is None:
@@ -848,6 +889,11 @@ class StateStore:
                 (turn.turn_id, session_generation_id),
             )
             self._insert_turn_prompt_input(connection, prompt_input)
+            if handoff_id is not None:
+                connection.execute(
+                    "INSERT INTO turn_handoff_bindings(turn_id, handoff_id) VALUES (?, ?)",
+                    (turn.turn_id, handoff_id),
+                )
             cursor = connection.execute(
                 "UPDATE work_items SET state = ?, updated_at = ? "
                 "WHERE work_item_id = ? AND state = 'ready'",
@@ -862,6 +908,7 @@ class StateStore:
                 "generation_turn_begun",
                 {
                     "generation_number": generation.generation_number,
+                    "handoff_id": handoff_id,
                     "prompt_kind": prompt_kind.value,
                     "session_generation_id": session_generation_id,
                     "turn_number": turn.turn_number,
@@ -875,6 +922,51 @@ class StateStore:
             "SELECT * FROM turn_prompt_inputs WHERE turn_id = ?", (turn_id,)
         ).fetchone()
         return self._row_to_turn_prompt_input(row) if row is not None else None
+
+    def get_turn_agent_result(self, turn_id: str) -> AgentResult | None:
+        row = self._connection.execute(
+            "SELECT result_json, result_sha256 FROM turn_agent_results WHERE turn_id = ?",
+            (turn_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        result_json = str(row["result_json"])
+        if sha256(result_json.encode("utf-8")).hexdigest() != row["result_sha256"]:
+            raise ValueError("persisted Agent result digest is invalid")
+        return parse_agent_result(result_json)
+
+    def get_session_handoff_for_generation(
+        self, session_generation_id: str
+    ) -> SessionHandoffSnapshot | None:
+        validate_session_generation_id(session_generation_id)
+        row = self._connection.execute(
+            "SELECT * FROM session_handoffs WHERE to_session_generation_id = ?",
+            (session_generation_id,),
+        ).fetchone()
+        return self._row_to_session_handoff(row) if row is not None else None
+
+    def get_turn_handoff(self, turn_id: str) -> SessionHandoffSnapshot | None:
+        row = self._connection.execute(
+            "SELECT session_handoffs.* FROM session_handoffs "
+            "JOIN turn_handoff_bindings USING(handoff_id) WHERE turn_id = ?",
+            (turn_id,),
+        ).fetchone()
+        return self._row_to_session_handoff(row) if row is not None else None
+
+    def list_work_item_publication_checkpoints(
+        self, work_item_id: str
+    ) -> tuple[PublishedCheckpoint, ...]:
+        if self.get_work_item(work_item_id) is None:
+            raise KeyError(f"work item not found: {work_item_id}")
+        return tuple(
+            self._row_to_published_checkpoint(row)
+            for row in self._connection.execute(
+                "SELECT publication_checkpoints.* FROM publication_checkpoints "
+                "JOIN turns USING(turn_id) WHERE turns.work_item_id = ? "
+                "ORDER BY turns.turn_number",
+                (work_item_id,),
+            )
+        )
 
     def list_session_generation_turn_prompt_inputs(
         self, session_generation_id: str
@@ -916,6 +1008,7 @@ class StateStore:
         policy_sha256: str | None = None,
         new_role: SessionGenerationRole = SessionGenerationRole.IMPLEMENTATION,
         new_session_generation_id: str | None = None,
+        handoff: SessionHandoffSnapshot | None = None,
         updated_at: str | None = None,
     ) -> tuple[SessionGeneration, SessionGeneration]:
         """Retire one idle active generation and atomically plan its replacement."""
@@ -974,6 +1067,12 @@ class StateStore:
                     (work_item_id,),
                 ).fetchone()[0]
             )
+            if handoff is None:
+                raise ValueError("session generation rotation requires a handoff")
+            if not isinstance(handoff, SessionHandoffSnapshot):
+                raise TypeError("handoff must be a SessionHandoffSnapshot")
+            if new_session_generation_id is None:
+                new_session_generation_id = handoff.to_session_generation_id
             replacement = SessionGeneration.new(
                 session_generation_id=new_session_generation_id,
                 work_item_id=work_item_id,
@@ -984,6 +1083,37 @@ class StateStore:
                 rotation_reason=rotation_reason,
                 at=now,
             )
+            trusted = handoff.trusted_facts
+            trusted_work_item = trusted["work_item"]
+            trusted_generation = trusted["generation"]
+            trusted_git = trusted["git"]
+            trusted_issue = trusted["issue"]
+            if (
+                handoff.work_item_id != work_item_id
+                or handoff.from_session_generation_id
+                != current.session_generation_id
+                or handoff.to_session_generation_id
+                != replacement.session_generation_id
+                or handoff.from_generation_number != current.generation_number
+                or handoff.to_generation_number != replacement.generation_number
+                or handoff.current_head_sha != work_item_anchor
+                or handoff.to_agent_policy_sha256 != new_policy_sha256
+                or trusted_work_item["repository"] != work_item.repository
+                or trusted_work_item["issue_number"] != work_item.issue_number
+                or trusted_git["base_sha"] != work_item.base_sha
+                or trusted_git["task_branch"] != work_item.task_branch
+                or trusted_generation["rotation_reason"] != rotation_reason
+            ):
+                raise ValueError("handoff identity conflicts with generation rotation")
+            if current.rotation_reason != "legacy_migration" and (
+                trusted_issue["content_sha256"]
+                != current.baseline_issue_content_sha256
+                or trusted_issue["task_spec_sha256"]
+                != current.baseline_task_spec_sha256
+            ):
+                raise ValueError(
+                    "handoff semantic inputs conflict with the source generation baseline"
+                )
             cursor = connection.execute(
                 "UPDATE session_generations SET state = ?, retired_at = ?, updated_at = ? "
                 "WHERE session_generation_id = ? AND state = 'active'",
@@ -1000,6 +1130,7 @@ class StateStore:
                     f"{current_session_generation_id}"
                 )
             self._insert_session_generation(connection, replacement)
+            self._insert_session_handoff(connection, handoff)
             self._insert_work_item_event(
                 connection,
                 work_item_id,
@@ -1008,6 +1139,8 @@ class StateStore:
                 {
                     "from_generation_number": current.generation_number,
                     "from_session_generation_id": current.session_generation_id,
+                    "handoff_id": handoff.handoff_id,
+                    "handoff_sha256": handoff.handoff_sha256,
                     "rotation_reason": rotation_reason,
                     "to_generation_number": replacement.generation_number,
                     "to_session_generation_id": replacement.session_generation_id,
@@ -1194,6 +1327,7 @@ class StateStore:
         output_head_sha: str,
         result_status: str,
         result_summary: str,
+        agent_result: AgentResult,
         input_tokens: int,
         cached_input_tokens: int,
         cache_write_input_tokens: int,
@@ -1202,6 +1336,15 @@ class StateStore:
         updated_at: str | None = None,
     ) -> tuple[WorkItem, SessionGeneration, Turn, TurnUsage]:
         """Record a terminal Agent receipt and usage without splitting its durability."""
+        if not isinstance(agent_result, AgentResult):
+            raise TypeError("agent_result must be an AgentResult")
+        if (
+            agent_result.status.value != result_status
+            or agent_result.summary != result_summary
+        ):
+            raise ValueError("Agent result conflicts with the terminal Turn fields")
+        result_json = agent_result_to_json(agent_result)
+        result_sha256 = sha256(result_json.encode("utf-8")).hexdigest()
         now = updated_at or utc_now_iso()
         usage = TurnUsage.new(
             turn_id=turn_id,
@@ -1308,6 +1451,23 @@ class StateStore:
                         usage.updated_at,
                     ),
                 )
+            existing_result = connection.execute(
+                "SELECT result_json, result_sha256 FROM turn_agent_results WHERE turn_id = ?",
+                (turn_id,),
+            ).fetchone()
+            if existing_result is not None:
+                if (
+                    existing_result["result_json"] != result_json
+                    or existing_result["result_sha256"] != result_sha256
+                ):
+                    raise ValueError("Turn already has a different Agent result receipt")
+            else:
+                connection.execute(
+                    "INSERT INTO turn_agent_results "
+                    "(turn_id, result_json, result_sha256, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (turn_id, result_json, result_sha256, now, now),
+                )
             if turn.output_sha256 is not None and turn.state not in ACTIVE_TURN_STATES:
                 return work_item, generation, turn, usage
             if work_item.state is not WorkItemState.RUNNING:
@@ -1350,11 +1510,25 @@ class StateStore:
         *,
         previous_sha: str,
         head_sha: str,
+        bundle_sha256: str,
+        changed_paths: tuple[str, ...],
+        commit_count: int,
+        size_bytes: int,
         updated_at: str | None = None,
     ) -> tuple[WorkItem, SessionGeneration]:
         """Advance matching WorkItem and generation publication anchors together."""
         previous_sha = validate_git_sha(previous_sha, "previous_sha")
         head_sha = validate_git_sha(head_sha, "head_sha")
+        checkpoint = PublishedCheckpoint(
+            head_sha=head_sha,
+            previous_sha=previous_sha,
+            bundle_sha256=bundle_sha256,
+            changed_paths=changed_paths,
+        )
+        if type(commit_count) is not int or not 1 <= commit_count <= 100:
+            raise ValueError("commit_count must be within the publication boundary")
+        if type(size_bytes) is not int or not 1 <= size_bytes <= 100 * 1024 * 1024:
+            raise ValueError("size_bytes must be within the publication boundary")
         now = updated_at or utc_now_iso()
         with self._transaction() as connection:
             generation, turn = self._require_bound_generation_turn_by_turn(connection, turn_id)
@@ -1362,6 +1536,18 @@ class StateStore:
             work_anchor = work_item.last_published_sha or work_item.base_sha
             generation_anchor = generation.last_published_sha or generation.start_head_sha
             if work_item.last_published_sha == head_sha and generation.last_published_sha == head_sha:
+                existing = connection.execute(
+                    "SELECT * FROM publication_checkpoints WHERE turn_id = ?",
+                    (turn_id,),
+                ).fetchone()
+                if existing is None or not self._publication_checkpoint_matches(
+                    existing,
+                    generation.session_generation_id,
+                    checkpoint,
+                    commit_count,
+                    size_bytes,
+                ):
+                    raise ValueError("recorded publication is missing or conflicts with evidence")
                 return work_item, generation
             if previous_sha != work_anchor or previous_sha != generation_anchor or head_sha == previous_sha:
                 raise ValueError("publication anchor no longer matches the bound generation")
@@ -1374,12 +1560,37 @@ class StateStore:
                 "WHERE session_generation_id = ?",
                 (head_sha, now, generation.session_generation_id),
             )
+            connection.execute(
+                "INSERT INTO publication_checkpoints "
+                "(turn_id, session_generation_id, previous_sha, head_sha, bundle_sha256, "
+                "changed_paths_json, commit_count, size_bytes, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    turn_id,
+                    generation.session_generation_id,
+                    checkpoint.previous_sha,
+                    checkpoint.head_sha,
+                    checkpoint.bundle_sha256,
+                    json.dumps(checkpoint.changed_paths, separators=(",", ":")),
+                    commit_count,
+                    size_bytes,
+                    now,
+                    now,
+                ),
+            )
             self._insert_work_item_event(
                 connection,
                 work_item.work_item_id,
                 turn_id,
                 "generation_commit_published",
-                {"head_sha": head_sha, "previous_sha": previous_sha},
+                {
+                    "bundle_sha256": bundle_sha256,
+                    "changed_paths": changed_paths,
+                    "commit_count": commit_count,
+                    "head_sha": head_sha,
+                    "previous_sha": previous_sha,
+                    "size_bytes": size_bytes,
+                },
                 now,
             )
             work_item = replace(work_item, last_published_sha=head_sha, updated_at=now)
@@ -2583,6 +2794,51 @@ class StateStore:
         )
 
     @staticmethod
+    def _insert_session_handoff(
+        connection: sqlite3.Connection, handoff: SessionHandoffSnapshot
+    ) -> None:
+        connection.execute(
+            "INSERT INTO session_handoffs "
+            "(handoff_id, work_item_id, from_session_generation_id, "
+            "to_session_generation_id, trusted_facts_json, untrusted_advisory_json, "
+            "handoff_sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                handoff.handoff_id,
+                handoff.work_item_id,
+                handoff.from_session_generation_id,
+                handoff.to_session_generation_id,
+                handoff.trusted_facts_json,
+                handoff.untrusted_advisory_json,
+                handoff.handoff_sha256,
+                handoff.created_at,
+            ),
+        )
+
+    @staticmethod
+    def _publication_checkpoint_matches(
+        row: sqlite3.Row,
+        session_generation_id: str,
+        checkpoint: PublishedCheckpoint,
+        commit_count: int,
+        size_bytes: int,
+    ) -> bool:
+        try:
+            persisted_paths = StateStore._parse_string_tuple(
+                row["changed_paths_json"], "persisted publication changed paths"
+            )
+        except ValueError:
+            return False
+        return (
+            row["session_generation_id"] == session_generation_id
+            and row["previous_sha"] == checkpoint.previous_sha
+            and row["head_sha"] == checkpoint.head_sha
+            and row["bundle_sha256"] == checkpoint.bundle_sha256
+            and persisted_paths == checkpoint.changed_paths
+            and row["commit_count"] == commit_count
+            and row["size_bytes"] == size_bytes
+        )
+
+    @staticmethod
     def _insert_work_item_event(
         connection: sqlite3.Connection,
         work_item_id: str,
@@ -2692,6 +2948,21 @@ class StateStore:
         values = dict(row)
         values["prompt_kind"] = PromptKind(values["prompt_kind"])
         return TurnPromptInput(**values)
+
+    @staticmethod
+    def _row_to_session_handoff(row: sqlite3.Row) -> SessionHandoffSnapshot:
+        return SessionHandoffSnapshot(**dict(row))
+
+    @staticmethod
+    def _row_to_published_checkpoint(row: sqlite3.Row) -> PublishedCheckpoint:
+        return PublishedCheckpoint(
+            head_sha=row["head_sha"],
+            previous_sha=row["previous_sha"],
+            bundle_sha256=row["bundle_sha256"],
+            changed_paths=StateStore._parse_string_tuple(
+                row["changed_paths_json"], "persisted publication changed paths"
+            ),
+        )
 
     @staticmethod
     def _row_to_slack_delivery(row: sqlite3.Row) -> SlackDeliveryRecord:

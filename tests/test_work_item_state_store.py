@@ -7,9 +7,14 @@ from contextlib import closing
 from importlib.resources import files
 from pathlib import Path
 
+from codex_dispatcher.handoffs import (
+    SessionHandoffSnapshot,
+    build_session_handoff_snapshot,
+)
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.work_items import (
     PromptKind,
+    SessionGeneration,
     SessionGenerationRole,
     SessionGenerationState,
     TaskBranchSource,
@@ -30,6 +35,38 @@ def make_item(issue_number: int) -> WorkItem:
         base_branch="main",
         base_sha="a" * 40,
         at=f"2026-01-{issue_number:02d}T00:00:00.000000Z",
+    )
+
+
+def rotation_handoff(
+    item: WorkItem,
+    generation: SessionGeneration,
+    *,
+    target_id: str,
+    target_policy: str,
+    reason: str,
+) -> SessionHandoffSnapshot:
+    return build_session_handoff_snapshot(
+        work_item=item,
+        from_generation=generation,
+        to_session_generation_id=target_id,
+        to_generation_number=generation.generation_number + 1,
+        to_agent_policy_sha256=target_policy,
+        rotation_reason=reason,
+        issue_revision="revision",
+        issue_content_sha256=(generation.baseline_issue_content_sha256 or "d" * 64),
+        task_spec_sha256=(generation.baseline_task_spec_sha256 or "e" * 64),
+        approved_context_sha256=(
+            generation.baseline_approved_context_sha256 or "1" * 64
+        ),
+        acceptance_criteria="Fixture acceptance",
+        required_checks=("tests",),
+        published_checkpoints=(),
+        source_turn_id=None,
+        source_result_status=None,
+        source_result_summary=None,
+        source_agent_result=None,
+        created_at="2026-08-22T00:00:00Z",
     )
 
 
@@ -69,7 +106,10 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
                 legacy_runs = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
-                self.assertEqual([(1,), (2,), (3,), (4,), (5,), (6,), (7,)], versions)
+                self.assertEqual(
+                    [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)],
+                    versions,
+                )
             self.assertEqual(0, legacy_runs)
 
     def test_additive_migration_persists_one_issue_identity_and_bindings(self) -> None:
@@ -135,7 +175,10 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 versions = connection.execute(
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
-                self.assertEqual([(1,), (2,), (3,), (4,), (5,), (6,), (7,)], versions)
+                self.assertEqual(
+                    [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)],
+                    versions,
+                )
 
     def test_session_generation_ledger_is_atomic_and_turn_binding_is_immutable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -441,6 +484,39 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     SessionGenerationState.ACTIVE,
                     store.get_session_generation(active.session_generation_id).state,
                 )
+                with self.assertRaisesRegex(ValueError, "requires a handoff"):
+                    store.rotate_session_generation(
+                        item.work_item_id,
+                        current_session_generation_id=active.session_generation_id,
+                        current_generation_number=1,
+                        expected_current_policy_sha256="c" * 64,
+                        new_policy_sha256="d" * 64,
+                        rotation_reason="missing-handoff",
+                    )
+                self.assertEqual(
+                    SessionGenerationState.ACTIVE,
+                    store.get_session_generation(active.session_generation_id).state,
+                )
+                with self.assertRaisesRegex(ValueError, "handoff identity"):
+                    store.rotate_session_generation(
+                        item.work_item_id,
+                        current_session_generation_id=active.session_generation_id,
+                        current_generation_number=1,
+                        expected_current_policy_sha256="c" * 64,
+                        new_policy_sha256="d" * 64,
+                        rotation_reason="requested-reason",
+                        handoff=rotation_handoff(
+                            item,
+                            active,
+                            target_id="sg_" + "3" * 32,
+                            target_policy="d" * 64,
+                            reason="different-reason",
+                        ),
+                    )
+                self.assertEqual(
+                    SessionGenerationState.ACTIVE,
+                    store.get_session_generation(active.session_generation_id).state,
+                )
                 retired, replacement = store.rotate_session_generation(
                     item.work_item_id,
                     current_session_generation_id=active.session_generation_id,
@@ -449,6 +525,14 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     new_policy_sha256="d" * 64,
                     rotation_reason="approved-context-changed",
                     new_role=SessionGenerationRole.AUDIT,
+                    new_session_generation_id="sg_" + "2" * 32,
+                    handoff=rotation_handoff(
+                        item,
+                        active,
+                        target_id="sg_" + "2" * 32,
+                        target_policy="d" * 64,
+                        reason="approved-context-changed",
+                    ),
                 )
                 self.assertEqual(SessionGenerationState.RETIRED, retired.state)
                 self.assertEqual(SessionGenerationState.PLANNED, replacement.state)
@@ -495,6 +579,14 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     expected_current_policy_sha256=None,
                     new_policy_sha256="d" * 64,
                     rotation_reason="legacy-policy-upgrade",
+                    new_session_generation_id="sg_" + "9" * 32,
+                    handoff=rotation_handoff(
+                        item,
+                        store.get_session_generation(legacy_id),
+                        target_id="sg_" + "9" * 32,
+                        target_policy="d" * 64,
+                        reason="legacy-policy-upgrade",
+                    ),
                 )
                 self.assertEqual(SessionGenerationState.RETIRED, retired.state)
                 self.assertEqual("d" * 64, replacement.policy_sha256)

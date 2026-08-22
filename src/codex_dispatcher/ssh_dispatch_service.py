@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Iterable
+from uuid import uuid4
 
 from codex_dispatcher.config import Config, RepositoryConfig
 from codex_dispatcher.git_bundle_verifier import GitBundleVerificationError
@@ -23,6 +24,7 @@ from codex_dispatcher.ssh_dispatch_planning import (
     SshDispatchPlanningError,
     WorkItemAction,
     build_ssh_generation_turn_plan,
+    build_ssh_session_handoff_snapshot,
     build_ssh_turn_plan,
     resolve_ssh_work_item,
     validate_ssh_active_generation_continuity,
@@ -130,6 +132,7 @@ class OfflineSshDispatchService:
         turn_id: str | None = None,
     ) -> TurnProgress:
         """Freeze and run the next Turn while atomically checking its Prompt number."""
+        comments = tuple(comments)
         repository = self._repository(task.repository)
         work_item = self._store.get_work_item_by_issue(
             task.repository, task.issue_number
@@ -167,6 +170,7 @@ class OfflineSshDispatchService:
             delivered_context_sha256: str | None = None
             prior_status: str | None = None
             prior_summary: str | None = None
+            handoff = None
             if generation.state is SessionGenerationState.PLANNED:
                 if generation_turns or prompt_inputs:
                     raise SshDispatchPlanningError(
@@ -176,6 +180,14 @@ class OfflineSshDispatchService:
                     raise SshDispatchPlanningError(
                         "planned session generation policy conflicts with configuration"
                     )
+                if generation.generation_number > 1:
+                    handoff = self._store.get_session_handoff_for_generation(
+                        generation.session_generation_id
+                    )
+                    if handoff is None:
+                        raise SshDispatchPlanningError(
+                            "replacement session generation has no durable handoff"
+                        )
             elif generation.state is SessionGenerationState.ACTIVE:
                 is_legacy = generation.policy_sha256 is None
                 if is_legacy:
@@ -238,6 +250,32 @@ class OfflineSshDispatchService:
                         raise SshDispatchPlanningError(
                             "session generation budget is exhausted before required rotation"
                         )
+                    next_session_generation_id = f"sg_{uuid4().hex}"
+                    source_turn = generation_turns[-1] if generation_turns else None
+                    source_agent_result = (
+                        self._store.get_turn_agent_result(source_turn.turn_id)
+                        if source_turn is not None
+                        else None
+                    )
+                    handoff = build_ssh_session_handoff_snapshot(
+                        task=task,
+                        repository=repository,
+                        work_item=work_item,
+                        from_generation=generation,
+                        to_session_generation_id=next_session_generation_id,
+                        to_generation_number=generation.generation_number + 1,
+                        to_agent_policy_sha256=session_runtime.agent_policy_digest,
+                        rotation_reason=rotation_reason,
+                        published_checkpoints=(
+                            self._store.list_work_item_publication_checkpoints(
+                                work_item.work_item_id
+                            )
+                        ),
+                        source_turn=source_turn,
+                        source_agent_result=source_agent_result,
+                        comments=comments,
+                        created_at=datetime.now(timezone.utc).isoformat(),
+                    )
                     _, generation = self._store.rotate_session_generation(
                         work_item.work_item_id,
                         current_session_generation_id=(
@@ -247,6 +285,8 @@ class OfflineSshDispatchService:
                         expected_current_policy_sha256=generation.policy_sha256,
                         new_policy_sha256=session_runtime.agent_policy_digest,
                         rotation_reason=rotation_reason,
+                        new_session_generation_id=next_session_generation_id,
+                        handoff=handoff,
                     )
                     generation_turns = ()
                     prompt_inputs = ()
@@ -270,6 +310,7 @@ class OfflineSshDispatchService:
                 delivered_context_sha256=delivered_context_sha256,
                 prior_status=prior_status,
                 prior_summary=prior_summary,
+                handoff=handoff,
             )
             return self._orchestrator.run_generation_turn(
                 work_item.work_item_id,
@@ -279,6 +320,11 @@ class OfflineSshDispatchService:
                 prompt_kind=generation_plan.prompt_kind,
                 inputs=generation_plan.inputs,
                 issue_allowed_paths=generation_plan.task_spec.allowed_paths,
+                handoff_id=(
+                    generation_plan.handoff.handoff_id
+                    if generation_plan.handoff is not None
+                    else None
+                ),
                 expected_turn_number=generation_plan.turn_number,
                 turn_id=turn_id,
             )

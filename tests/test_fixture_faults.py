@@ -105,6 +105,8 @@ def _plan(item: WorkItem) -> PublicationPlan:
         expected_remote_sha=None,
         bundle_sha256="c" * 64,
         changed_paths=("README.md",),
+        commit_count=1,
+        size_bytes=1,
     )
 
 

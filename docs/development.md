@@ -136,11 +136,13 @@ unavailable and is not the production deployment profile.
 
 ## Architecture constraints for offline code
 
-- One GitHub Issue maps to one WorkItem, stable branch, directory, Codex session, Slack thread, and
-  Draft PR until completion.
-- A WorkItem may have multiple ordered Turns; Turn identity never changes branch or session identity.
+- One GitHub Issue maps to one WorkItem, stable branch, directory, Slack thread, and Draft PR until
+  completion; it may use bounded ordered Codex session generations.
+- A WorkItem may have multiple ordered Turns; each Turn belongs to exactly one generation, while
+  generation replacement never changes the stable branch or directory.
 - Only one Turn may be active globally.
-- Missing or conflicting Codex session state is blocked, never replaced automatically.
+- Missing or conflicting active-generation Codex session state is blocked. Policy-driven generation
+  replacement occurs only at a durable idle checkpoint with an atomic structured Handoff.
 - Slack has no inbound adapter or command surface.
 - Codex has no GitHub write credential.
 - Publisher accepts only a WorkItem ID and expected full commit SHA. Repository, branch, remote, and

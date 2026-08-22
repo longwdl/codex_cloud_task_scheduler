@@ -212,6 +212,7 @@ class OfflineTurnOrchestrator:
         prompt_kind: PromptKind,
         inputs: CanonicalInputSnapshot,
         issue_allowed_paths: tuple[str, ...],
+        handoff_id: str | None = None,
         expected_turn_number: int | None = None,
         turn_id: str | None = None,
     ) -> TurnProgress:
@@ -250,6 +251,7 @@ class OfflineTurnOrchestrator:
                 approved_context_sha256=inputs.approved_context_sha256,
                 issue_allowed_paths=issue_allowed_paths,
                 input_head_sha=input_head_sha,
+                handoff_id=handoff_id,
                 expected_turn_number=expected_turn_number,
                 turn_id=turn_id,
             )
@@ -567,10 +569,18 @@ class OfflineTurnOrchestrator:
                         head_sha=plan.source_sha,
                     )
                 else:
+                    if plan.commit_count is None or plan.size_bytes is None:
+                        raise TurnOrchestrationError(
+                            "generation publication plan has incomplete evidence"
+                        )
                     work_item, _ = self._store.record_generation_publication(
                         turn_id,
                         previous_sha=previous_sha,
                         head_sha=plan.source_sha,
+                        bundle_sha256=plan.bundle_sha256,
+                        changed_paths=plan.changed_paths,
+                        commit_count=plan.commit_count,
+                        size_bytes=plan.size_bytes,
                     )
                 if self._publication_recorded_hook is not None:
                     self._publication_recorded_hook(work_item, turn)
@@ -697,6 +707,7 @@ class OfflineTurnOrchestrator:
             output_head_sha=reply.head_sha,
             result_status=reply.result.status.value,
             result_summary=reply.result.summary,
+            agent_result=reply.result,
             input_tokens=reply.usage.input_tokens,
             cached_input_tokens=reply.usage.cached_input_tokens,
             cache_write_input_tokens=reply.usage.cache_write_input_tokens,

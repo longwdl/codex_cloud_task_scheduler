@@ -853,6 +853,10 @@ git diff --check
 | AC-056 | durable START 后真实 SSH 客户端中断 | 仅在本地 WorkItem/Turn 已持久化且第二条只读 STATUS 证明 Runner durable executing/finished 后，复核 primary SSH 的 exact argv/PID/PGID/SID 并只终止该进程组；同一 Turn 留在 reconciling，恢复只走 STATUS/EXPORT，不重发 Prompt，并最终只产生一套身份和一个 PR |
 | AC-057 | Linux Control Host systemd 服务化 | 固定无参数 wrapper 只执行一次 write-enabled recovery-first sweep；oneshot/timer 不重叠，token 只由 root-only EnvironmentFile 注入，unit 无 fixture 入口且只写受保护的 state/runtime 目录 |
 | AC-058 | Control Host SQLite 定时备份 | 无 token/无网络 oneshot 使用 Online Backup API，源库和备份均 integrity=ok 后原子发布 `0600` 文件；碰撞不覆盖，失败清理暂存，不自动删除旧备份 |
+| AC-059 | generation 安全轮换 | 只在无活动 Turn 且 WorkItem/旧代 published anchor 一致时，同一事务 retire 旧代、plan 新代并写入唯一 Handoff |
+| AC-060 | Handoff 可信边界 | verified publication facts 与 `untrusted_advisory` 分离；Agent summary/tests/paths/next step 不得成为 CI 或验收事实 |
+| AC-061 | replacement Bootstrap | 新代首个 Full START 必须绑定同一 durable Handoff，并先校验 AGENTS/HEAD/commits/code/tests/Issue；同代 Delta 不重放 Handoff |
+| AC-062 | Handoff 崩溃恢复 | rotation 后、START 前中断时恢复同一 planned generation/Handoff；START 回执歧义仍只用 STATUS，不生成第二次 START |
 
 ### 12.3 Live Fixture 顺序
 
@@ -885,7 +889,7 @@ Fixture PR `#13` 后的正常完成态投影和重复 idle sweep 验证；comple
 | 私有源码外传 | 仓库机密性损失 | 只接入批准仓库、Runner 不接触生产 Secret、后续网络隔离 |
 | Publisher 权限仓库级 | 未保护 ref 被修改 | token 不给 Codex、固定参数、精确 SHA、无 force/delete/tag、分支保护 |
 | 恶意 bundle/Git 配置 | Control Host 命令执行或凭据泄漏 | quarantine、固定 Git 配置、禁 hook/filter/protocol、保持 Git 补丁更新 |
-| session 丢失 | 上下文和未发布工作损失 | 同目录/共享 CODEX_HOME/精确 session ID、每 Turn checkpoint、丢失时 blocked 不替换 |
+| session 丢失或上下文膨胀 | 上下文和未发布工作损失 | 每 Turn 发布 checkpoint；仅在安全点按预算换代；原子 Handoff + 新代 Bootstrap；活动 Turn 歧义仍 blocked、不盲目替换 |
 | 共享 CODEX_HOME 被破坏 | 所有本地 session 和 ChatGPT 登录状态丢失 | 目录 0700、单 Turn、Runner 无高价值凭据、主机可重建；Docker 阶段重做认证隔离 |
 | SQLite 损坏 | 映射和恢复锚点损失 | online backup、integrity check、GitHub/Runner 对账 |
 | Slack 故障 | 详情不可见 | GitHub/SQLite 仍为事实来源，恢复后幂等补发 |

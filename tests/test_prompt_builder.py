@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import unittest
 
+from codex_dispatcher.handoffs import build_session_handoff_snapshot
 from codex_dispatcher.prompt_builder import (
     ApprovedContextItem,
     build_canonical_input_snapshot,
@@ -13,27 +14,73 @@ from codex_dispatcher.prompt_builder import (
 )
 from codex_dispatcher.task_spec import parse_task_spec
 from codex_dispatcher.trackers.base import TrackerComment
+from codex_dispatcher.work_items import (
+    SessionGeneration,
+    SessionGenerationRole,
+    WorkItem,
+)
 from tests.test_task_spec import BODY
 
 
-WORK_ITEM_ID = "wi_" + "a" * 24
 GENERATION_ID = "sg_" + "b" * 32
 POLICY_DIGEST = "c" * 64
 HEAD_SHA = "d" * 40
+WORK_ITEM_ID = "wi_" + "a" * 24
+PROMPT_ITEM = WorkItem.new(
+    repository="owner/repo",
+    issue_number=42,
+    issue_node_id="I_prompt_fixture",
+    base_branch="main",
+    base_sha=HEAD_SHA,
+    at="2026-08-22T00:00:00Z",
+)
+GENERATION_WORK_ITEM_ID = PROMPT_ITEM.work_item_id
 
 
 def generation_arguments() -> dict[str, object]:
     return {
-        "work_item_id": WORK_ITEM_ID,
+        "work_item_id": GENERATION_WORK_ITEM_ID,
         "session_generation_id": GENERATION_ID,
         "session_generation": 2,
         "agent_policy_digest": POLICY_DIGEST,
         "turn_number": 3,
         "issue_revision": "2026-08-22T01:02:03Z",
         "repository": "owner/repo",
-        "branch": "codex/issue-42-aaaaaaaaaaaa",
+        "branch": PROMPT_ITEM.task_branch,
         "input_head_sha": HEAD_SHA,
     }
+
+
+def generation_handoff(inputs):
+    source = SessionGeneration.new(
+        work_item_id=GENERATION_WORK_ITEM_ID,
+        generation_number=1,
+        role=SessionGenerationRole.IMPLEMENTATION,
+        start_head_sha=HEAD_SHA,
+        policy_sha256="e" * 64,
+        session_generation_id="sg_" + "a" * 32,
+        at="2026-08-22T00:00:00Z",
+    )
+    return build_session_handoff_snapshot(
+        work_item=PROMPT_ITEM,
+        from_generation=source,
+        to_session_generation_id=GENERATION_ID,
+        to_generation_number=2,
+        to_agent_policy_sha256=POLICY_DIGEST,
+        rotation_reason="context_pressure",
+        issue_revision="2026-08-22T01:02:03Z",
+        issue_content_sha256=inputs.issue_content_sha256,
+        task_spec_sha256=inputs.task_spec_sha256,
+        approved_context_sha256=inputs.approved_context_sha256,
+        acceptance_criteria=inputs.task_spec.acceptance_criteria,
+        required_checks=("tests",),
+        published_checkpoints=(),
+        source_turn_id=None,
+        source_result_status=None,
+        source_result_summary=None,
+        source_agent_result=None,
+        created_at="2026-08-22T01:02:03Z",
+    )
 
 
 class PromptBuilderTests(unittest.TestCase):
@@ -198,6 +245,7 @@ class PromptBuilderTests(unittest.TestCase):
         prompt = build_generation_full_prompt_snapshot(
             **generation_arguments(),
             inputs=inputs,
+            handoff=generation_handoff(inputs),
         )
 
         self.assertEqual(("IC_1", "IC_2"), prompt.included_comment_ids)
@@ -211,6 +259,8 @@ class PromptBuilderTests(unittest.TestCase):
         self.assertNotIn("ignored", prompt.content)
         self.assertIn(inputs.issue_content_sha256, prompt.content)
         self.assertIn("Do not push, merge, deploy", prompt.content)
+        self.assertIn("Fresh-session bootstrap", prompt.content)
+        self.assertIn("UNTRUSTED handoff advisory", prompt.content)
 
     def test_generation_delta_contains_only_explicit_new_context(self) -> None:
         inputs = build_canonical_input_snapshot(

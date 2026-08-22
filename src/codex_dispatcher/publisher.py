@@ -101,6 +101,8 @@ class PublicationPlan:
     expected_remote_sha: str | None
     bundle_sha256: str
     changed_paths: tuple[str, ...]
+    commit_count: int | None = None
+    size_bytes: int | None = None
     force: bool = False
     delete: bool = False
 
@@ -152,6 +154,8 @@ def plan_publication(
         expected_remote_sha=work_item.last_published_sha,
         bundle_sha256=bundle.bundle_sha256,
         changed_paths=bundle.changed_paths,
+        commit_count=bundle.commit_count,
+        size_bytes=bundle.size_bytes,
     )
 
 

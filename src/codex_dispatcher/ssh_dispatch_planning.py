@@ -8,6 +8,11 @@ from enum import StrEnum
 from typing import Iterable
 
 from codex_dispatcher.config import RepositoryConfig
+from codex_dispatcher.handoffs import (
+    PublishedCheckpoint,
+    SessionHandoffSnapshot,
+    build_session_handoff_snapshot,
+)
 from codex_dispatcher.prompt_builder import (
     ApprovedContextItem,
     CanonicalInputSnapshot,
@@ -19,6 +24,7 @@ from codex_dispatcher.prompt_builder import (
     canonical_approved_context_sha256,
 )
 from codex_dispatcher.scheduler import SSH_CLI_EXECUTOR_LABEL
+from codex_dispatcher.runner_protocol import AgentResult
 from codex_dispatcher.task_spec import (
     TaskSpec,
     TaskSpecError,
@@ -30,6 +36,7 @@ from codex_dispatcher.work_items import (
     PromptKind,
     SessionGeneration,
     SessionGenerationState,
+    Turn,
     WorkItem,
     WorkItemState,
     stable_work_item_identity,
@@ -78,6 +85,7 @@ class SshGenerationTurnPlan:
     inputs: CanonicalInputSnapshot
     prompt_kind: PromptKind
     prompt: PromptSnapshot
+    handoff: SessionHandoffSnapshot | None
 
 
 def resolve_ssh_work_item(
@@ -198,6 +206,7 @@ def build_ssh_generation_turn_plan(
     delivered_context_sha256: str | None = None,
     prior_status: str | None = None,
     prior_summary: str | None = None,
+    handoff: SessionHandoffSnapshot | None = None,
 ) -> SshGenerationTurnPlan:
     """Freeze a fail-closed full or incremental protocol-v2 Turn."""
     task_spec, issue_revision = _validate_claimed_task(task, repository)
@@ -260,8 +269,26 @@ def build_ssh_generation_turn_plan(
                 "a planned generation cannot carry resume-only inputs"
             )
         prompt_kind = PromptKind.FULL
-        prompt = build_generation_full_prompt_snapshot(**prompt_arguments)
+        if session_generation.generation_number == 1:
+            if handoff is not None:
+                raise SshDispatchPlanningError(
+                    "the first session generation cannot contain a handoff"
+                )
+        elif handoff is None:
+            raise SshDispatchPlanningError(
+                "a replacement session generation requires a durable handoff"
+            )
+        try:
+            prompt = build_generation_full_prompt_snapshot(
+                **prompt_arguments, handoff=handoff
+            )
+        except (TypeError, ValueError) as exc:
+            raise SshDispatchPlanningError(str(exc)) from exc
     elif session_generation.state is SessionGenerationState.ACTIVE:
+        if handoff is not None:
+            raise SshDispatchPlanningError(
+                "an active session generation cannot replay a handoff"
+            )
         _validate_active_generation_inputs(
             session_generation=session_generation,
             inputs=inputs,
@@ -307,7 +334,79 @@ def build_ssh_generation_turn_plan(
         inputs=inputs,
         prompt_kind=prompt_kind,
         prompt=prompt,
+        handoff=handoff,
     )
+
+
+def build_ssh_session_handoff_snapshot(
+    *,
+    task: TrackerTask,
+    repository: RepositoryConfig,
+    work_item: WorkItem,
+    from_generation: SessionGeneration,
+    to_session_generation_id: str,
+    to_generation_number: int,
+    to_agent_policy_sha256: str,
+    rotation_reason: str,
+    published_checkpoints: tuple[PublishedCheckpoint, ...],
+    source_turn: Turn | None,
+    source_agent_result: AgentResult | None,
+    comments: Iterable[object],
+    created_at: str,
+) -> SessionHandoffSnapshot:
+    """Freeze trusted Dispatcher/Git facts and a separately untrusted advisory."""
+    task_spec, issue_revision = _validate_claimed_task(task, repository)
+    _validate_existing_binding(task, repository, work_item, _runner_root_for(work_item))
+    if from_generation.work_item_id != work_item.work_item_id:
+        raise SshDispatchPlanningError(
+            "source session generation does not belong to the WorkItem"
+        )
+    if from_generation.state is not SessionGenerationState.ACTIVE:
+        raise SshDispatchPlanningError(
+            "only an active session generation can produce a handoff"
+        )
+    inputs = build_canonical_input_snapshot(
+        issue_title=task.title,
+        task_spec=task_spec,
+        comments=comments,
+        maintainers=repository.maintainers,
+    )
+    if from_generation.rotation_reason != "legacy_migration":
+        if (
+            from_generation.baseline_issue_content_sha256
+            != inputs.issue_content_sha256
+            or from_generation.baseline_task_spec_sha256 != inputs.task_spec_sha256
+        ):
+            raise SshDispatchPlanningError(
+                "source generation semantic baseline conflicts with handoff inputs"
+            )
+    try:
+        return build_session_handoff_snapshot(
+            work_item=work_item,
+            from_generation=from_generation,
+            to_session_generation_id=to_session_generation_id,
+            to_generation_number=to_generation_number,
+            to_agent_policy_sha256=to_agent_policy_sha256,
+            rotation_reason=rotation_reason,
+            issue_revision=issue_revision,
+            issue_content_sha256=inputs.issue_content_sha256,
+            task_spec_sha256=inputs.task_spec_sha256,
+            approved_context_sha256=inputs.approved_context_sha256,
+            acceptance_criteria=task_spec.acceptance_criteria,
+            required_checks=repository.required_checks,
+            published_checkpoints=published_checkpoints,
+            source_turn_id=source_turn.turn_id if source_turn is not None else None,
+            source_result_status=(
+                source_turn.result_status if source_turn is not None else None
+            ),
+            source_result_summary=(
+                source_turn.result_summary if source_turn is not None else None
+            ),
+            source_agent_result=source_agent_result,
+            created_at=created_at,
+        )
+    except (TypeError, ValueError) as exc:
+        raise SshDispatchPlanningError(str(exc)) from exc
 
 
 def validate_ssh_active_generation_continuity(

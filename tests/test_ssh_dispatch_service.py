@@ -267,6 +267,28 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
         self.assertEqual("active", generations[1].state.value)
         self.assertEqual("turn_budget", generations[1].rotation_reason)
         self.assertEqual(SESSION_2, generations[1].codex_session_id)
+        handoff = self.store.get_session_handoff_for_generation(
+            generations[1].session_generation_id
+        )
+        self.assertIsNotNone(handoff)
+        assert handoff is not None
+        self.assertEqual(handoff, self.store.get_turn_handoff(second.turn.turn_id))
+        self.assertEqual(
+            "unverified", handoff.trusted_facts["acceptance"]["status"]
+        )
+        self.assertEqual(
+            [{"name": "tests", "status": "not_observed"}],
+            handoff.trusted_facts["required_checks"],
+        )
+        self.assertEqual(
+            "untrusted_advisory",
+            handoff.untrusted_advisory["classification"],
+        )
+        self.assertTrue(handoff.untrusted_advisory["result_receipt_complete"])
+        self.assertEqual(
+            blocked_result().next_step,
+            handoff.untrusted_advisory["recommended_next_action"],
+        )
         self.assertEqual(
             [RunnerOperation.START, RunnerOperation.START],
             [call.operation for call in self.transport.calls if call.turn_id],
@@ -483,7 +505,7 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
     def test_v2_publication_advances_work_item_and_generation_together(self) -> None:
         config = replace(
             make_config(global_max_active=4),
-            session_runtime=session_runtime_config(),
+            session_runtime=session_runtime_config(max_turns_per_session=1),
         )
         service = OfflineSshDispatchService(
             config=config,
@@ -529,6 +551,31 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
         self.assertEqual(head_sha, completed.work_item.last_published_sha)
         self.assertEqual(head_sha, generation.last_published_sha)
         self.assertEqual(TurnState.BLOCKED, completed.turn.state)
+        checkpoints = self.store.list_work_item_publication_checkpoints(
+            item.work_item_id
+        )
+        self.assertEqual(1, len(checkpoints))
+        self.assertEqual(
+            ("src/codex_dispatcher/parser.py",), checkpoints[0].changed_paths
+        )
+        service.resolve_and_prepare(claimed_task(), base_sha=BASE_SHA)
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION_2, head_sha, blocked_result()),
+        )
+        followup = service.run_claimed_turn(
+            claimed_task(), turn_id="turn_" + "9" * 32
+        )
+        handoff = self.store.get_turn_handoff(followup.turn.turn_id)
+        self.assertIsNotNone(handoff)
+        assert handoff is not None
+        self.assertTrue(
+            handoff.trusted_facts["git"]["publication_evidence_complete"]
+        )
+        self.assertEqual(
+            ["src/codex_dispatcher/parser.py"],
+            handoff.trusted_facts["git"]["verified_changed_paths"],
+        )
 
     def test_missing_or_conflicting_source_bundle_fails_before_persistence(self) -> None:
         for bundle in (None, source_bundle("b" * 40)):
