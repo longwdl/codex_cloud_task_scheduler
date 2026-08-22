@@ -3,6 +3,133 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Per-WorkItem auth isolation and unattended completion fixture — 2026-08-22
+
+This checkpoint deployed the independently writable per-WorkItem Codex authentication boundary,
+proved it with a deliberate two-Turn private Fixture, removed the temporary Runner maintenance
+grant, and enabled the Fixture-only production Dispatcher timer. The configured repository set
+remained exactly `longwdl/codex-dispatcher-fixture`; this evidence does not admit a higher-value
+repository.
+
+Commits `cba1662` and `fc3850f` first fixed two offline safety boundaries. SQLite Online Backup now
+removes its private staging WAL/SHM files after either success or failure without deleting an
+already published backup. The Runner now treats `/srv/codex-runner/app/auth.json` only as a
+host-owned seed: each WorkItem receives its own mode-`0600` copy below
+`runner-state/codex-home/auth.json`, while a container-invisible mode-`0600`
+`runner-state/codex-auth-binding.json` binds the immutable WorkItem identity to the seed digest.
+START may initialize only an empty or auth-only bound home; RESUME requires the existing binding,
+session, directory, branch, and tool identities to agree and otherwise fails closed. Neither the
+shared seed nor the host-only binding is mounted into the container as a separately writable file.
+
+The exact source commit `fc3850f85e5492633b420533475f67535264bae7` was pushed to `main` and
+packaged only with `git archive`; its archive SHA-256 was
+`506a345bda024b015ac15a90c9c636a81f571b38c1446814d00230b29b3097a8`. Root-owned candidate
+releases were installed at
+`/opt/codex-dispatcher/releases/fc3850f85e5492633b420533475f67535264bae7` on `s2` and
+`/srv/codex-runner/releases/fc3850f85e5492633b420533475f67535264bae7` on `s3`. Each candidate
+passed all 395 offline tests and `compileall` as its production service account. An initial
+interactive test attempt inherited `umask 0002` and correctly caused three Publisher protection
+tests to reject mode-`0775` temporary mirrors; rerunning inside protected service-owned temporary
+roots with the production `umask 0077` passed 395/395 on both hosts. No assertion or security check
+was weakened.
+
+Before switching, `s2` SQLite returned `integrity_check=ok`, had no active run, and read-only
+`ssh-preflight` was strictly `idle`; the Dispatcher timer was disabled. The `s3` Runner lock was
+acquirable, rootless Docker had zero containers, and the host auth seed metadata and digest were
+recorded without printing its contents. The `s3` and then `s2` `current` symlinks were atomically
+switched to the exact candidate. Post-switch Runner imports, lock, daemon, container count, auth
+seed digest, `systemd-analyze verify`, and another read-only preflight all passed. The prior releases
+remain available at
+`/srv/codex-runner/releases/df1654b280011e0a0696f598af66c4c0d8f195fd` and
+`/opt/codex-dispatcher/releases/d7753fbbe2bae2ea3a16fa08c6114ad0b6c91ba8`.
+
+Four new mode-`0600` SQLite Online Backups were independently checked with
+`integrity_check=ok`: one immediately after the release switch, one before each live Turn, and one
+after the Draft PR reached review. The backup directory already contained 34 historical
+`.state-backup-*.tmp-{wal,shm}` files from the previous implementation. Their count remained exactly
+34 after every new backup, proving that the fix created no new staging sidecar; the old files were
+not deleted. The latest manual backup predates the later human merge and therefore records the
+review state rather than the completed tombstone. The enabled network-isolated daily backup timer
+remains responsible for subsequent scheduled backups.
+
+Private Fixture Issue
+[`#26`](https://github.com/longwdl/codex-dispatcher-fixture/issues/26) began with only
+`agent:ready`, `exec:ssh-cli`, and `priority:p1`. Its strict task specification allowed only the
+single README fixture line to change and deliberately withheld the exact replacement until a
+reviewed maintainer context comment. Before the first sweep, SQLite had no Issue `#26` WorkItem or
+Turn, the deterministic Runner directory did not exist, the task branch and matching PR did not
+exist, Fixture `main` was `48cd71d95b7484a6fa1db65495eec16ab63c1bed`, a fresh backup passed,
+and preflight selected only Issue `#26` as `ready_candidate`.
+
+Turn 1 created exactly these stable identities:
+
+- WorkItem `wi_6bee727d623ec61a2d31cf11`;
+- branch `codex/issue-26-6bee727d623e`;
+- Runner directory
+  `/srv/codex-runner/work-items/longwdl__codex-dispatcher-fixture/issue-26`;
+- Codex session `01a02707-9162-7211-bc79-52e8cfc396f4`;
+- Turn `turn_56c06e6f1a40411f86d3233c67d124b0`.
+
+It finished `needs_input` with identical input/output HEAD, no changed path, publication SHA,
+branch ref, or PR. SQLite moved the WorkItem to `waiting_input`; GitHub projected only
+`agent:needs_input`; Slack contained one delivered root and one delivered question. The WorkItem
+auth copy, auth binding, and session binding were regular `codex-runner`-owned mode-`0600` files
+with link count one. Both auth JSON files parsed, the binding contained only its version, exact
+WorkItem, and original seed digest, the copy initially matched the seed digest, and the shared seed
+metadata and digest were unchanged.
+
+Maintainer `longwdl` then added exactly one reviewed context comment with immutable node ID
+`IC_kwDOT3NfX88AAAABQH6NZA` and returned the Issue to the canonical `agent:ready` state. A second
+fresh backup passed and preflight again selected only Issue `#26`. The next normal sweep created
+Turn `turn_72929f40ee6a4796a4a4bc2e1cda134d` and used RESUME: it reused the original WorkItem,
+branch, Runner directory, Codex session, auth copy, auth binding, session binding, and base HEAD. It
+did not PREPARE or START a replacement identity and included only the reviewed comment ID.
+
+Turn 2 finished `completed` at checkpoint
+`2d7a71747d2ca11291fae8f4dd64145b8818948d`. Independent Runner STATUS requests over separate SSH
+connections returned both Turns as `finished` with the same session: Turn 1 retained its unchanged
+HEAD and `needs_input` result, while Turn 2 returned the checkpoint and only `README.md` in changed
+paths. The host auth seed digest remained unchanged; the WorkItem copy and both host-only bindings
+remained valid and mode `0600`; exactly two durable Runner Turn records existed.
+
+The Dispatcher published only that checkpoint and created one Draft PR
+[`#27`](https://github.com/longwdl/codex-dispatcher-fixture/pull/27). SQLite contained one WorkItem,
+two ordered Turns, one PR binding, and three delivered Slack records: the original root, Turn 1
+question, and Turn 2 result. The PR had base `main`, the deterministic task branch as head, exactly
+one commit, and only `README.md` with one insertion and one deletion. The resulting marker matched
+the reviewed context without recording the Prompt in this evidence. GitHub Actions run
+[`32543112592`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32543112592)
+completed successfully for the exact checkpoint. Fixture `main` remained unchanged, repeated
+write-enabled sweep and read-only preflight were both `idle`, and no second WorkItem, Turn, session,
+branch, PR, Slack root, or workflow run appeared.
+
+After human review, the maintainer merged PR `#27`; the Dispatcher did not perform the merge. GitHub
+recorded merge commit `7ee18770d9faec6845f1dc4e32082dcc595c2832` on `main`. The next
+inactive-relative timer sweep returned `completed` for the exact Issue and WorkItem, moved the
+durable WorkItem to `completed`, and projected the still-open Issue to `agent:completed` while
+retaining exactly two comments. Counts remained two Turns, one session, one PR, and three Slack
+deliveries. The following read-only preflight and the next automatic timer sweep were both `idle`;
+SQLite still returned `integrity_check=ok` and Actions remained successful at the original PR head.
+
+Only after the live Turn, PR, Actions, repeated-idle, and auth checks passed was the exact temporary
+Runner sudo rule `/etc/sudoers.d/90-codex-maintenance` copied to the root-only mode-`0600` rollback
+file
+`/root/codex-runner-rollback-fc3850f-20260822/90-codex-maintenance`. `visudo -cf` accepted the
+rule before removal and the complete sudoers configuration afterward. A new SSH connection proved
+`sudo -n` unavailable; `codex-runner` remained in only its own group, and a later forced-command
+STATUS still returned the completed Turn through the production Runner path.
+
+Finally, `codex-dispatcher.timer` was enabled and started with the reviewed 120-second
+inactive-relative schedule. Its first two observed automatic sweeps were `idle`; after the human
+merge a later automatic sweep recorded `completed`, and the immediately following automatic sweep
+returned `idle`. The Dispatcher and backup timers remain enabled and active, both hosts remain on
+release `fc3850f85e5492633b420533475f67535264bae7`, SQLite is intact, and the 34 preserved legacy
+backup sidecars remain unchanged. Rollback is to disable the Dispatcher timer, restore the prior
+`current` symlinks, preserve SQLite/Runner state for reconciliation, and have root restore the
+validated sudo rule only if maintenance access is explicitly required. No credential, private key,
+Prompt, complete Runner output, automatic merge, force-push, GitHub Release, tag, Dispatcher branch
+deletion, sshd change, firewall change, or higher-value repository admission occurred.
+
 ## Linux Control Host systemd artifact validation — 2026-08-20
 
 The repository's fixed Control Host wrapper, `Type=oneshot` service, inactive-relative timer, and
