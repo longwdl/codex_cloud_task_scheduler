@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import stat
 from dataclasses import dataclass, replace
 from hashlib import sha256
@@ -15,6 +16,12 @@ from codex_dispatcher.codex_jsonl import (
     CodexJsonlError,
     CodexTerminalStatus,
     parse_codex_jsonl,
+)
+from codex_dispatcher.delegation_evidence import (
+    DelegationEvidenceError,
+    DelegationSnapshot,
+    observe_delegation_receipt,
+    snapshot_delegations,
 )
 from codex_dispatcher.command_runner import BinaryCommandResult, run_binary_command
 from codex_dispatcher.executors.codex_cli import (
@@ -48,7 +55,11 @@ from codex_dispatcher.runner_protocol import (
     parse_agent_result,
     parse_runner_request,
 )
-from codex_dispatcher.runner_policy import PolicyBundle, PolicyBundleError
+from codex_dispatcher.runner_policy import (
+    AgentRuntimePolicy,
+    PolicyBundle,
+    PolicyBundleError,
+)
 from codex_dispatcher.runner_transport import (
     RunnerTurnRemoteState,
     RunnerTurnReply,
@@ -350,6 +361,8 @@ class RunnerTurnExecutor:
         active_policy = self._policy_bundle if is_v2 else None
         auth_file = self._codex_home / "auth.json"
         receipt_hook: _ThreadStartedReceiptHook | None = None
+        delegation_baseline: DelegationSnapshot | None = None
+        agent_runtime_policy: AgentRuntimePolicy | None = None
         try:
             if active_policy is not None:
                 active_policy.validate()
@@ -376,6 +389,12 @@ class RunnerTurnExecutor:
                     context,
                     work_item_id=request.work_item_id,
                     session_id=request.session_id,
+                )
+            if active_policy is not None:
+                agent_runtime_policy = active_policy.runtime_policy()
+                delegation_baseline = snapshot_delegations(
+                    context.codex_home,
+                    database_required=request.operation is RunnerOperation.RESUME,
                 )
             plan = build_docker_codex_plan(
                 runtime=self._docker_runtime,
@@ -418,6 +437,8 @@ class RunnerTurnExecutor:
                 command=command,
                 context=context,
                 receipt_hook=receipt_hook,
+                delegation_baseline=delegation_baseline,
+                agent_runtime_policy=agent_runtime_policy,
             )
         try:
             validate_docker_auth_state(context)
@@ -493,6 +514,8 @@ class RunnerTurnExecutor:
         command: BinaryCommandResult,
         context: DockerWorkItemContext,
         receipt_hook: _ThreadStartedReceiptHook,
+        delegation_baseline: DelegationSnapshot | None,
+        agent_runtime_policy: AgentRuntimePolicy | None,
     ) -> RunnerTurnReply:
         assert self._policy_bundle is not None
         try:
@@ -566,6 +589,25 @@ class RunnerTurnExecutor:
                 "codex_output_usage_missing",
                 session_id=summary.session_id,
             )
+        if delegation_baseline is None or agent_runtime_policy is None:
+            return self._failed_reply(
+                request,
+                "codex_delegation_evidence_invalid",
+                session_id=summary.session_id,
+            )
+        try:
+            delegation_receipt = observe_delegation_receipt(
+                context.codex_home,
+                baseline=delegation_baseline,
+                root_thread_id=summary.session_id,
+                policy=agent_runtime_policy,
+            )
+        except (DelegationEvidenceError, OSError, sqlite3.Error):
+            return self._failed_reply(
+                request,
+                "codex_delegation_evidence_invalid",
+                session_id=summary.session_id,
+            )
         assert summary.final_message is not None
         try:
             result = parse_agent_result(summary.final_message)
@@ -598,6 +640,7 @@ class RunnerTurnExecutor:
             output_sha256=sha256(canonical.encode("utf-8")).hexdigest(),
             result=result,
             usage=summary.usage,
+            delegation_receipt=delegation_receipt,
             **self._v2_reply_fields(request),
         )
 

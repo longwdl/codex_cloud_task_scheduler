@@ -13,8 +13,10 @@ stop and report the ambiguity in the required result schema.
 
 Choose the smallest suitable local subagent for bounded work: spark_worker for
 tiny local checks, luna_worker for mechanical work, terra_worker for normal
-implementation, and sol_specialist for an independent high-risk review. Keep
-final judgment in this Sol thread. Do not use external apps, plugins, hooks,
+implementation, and sol_specialist for an independent high-risk review. Use a
+subagent only when its bounded contribution exceeds coordination overhead.
+Only this primary Sol thread may delegate, and every delegated agent must be a
+direct child. Keep final judgment in this Sol thread. Do not use external apps, plugins, hooks,
 memories, MCP servers, browser, computer-use, image generation, web search,
 remote control, or update mechanisms.
 """

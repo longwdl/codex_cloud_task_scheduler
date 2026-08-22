@@ -10,12 +10,26 @@ from codex_dispatcher.runner_policy import PolicyBundle, PolicyBundleError
 
 
 _FILES = {
-    "config.toml": b'model = "gpt-5.6-sol"\n',
+    "config.toml": (
+        b'model = "gpt-5.6-sol"\nmodel_reasoning_effort = "xhigh"\n'
+    ),
     "requirements.toml": b'allowed_web_search_modes = ["disabled"]\n',
-    "agents/spark-worker.toml": b'name = "spark_worker"\n',
-    "agents/luna-worker.toml": b'name = "luna_worker"\n',
-    "agents/terra-worker.toml": b'name = "terra_worker"\n',
-    "agents/sol-specialist.toml": b'name = "sol_specialist"\n',
+    "agents/spark-worker.toml": (
+        b'name = "spark_worker"\nmodel = "gpt-5.3-codex-spark"\n'
+        b'model_reasoning_effort = "medium"\n'
+    ),
+    "agents/luna-worker.toml": (
+        b'name = "luna_worker"\nmodel = "gpt-5.6-luna"\n'
+        b'model_reasoning_effort = "low"\n'
+    ),
+    "agents/terra-worker.toml": (
+        b'name = "terra_worker"\nmodel = "gpt-5.6-terra"\n'
+        b'model_reasoning_effort = "medium"\n'
+    ),
+    "agents/sol-specialist.toml": (
+        b'name = "sol_specialist"\nmodel = "gpt-5.6-sol"\n'
+        b'model_reasoning_effort = "xhigh"\n'
+    ),
 }
 
 
@@ -56,6 +70,13 @@ class PolicyBundleTests(unittest.TestCase):
             bundle = PolicyBundle.load(root, digest)
             self.assertEqual(root, bundle.root)
             self.assertEqual(root / "agents", bundle.agents_path)
+            runtime = bundle.runtime_policy()
+            self.assertEqual("gpt-5.6-sol", runtime.primary_model)
+            self.assertEqual("xhigh", runtime.primary_reasoning_effort)
+            self.assertEqual(
+                {"luna_worker", "sol_specialist", "spark_worker", "terra_worker"},
+                set(runtime.profiles_by_name),
+            )
 
             (root / "config.toml").write_text('model = "other"\n', encoding="utf-8")
             with self.assertRaisesRegex(PolicyBundleError, "digest"):

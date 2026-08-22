@@ -64,6 +64,7 @@ def _fake_docker(path: Path, call_log: Path, docker_config: Path) -> None:
         f"""#!{sys.executable}
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -123,6 +124,21 @@ auth_file = mount_source("/codex-home") / "auth.json"
 assert auth_file.name == "auth.json"
 assert ",readonly" not in mount_argument("/codex-home")
 
+state_database = auth_file.parent / "state_5.sqlite"
+with sqlite3.connect(state_database) as state:
+    state.execute(
+        "CREATE TABLE IF NOT EXISTS thread_spawn_edges ("
+        "parent_thread_id TEXT NOT NULL, child_thread_id TEXT PRIMARY KEY, "
+        "status TEXT NOT NULL)"
+    )
+    state.execute(
+        "CREATE TABLE IF NOT EXISTS threads ("
+        "id TEXT PRIMARY KEY, cli_version TEXT NOT NULL, agent_role TEXT, "
+        "model TEXT NOT NULL, reasoning_effort TEXT NOT NULL, "
+        "tokens_used INTEGER NOT NULL)"
+    )
+state_database.chmod(0o600)
+
 if codex[-2:] == ["login", "status"]:
     with Path({str(call_log)!r}).open("a", encoding="utf-8") as stream:
         stream.write("auth\\n")
@@ -142,6 +158,26 @@ if "refresh auth" in prompt:
 if "corrupt auth" in prompt:
     auth_file.write_bytes(b"not-json")
 session = codex[codex.index("resume") + 1] if "resume" in codex else {SESSION!r}
+with sqlite3.connect(state_database) as state:
+    state.execute(
+        "INSERT OR REPLACE INTO threads "
+        "(id, cli_version, agent_role, model, reasoning_effort, tokens_used) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (session, "0.147.0", None, "gpt-5.6-sol", "xhigh", 100),
+    )
+    if "delegate terra" in prompt:
+        child = "223e4567-e89b-12d3-a456-426614174000"
+        state.execute(
+            "INSERT OR REPLACE INTO threads "
+            "(id, cli_version, agent_role, model, reasoning_effort, tokens_used) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (child, "0.147.0", "terra_worker", "gpt-5.6-terra", "medium", 42),
+        )
+        state.execute(
+            "INSERT OR REPLACE INTO thread_spawn_edges "
+            "(parent_thread_id, child_thread_id, status) VALUES (?, ?, ?)",
+            (session, child, "closed"),
+        )
 changed = []
 if "change" in prompt:
     Path("result.txt").write_text(prompt + "\\n", encoding="utf-8")
@@ -952,6 +988,44 @@ class RunnerDockerExecutionTests(unittest.TestCase):
                 ["auth", "turn", "auth", "turn"],
                 call_log.read_text().splitlines(),
             )
+
+    def test_v2_returns_policy_verified_delegation_metadata(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
+            root = Path(temp_dir)
+            policy = _fixture_policy(root)
+            _, turns, base_sha, _, socket_path, listener = self._setup(
+                root,
+                policy_bundle=policy,
+            )
+            assert listener is not None
+            prompt = b"delegate terra"
+            try:
+                with patch(
+                    "codex_dispatcher.runner_docker._expected_rootless_socket",
+                    return_value=socket_path,
+                ):
+                    reply = turns.execute(
+                        _v2_request(
+                            RunnerOperation.START,
+                            TURN_ONE,
+                            prompt,
+                            base_sha,
+                            policy_digest=policy.policy_digest,
+                        ),
+                        prompt,
+                    )
+            finally:
+                listener.close()
+
+            self.assertEqual(RunnerTurnRemoteState.FINISHED, reply.state)
+            self.assertIsNotNone(reply.delegation_receipt)
+            assert reply.delegation_receipt is not None
+            self.assertEqual("gpt-5.6-sol", reply.delegation_receipt.root_model)
+            self.assertEqual(1, len(reply.delegation_receipt.agents))
+            self.assertEqual(
+                "terra_worker", reply.delegation_receipt.agents[0].agent_name
+            )
+            self.assertEqual(42, reply.delegation_receipt.agents[0].tokens_used)
 
     def test_v2_policy_mismatch_and_drift_reject_before_docker(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:

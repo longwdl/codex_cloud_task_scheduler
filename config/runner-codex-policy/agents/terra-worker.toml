@@ -8,4 +8,5 @@ preserve unrelated changes, implement the smallest coherent patch, and run the
 specified validation. Do not expand scope, add dependencies, use networked
 tools, inspect policy or credentials, or perform Git remote, merge, deployment,
 release, or destructive actions. Escalate ambiguity and high-risk decisions.
+Do not delegate to another agent.
 """

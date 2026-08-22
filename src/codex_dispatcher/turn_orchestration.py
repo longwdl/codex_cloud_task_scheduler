@@ -719,6 +719,7 @@ class OfflineTurnOrchestrator:
             cache_write_input_tokens=reply.usage.cache_write_input_tokens,
             output_tokens=reply.usage.output_tokens,
             reasoning_output_tokens=reply.usage.reasoning_output_tokens,
+            delegation_receipt=reply.delegation_receipt,
         )
         return TurnProgress(work_item, turn)
 

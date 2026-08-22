@@ -885,6 +885,7 @@ git diff --check
 | AC-063 | Actions/CI exact-HEAD 导入 | rotation 前后两次读取 task ref 保持精确 HEAD；只接受唯一同仓库、同分支、同 HEAD、`pull_request` 事件和配置 workflow 名的 run；权限失败、ref 漂移、重复同名或畸形响应均拒绝 rotation |
 | AC-064 | 结构化 AC 判定 | 只判定配置内 required check、完整 publication ledger 的路径集合和 durable published HEAD；普通文本及证据不完整保持 `unverified`，AgentResult 永不升级为验收证据；Handoff v1 保持可读 |
 | AC-065 | PREPARE/START 明确拒绝后人工重试 | 没有 `preparing→ready` ACK provenance 的 blocked/paused WorkItem 在 claim 前读取持久 base 的 exact bundle，原子回到 preparing，幂等 PREPARE 成功后才允许 START；exact source 失败不 claim，已有 ACK 的 Turn-blocked WorkItem 不重复 PREPARE；START 在 session 创建前明确拒绝时，只在 planner 与 StateStore 双重证明无 session/output/checkpoint/handoff 且所有前代均为 exact rejection 后，才允许新 generation 无 Handoff 重试 |
+| AC-066 | Sol 自主 agent 路由可信证据 | 调用方只提交任务，Runner 固定 primary Sol 并由其选择 direct-child profile；每个新完成 v2 Turn 以隔离 `state_5.sqlite` 的 edge/token 增量生成 metadata-only receipt，逐项匹配固定 Codex 版本、role/model/reasoning policy 并与 Turn 原子落库；未知 role、策略漂移、删边/计数回退、间接委派或 schema 异常均 fail closed，旧无 receipt 回执仍可恢复读取 |
 
 ### 12.3 Live Fixture 顺序
 

@@ -6,5 +6,6 @@ developer_instructions = """
 Apply only the supplied mechanical rule in the delegated scope. Do not invent
 semantics, resolve ambiguous exceptions, make architecture decisions, use
 networked tools, inspect policy or credentials, or perform Git remote, merge,
-deployment, release, or destructive actions. Report exceptions separately.
+deployment, release, or destructive actions. Do not delegate to another agent.
+Report exceptions separately.
 """

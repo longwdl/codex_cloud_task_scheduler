@@ -11,6 +11,13 @@ from codex_dispatcher.handoffs import (
     SessionHandoffSnapshot,
     build_session_handoff_snapshot,
 )
+from codex_dispatcher.delegation_evidence import DelegatedAgent, DelegationReceipt
+from codex_dispatcher.runner_protocol import (
+    AgentResult,
+    AgentResultStatus,
+    TestResult,
+    TestStatus,
+)
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.work_items import (
     PromptKind,
@@ -135,7 +142,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 ).fetchall()
                 legacy_runs = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
                 self.assertEqual(
-                    [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)],
+                    [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)],
                     versions,
                 )
             self.assertEqual(0, legacy_runs)
@@ -204,7 +211,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
                 self.assertEqual(
-                    [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)],
+                    [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)],
                     versions,
                 )
 
@@ -538,6 +545,88 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     store.get_session_generation(second.session_generation_id).state,
                 )
                 self.assertEqual(1, len(store.list_turns(item.work_item_id)))
+
+    def test_finished_generation_turn_persists_delegation_receipt_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                item = make_ready(store, make_item(17))
+                generation = store.plan_session_generation(
+                    item.work_item_id,
+                    role=SessionGenerationRole.IMPLEMENTATION,
+                    policy_sha256="c" * 64,
+                )
+                _, _, turn, _ = store.begin_session_generation_turn(
+                    item.work_item_id,
+                    session_generation_id=generation.session_generation_id,
+                    generation_number=1,
+                    policy_sha256="c" * 64,
+                    prompt_kind=PromptKind.FULL,
+                    issue_revision="revision",
+                    issue_content_sha256="d" * 64,
+                    task_spec_sha256="e" * 64,
+                    prompt_sha256="f" * 64,
+                    approved_comment_ids=(),
+                    approved_context_sha256="1" * 64,
+                    issue_allowed_paths=("src",),
+                    input_head_sha="a" * 40,
+                )
+                child_session = "223e4567-e89b-12d3-a456-426614174000"
+                receipt = DelegationReceipt(
+                    codex_version="0.147.0",
+                    root_thread_id=SESSION,
+                    root_model="gpt-5.6-sol",
+                    root_reasoning_effort="xhigh",
+                    agents=(
+                        DelegatedAgent(
+                            parent_thread_id=SESSION,
+                            child_thread_id=child_session,
+                            agent_name="terra_worker",
+                            model="gpt-5.6-terra",
+                            reasoning_effort="medium",
+                            edge_status="closed",
+                            tokens_used=42,
+                        ),
+                    ),
+                )
+                result = AgentResult(
+                    AgentResultStatus.COMPLETED,
+                    "complete",
+                    (),
+                    (TestResult("unit", TestStatus.PASSED),),
+                    (),
+                    "review",
+                )
+
+                reviewed, _, finished, _ = store.record_generation_turn_finished(
+                    turn.turn_id,
+                    session_generation_id=generation.session_generation_id,
+                    generation_number=1,
+                    policy_sha256="c" * 64,
+                    session_id=SESSION,
+                    output_sha256="2" * 64,
+                    output_head_sha="a" * 40,
+                    result_status="completed",
+                    result_summary="complete",
+                    agent_result=result,
+                    input_tokens=100,
+                    cached_input_tokens=10,
+                    cache_write_input_tokens=0,
+                    output_tokens=20,
+                    reasoning_output_tokens=5,
+                    delegation_receipt=receipt,
+                )
+
+                self.assertEqual(WorkItemState.REVIEW, reviewed.state)
+                self.assertEqual(TurnState.FINISHED, finished.state)
+                self.assertEqual(receipt, store.get_turn_delegation_receipt(turn.turn_id))
+                event = store._connection.execute(
+                    "SELECT payload_json FROM work_item_events "
+                    "WHERE turn_id = ? AND event_type = 'turn_delegation_observed'",
+                    (turn.turn_id,),
+                ).fetchone()
+                self.assertIsNotNone(event)
+                self.assertNotIn(child_session, event["payload_json"])
 
     def test_rotate_session_generation_is_atomic_and_requires_idle_ready_work_item(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

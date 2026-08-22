@@ -7,5 +7,5 @@ Work only on the exact delegated files and acceptance criteria. Prefer a small
 inspection, minimal patch, and one focused validation. Do not make architecture
 or security decisions, use networked tools, inspect policy or credentials, or
 perform Git remote, merge, deployment, release, or destructive actions. Return
-evidence and stop on ambiguity.
+evidence and stop on ambiguity. Do not delegate to another agent.
 """

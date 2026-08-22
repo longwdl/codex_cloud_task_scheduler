@@ -20,6 +20,12 @@ from codex_dispatcher.runner_protocol import (
     parse_agent_result,
 )
 from codex_dispatcher.codex_jsonl import CodexTurnUsage
+from codex_dispatcher.delegation_evidence import (
+    DelegationEvidenceError,
+    DelegationReceipt,
+    delegation_receipt_to_mapping,
+    parse_delegation_receipt,
+)
 from codex_dispatcher.work_items import (
     validate_git_sha,
     validate_session_id,
@@ -140,6 +146,7 @@ class RunnerTurnReply:
     session_generation: int | None = None
     agent_policy_digest: str | None = None
     usage: CodexTurnUsage | None = None
+    delegation_receipt: DelegationReceipt | None = None
     version: int = PROTOCOL_VERSION
 
     def __post_init__(self) -> None:
@@ -193,6 +200,7 @@ class RunnerTurnReply:
                 self.session_generation,
                 self.agent_policy_digest,
                 self.usage,
+                self.delegation_receipt,
             )
         ):
             raise RunnerProtocolError("v1 Runner Turn cannot contain v2 fields")
@@ -209,6 +217,13 @@ class RunnerTurnReply:
                 raise RunnerProtocolError("Runner result hash does not match its canonical JSON")
             if self.version == NEXT_PROTOCOL_VERSION:
                 _validate_usage(self.usage)
+                if self.delegation_receipt is not None and (
+                    not isinstance(self.delegation_receipt, DelegationReceipt)
+                    or self.delegation_receipt.root_thread_id != self.session_id
+                ):
+                    raise RunnerProtocolError(
+                        "Runner delegation receipt conflicts with the Codex session"
+                    )
             elif self.usage is not None:
                 raise RunnerProtocolError("v1 finished Runner Turn cannot contain usage")
         elif self.state is RunnerTurnRemoteState.RUNNING:
@@ -218,11 +233,19 @@ class RunnerTurnReply:
                 raise RunnerProtocolError("running Runner Turn cannot contain error_code")
             if self.usage is not None:
                 raise RunnerProtocolError("running Runner Turn cannot contain usage")
+            if self.delegation_receipt is not None:
+                raise RunnerProtocolError(
+                    "running Runner Turn cannot contain delegation evidence"
+                )
         else:
             if any(value is not None for value in final_fields) or self.error_code is None:
                 raise RunnerProtocolError("failed or unknown Runner Turn fields are invalid")
             if self.usage is not None:
                 raise RunnerProtocolError("failed or unknown Runner Turn cannot contain usage")
+            if self.delegation_receipt is not None:
+                raise RunnerProtocolError(
+                    "failed or unknown Runner Turn cannot contain delegation evidence"
+                )
 
     def to_json(self) -> str:
         payload: dict[str, object] = {
@@ -245,6 +268,12 @@ class RunnerTurnReply:
             ("session_generation", self.session_generation),
             ("agent_policy_digest", self.agent_policy_digest),
             ("usage", _usage_to_mapping(self.usage) if self.usage is not None else None),
+            (
+                "delegation_receipt",
+                delegation_receipt_to_mapping(self.delegation_receipt)
+                if self.delegation_receipt is not None
+                else None,
+            ),
         )
         payload.update((name, value) for name, value in optional if value is not None)
         return _dump(payload)
@@ -282,6 +311,8 @@ def parse_runner_turn_reply(value: str | bytes) -> RunnerTurnReply:
         }
         if state is RunnerTurnRemoteState.FINISHED:
             expected = expected | {"usage"}
+            if "delegation_receipt" in payload:
+                expected = expected | {"delegation_receipt"}
     if set(payload) != expected:
         raise RunnerProtocolError("Runner Turn response fields are invalid")
     result: AgentResult | None = None
@@ -302,9 +333,14 @@ def parse_runner_turn_reply(value: str | bytes) -> RunnerTurnReply:
             session_generation=payload.get("session_generation"),
             agent_policy_digest=payload.get("agent_policy_digest"),
             usage=_usage_from_mapping(payload.get("usage")) if "usage" in payload else None,
+            delegation_receipt=(
+                parse_delegation_receipt(payload["delegation_receipt"])
+                if "delegation_receipt" in payload
+                else None
+            ),
             version=version,
         )
-    except (TypeError, ValueError) as exc:
+    except (DelegationEvidenceError, TypeError, ValueError) as exc:
         raise RunnerProtocolError(str(exc)) from exc
 
 

@@ -76,7 +76,9 @@ The environment-independent core now additionally contains:
   and private SQLite backup;
 - an isolated `codex_dispatcher.fixture_process_cli` parent/child entry that sends `SIGKILL` only
   after an exact post-claim private-pipe handshake and proves no WorkItem, Turn, or Runner call was
-  reached.
+  reached;
+- digest-pinned Sol-to-agent routing profiles plus a metadata-only protocol-v2 delegation receipt
+  derived from per-Turn Codex state-database activity and stored atomically with the Turn result.
 
 The fixed OpenSSH argv/byte-stream adapter is covered by isolated unit tests, and the installed
 Runner protocol has also completed the disposable SSH/real-Codex fixture recorded in

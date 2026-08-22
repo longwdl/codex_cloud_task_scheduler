@@ -5,6 +5,7 @@ import unittest
 from hashlib import sha256
 
 from codex_dispatcher.codex_jsonl import CodexTurnUsage
+from codex_dispatcher.delegation_evidence import DelegatedAgent, DelegationReceipt
 from codex_dispatcher.runner_protocol import (
     NEXT_PROTOCOL_VERSION,
     RunnerOperation,
@@ -27,6 +28,7 @@ TURN = "turn_" + "b" * 32
 SESSION = "123e4567-e89b-12d3-a456-426614174000"
 GENERATION_ID = "sg_" + "d" * 32
 POLICY_DIGEST = "e" * 64
+CHILD_SESSION = "223e4567-e89b-12d3-a456-426614174000"
 
 
 def agent_result():
@@ -41,6 +43,26 @@ def agent_result():
                 "next_step": "Publish checkpoint",
             }
         )
+    )
+
+
+def delegation_receipt() -> DelegationReceipt:
+    return DelegationReceipt(
+        codex_version="0.147.0",
+        root_thread_id=SESSION,
+        root_model="gpt-5.6-sol",
+        root_reasoning_effort="xhigh",
+        agents=(
+            DelegatedAgent(
+                parent_thread_id=SESSION,
+                child_thread_id=CHILD_SESSION,
+                agent_name="terra_worker",
+                model="gpt-5.6-terra",
+                reasoning_effort="medium",
+                edge_status="closed",
+                tokens_used=42,
+            ),
+        ),
     )
 
 
@@ -148,6 +170,7 @@ class RunnerTransportContractTests(unittest.TestCase):
                 output_sha256=sha256(result_json.encode()).hexdigest(),
                 result=result,
                 usage=CodexTurnUsage(1, 2, 3, 4, 5),
+                delegation_receipt=delegation_receipt(),
                 **common,
             ),
             RunnerTurnReply(
@@ -215,6 +238,11 @@ class RunnerTransportContractTests(unittest.TestCase):
                 output_sha256=sha256(result_json.encode()).hexdigest(), result=result,
                 usage=CodexTurnUsage(-1, 0, 0, 1, 0), **common,
             )
+        legacy_without_delegation = json.loads(reply.to_json())
+        self.assertNotIn("delegation_receipt", legacy_without_delegation)
+        self.assertIsNone(
+            parse_runner_turn_reply(json.dumps(legacy_without_delegation)).delegation_receipt
+        )
 
     def test_v1_turn_reply_rejects_v2_field_injection(self) -> None:
         reply = RunnerTurnReply(

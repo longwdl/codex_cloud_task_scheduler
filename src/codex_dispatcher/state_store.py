@@ -14,6 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from codex_dispatcher.domain import Run, RunState, utc_now_iso
+from codex_dispatcher.delegation_evidence import (
+    DelegationReceipt,
+    delegation_receipt_to_json,
+    parse_delegation_receipt,
+)
 from codex_dispatcher.handoffs import (
     PublishedCheckpoint,
     SessionHandoffSnapshot,
@@ -1494,6 +1499,7 @@ class StateStore:
         cache_write_input_tokens: int,
         output_tokens: int,
         reasoning_output_tokens: int,
+        delegation_receipt: DelegationReceipt | None = None,
         updated_at: str | None = None,
     ) -> tuple[WorkItem, SessionGeneration, Turn, TurnUsage]:
         """Record a terminal Agent receipt and usage without splitting its durability."""
@@ -1506,6 +1512,16 @@ class StateStore:
             raise ValueError("Agent result conflicts with the terminal Turn fields")
         result_json = agent_result_to_json(agent_result)
         result_sha256 = sha256(result_json.encode("utf-8")).hexdigest()
+        if delegation_receipt is not None:
+            if not isinstance(delegation_receipt, DelegationReceipt):
+                raise TypeError("delegation_receipt must be a DelegationReceipt")
+            if delegation_receipt.root_thread_id != session_id:
+                raise ValueError("delegation receipt conflicts with the Codex session")
+            delegation_json = delegation_receipt_to_json(delegation_receipt)
+            delegation_sha256 = sha256(delegation_json.encode("utf-8")).hexdigest()
+        else:
+            delegation_json = None
+            delegation_sha256 = None
         now = updated_at or utc_now_iso()
         usage = TurnUsage.new(
             turn_id=turn_id,
@@ -1629,6 +1645,67 @@ class StateStore:
                     "VALUES (?, ?, ?, ?, ?)",
                     (turn_id, result_json, result_sha256, now, now),
                 )
+            existing_delegation = connection.execute(
+                "SELECT receipt_json, receipt_sha256 FROM turn_delegation_receipts "
+                "WHERE turn_id = ?",
+                (turn_id,),
+            ).fetchone()
+            if existing_delegation is not None:
+                if (
+                    delegation_json is None
+                    or existing_delegation["receipt_json"] != delegation_json
+                    or existing_delegation["receipt_sha256"] != delegation_sha256
+                ):
+                    raise ValueError(
+                        "Turn already has different recorded delegation evidence"
+                    )
+            elif delegation_receipt is not None:
+                connection.execute(
+                    "INSERT INTO turn_delegation_receipts "
+                    "(turn_id, schema_version, observer, codex_version, root_thread_id, "
+                    "root_model, root_reasoning_effort, agent_count, receipt_json, "
+                    "receipt_sha256, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        turn_id,
+                        delegation_receipt.schema_version,
+                        delegation_receipt.observer,
+                        delegation_receipt.codex_version,
+                        delegation_receipt.root_thread_id,
+                        delegation_receipt.root_model,
+                        delegation_receipt.root_reasoning_effort,
+                        len(delegation_receipt.agents),
+                        delegation_json,
+                        delegation_sha256,
+                        now,
+                        now,
+                    ),
+                )
+                self._insert_work_item_event(
+                    connection,
+                    turn.work_item_id,
+                    turn_id,
+                    "turn_delegation_observed",
+                    {
+                        "agent_count": len(delegation_receipt.agents),
+                        "agents": [
+                            {
+                                "agent_name": agent.agent_name,
+                                "edge_status": agent.edge_status,
+                                "model": agent.model,
+                                "reasoning_effort": agent.reasoning_effort,
+                                "tokens_used": agent.tokens_used,
+                            }
+                            for agent in delegation_receipt.agents
+                        ],
+                        "observer": delegation_receipt.observer,
+                        "root_model": delegation_receipt.root_model,
+                        "root_reasoning_effort": (
+                            delegation_receipt.root_reasoning_effort
+                        ),
+                    },
+                    now,
+                )
             if turn.output_sha256 is not None and turn.state not in ACTIVE_TURN_STATES:
                 return work_item, generation, turn, usage
             if work_item.state is not WorkItemState.RUNNING:
@@ -1664,6 +1741,27 @@ class StateStore:
                     (next_work_item.state.value, now, work_item.work_item_id),
                 )
         return next_work_item, generation, next_turn, usage
+
+    def get_turn_delegation_receipt(
+        self, turn_id: str
+    ) -> DelegationReceipt | None:
+        row = self._connection.execute(
+            "SELECT receipt_json, receipt_sha256 FROM turn_delegation_receipts "
+            "WHERE turn_id = ?",
+            (turn_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        receipt_json = str(row["receipt_json"])
+        if sha256(receipt_json.encode("utf-8")).hexdigest() != row["receipt_sha256"]:
+            raise ValueError("persisted delegation receipt digest is invalid")
+        try:
+            payload = json.loads(
+                receipt_json, object_pairs_hook=_unique_json_object
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ValueError("persisted delegation receipt is invalid") from exc
+        return parse_delegation_receipt(payload)
 
     def record_generation_publication(
         self,
@@ -3141,3 +3239,12 @@ class StateStore:
         if not isinstance(parsed, list) or any(not isinstance(item, str) for item in parsed):
             raise ValueError(f"{field} are malformed")
         return tuple(parsed)
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON field")
+        result[key] = value
+    return result

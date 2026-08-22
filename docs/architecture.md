@@ -174,6 +174,25 @@ conflicting, or ambiguous session state becomes `blocked`. A replacement session
 the explicit bounded rotation policy after a durable task-branch checkpoint; it never repairs an
 ambiguous active Turn by blind replay.
 
+The Runner-owned policy fixes the primary thread to Sol and exposes four named local profiles:
+Spark for tiny checks, Luna for mechanical work, Terra for ordinary engineering, and a second Sol
+only for bounded adversarial review. The primary Sol decides whether delegation is worth its
+coordination cost and selects the profile; callers do not choose a model. Delegation is limited to
+direct children of the primary thread, and delegated agents cannot delegate again.
+
+Protocol v2 terminal replies carry a metadata-only delegation receipt. The Runner snapshots the
+isolated generation `state_5.sqlite` before a Turn and reads it again after Codex exits. New child
+edges and token growth on reused direct children are matched against the digest-pinned policy's
+exact Codex version, role, model, and reasoning effort. The receipt contains those fields, edge
+status, and per-Turn child token usage, but no prompt, message, tool arguments, or model output. The
+Control Host persists the canonical receipt and its digest atomically with the terminal Turn.
+Missing tables, removed edges, decreasing counters, unknown roles, policy drift, indirect children,
+or malformed metadata fail closed. The `codex exec --json` collaboration events are not treated as
+authoritative because their presentation can omit or incompletely report delegation activity.
+Older persisted v2 replies without the additive receipt remain readable for recovery; every newly
+completed v2 Turn from the updated Runner emits one, including an empty receipt when Sol worked
+directly.
+
 ## Generation handoff and bootstrap
 
 Retiring a generation and planning its replacement is one SQLite transaction. That transaction also

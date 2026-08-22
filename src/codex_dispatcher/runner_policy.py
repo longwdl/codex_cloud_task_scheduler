@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import stat
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,28 @@ _REQUIRED_FILES = frozenset(
     }
 )
 _SHA256_LENGTH = 64
+_REASONING_EFFORTS = frozenset(
+    {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentPolicyProfile:
+    name: str
+    model: str
+    reasoning_effort: str
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRuntimePolicy:
+    codex_version: str
+    primary_model: str
+    primary_reasoning_effort: str
+    profiles: tuple[AgentPolicyProfile, ...]
+
+    @property
+    def profiles_by_name(self) -> dict[str, AgentPolicyProfile]:
+        return {profile.name: profile for profile in self.profiles}
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +137,40 @@ class PolicyBundle:
         calculated_policy_digest = hashlib.sha256(_canonical_json(observed)).hexdigest()
         if calculated_policy_digest != manifest_digest:
             raise PolicyBundleError("policy manifest digest is invalid")
+
+    def runtime_policy(self) -> AgentRuntimePolicy:
+        """Return the exact primary and named-agent execution contract."""
+        self.validate()
+        manifest = _read_json_file(self.root / _MANIFEST_FILE, "policy manifest")
+        config = _read_toml_file(self.config_path, "policy config")
+        primary_model = _bounded_policy_text(config.get("model"), "primary model")
+        primary_effort = _reasoning_effort(
+            config.get("model_reasoning_effort"), "primary reasoning effort"
+        )
+        profiles: list[AgentPolicyProfile] = []
+        for relative_path in sorted(_REQUIRED_FILES):
+            if not relative_path.startswith("agents/"):
+                continue
+            table = _read_toml_file(self.root / relative_path, "agent profile")
+            profiles.append(
+                AgentPolicyProfile(
+                    name=_bounded_policy_text(table.get("name"), "agent name"),
+                    model=_bounded_policy_text(table.get("model"), "agent model"),
+                    reasoning_effort=_reasoning_effort(
+                        table.get("model_reasoning_effort"),
+                        "agent reasoning effort",
+                    ),
+                )
+            )
+        names = {profile.name for profile in profiles}
+        if len(names) != len(profiles):
+            raise PolicyBundleError("policy agent names must be unique")
+        return AgentRuntimePolicy(
+            codex_version=manifest["codex_version"],
+            primary_model=primary_model,
+            primary_reasoning_effort=primary_effort,
+            profiles=tuple(sorted(profiles, key=lambda profile: profile.name)),
+        )
 
 
 def _normalized_absolute(value: Path, field: str) -> Path:
@@ -204,6 +261,34 @@ def _read_json_file(path: Path, field: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise PolicyBundleError(f"{field} is malformed")
     return payload
+
+
+def _read_toml_file(path: Path, field: str) -> dict[str, Any]:
+    _trusted_regular_file(path, field)
+    try:
+        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise PolicyBundleError(f"{field} is malformed") from exc
+    if not isinstance(payload, dict):
+        raise PolicyBundleError(f"{field} is malformed")
+    return payload
+
+
+def _bounded_policy_text(value: Any, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 128
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise PolicyBundleError(f"{field} is invalid")
+    return value
+
+
+def _reasoning_effort(value: Any, field: str) -> str:
+    if value not in _REASONING_EFFORTS:
+        raise PolicyBundleError(f"{field} is invalid")
+    return value
 
 
 def _canonical_json(value: Any) -> bytes:
