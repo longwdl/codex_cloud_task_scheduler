@@ -3,6 +3,76 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Completion gate, fresh Audit, and context-failure release — 2026-08-22
+
+Commit `a52cdf86548aa6780f048e2f35c1755e3e03cdaf` added the durable protocol-v2
+completion gate, mandatory fresh Audit generation, and fail-closed context/compaction failure
+rotation. A `completed` implementation result now remains `published/running` until configured
+exact-HEAD Actions checks, structured Issue acceptance predicates, and the verified publication
+ledger pass. With `rotate_before_final_audit=true`, that pass creates a separate role=`audit`
+generation and session; only its independently gated completion enters review. Context-failure
+rotation requires a Runner receipt proving a clean worktree at the unchanged input HEAD. Dirty,
+moved-HEAD, or unverifiable failure state blocks instead.
+
+The exact Git archive SHA-256 was
+`903c2ded60a86d5b274b9e1b476e315dc147d45d54206638ea696d6b3722f90d`. All 485 tests,
+`compileall`, and `git diff --check` passed locally. The same 485 tests and compilation passed from
+exact-byte writable staging copies under the real `codex-dispatcher` Python 3.14 and
+`codex-runner` Python 3.12 accounts. The first target-host attempts exposed only staging metadata:
+Git archive directories retained group-write bits and the interactive service-account shell used
+`umask 0002`, so the existing protected-path tests rejected those fixtures as designed. Removing
+group-write bits and using `umask 022`, matching the protected release premise, produced the two
+complete passes. The immutable candidates were root-owned and recursively non-group/world-writable;
+shell syntax and Control systemd unit verification also passed.
+
+Before switching, the Dispatcher timer was stopped, both services were inactive, SQLite reported
+`integrity_check=ok`, schema 9, and zero active Turns or WorkItems. Online Backup
+`state-20260822T151233.431785Z.db` was mode `0600` and independently passed integrity at schema 9.
+Both previous `e4c528ccd009940a15a248f5ffd18b116429250a` releases and the pre-change Control
+configuration were preserved. Runner switched first, then Control enabled
+`rotate_before_final_audit=true` and switched to the same exact release. The first new-release
+oneshot returned strict `idle` and applied only additive migrations 010 and 011, leaving schema 11,
+zero active work, and empty new evidence tables.
+
+The live canary reused existing Fixture Issue
+[`#34`](https://github.com/longwdl/codex-dispatcher-fixture/issues/34), WorkItem
+`wi_2a2734d87231c0d6cae96c91`, Draft PR
+[`#37`](https://github.com/longwdl/codex-dispatcher-fixture/pull/37), and its existing bounded Runner
+disk. This avoided new disk admission while the host had approximately 22 GB free. The configured
+generation budget was explicitly widened from 3 to 6 while `max_total_turns=10` stayed fixed. A
+maintainer `/codex-context` requested a read-only verification and explicitly left CI/acceptance
+judgment to the Dispatcher.
+
+Generation 3 first rotated normally for existing context pressure into Implementation generation 4,
+session `01a02a10-aeb0-7fa0-b765-220dee5ddbb0`. Turn
+`turn_4974ec299a1c4afbbbdcb52465155bbc` completed without changing HEAD. Completion evidence
+SHA-256 `d7fdfc5ea81c9e44ca2537b9e5b10f2348b05a7440343ef82ef819aeda20208e` bound the exact
+published SHA, all three structured criteria, and successful Fixture Actions run
+[`32573230842`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32573230842), then
+passed. The mandatory `completion_candidate` Handoff retired generation 4 and created role=`audit`
+generation 5 with new session `01a02a12-a047-7391-be2f-62b8e4c0e5a7`. Audit Turn
+`turn_45c8c7bacfaf441893530510cd16ba39` independently completed without changes and passed a second
+gate with evidence SHA-256
+`c244a83a27373443d6b410eba059aedc238a203ba423e561dd6c8b247625f12c`. Both Turns also stored
+policy-verified Sol delegation receipts; no prompt or model output was persisted in those receipts.
+
+Independent GitHub and SQLite read-back found both gates and acceptance results `passed`, configured
+check `fixture` passed, zero active Turns, and zero context-failure receipts. Issue #34 returned to
+`agent:review`; PR #37 remained open and Draft at
+`78000887b8e4a9c1979d9bac68e174df0cbd6091`. The task ref and sole Actions run stayed at that exact
+SHA, while Fixture `main` remained `7ee18770d9faec6845f1dc4e32082dcc595c2832`. An immediate
+repeated normal oneshot was strictly `idle` and retained six Turns, five generations, and two gates.
+Post-canary backup `state-20260822T152810.147580Z.db` was mode `0600`, passed integrity at schema 11,
+and contained both gates. Dispatcher and backup timers were restored active.
+
+No merge, release tag, force-push, branch deletion, Issue close, default-branch update, production
+access, Runner image creation, or network-policy change occurred. The canary live-proves the
+completion gate and fresh Audit paths. Clean and dirty context-failure branches are covered by the
+Runner/protocol/StateStore integration tests, not by destructive live fault injection. Binary or
+configuration rollback requires stopping the Dispatcher timer and restoring both hosts together;
+rollback to schema-9 code additionally requires the validated pre-migration backup rather than only
+moving a release symlink.
+
 ## Trusted Sol delegation receipt canary — 2026-08-22
 
 Commit `e4c528ccd009940a15a248f5ffd18b116429250a` made the Runner's primary
