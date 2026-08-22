@@ -59,6 +59,21 @@ request_timeout_seconds = 10
 idempotency_contract = "client_msg_id-live-fixture-verified-v1"
 '''
 
+SESSION_RUNTIME = '''
+
+[session_runtime]
+protocol_version = 2
+agent_policy_digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+max_turns_per_session = 4
+rotate_after_input_tokens = 120000
+rotate_after_session_age_seconds = 14400
+rotate_before_final_audit = false
+use_incremental_resume_prompts = true
+max_session_generations = 3
+max_total_turns = 10
+max_no_progress_turns = 2
+'''
+
 
 class ConfigTests(unittest.TestCase):
     def _load(self, content: str):
@@ -74,6 +89,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(2, config.scheduler.global_max_active)
         self.assertEqual("owner/repo", config.repositories[0].slug)
         self.assertEqual((), config.repositories[0].denied_paths)
+        self.assertIsNone(config.session_runtime)
 
     def test_rejects_unknown_secret_like_field(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown field"):
@@ -177,6 +193,101 @@ class ConfigTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "requires ssh_runtime"):
             self._load(configured + SLACK_RUNTIME)
+
+    def test_optional_session_runtime_is_explicit_strict_v2_policy(self) -> None:
+        configured = VALID.replace(
+            'codex_version = "0.1.0"',
+            'codex_version = "0.1.0"\nssh_version = "9.6"',
+        )
+        loaded = self._load(configured + SSH_RUNTIME + SESSION_RUNTIME)
+        runtime = loaded.session_runtime
+        self.assertIsNotNone(runtime)
+        assert runtime is not None
+        self.assertEqual(2, runtime.protocol_version)
+        self.assertEqual("a" * 64, runtime.agent_policy_digest)
+        self.assertEqual(4, runtime.max_turns_per_session)
+        self.assertEqual(120_000, runtime.rotate_after_input_tokens)
+        self.assertEqual(14_400, runtime.rotate_after_session_age_seconds)
+        self.assertFalse(runtime.rotate_before_final_audit)
+        self.assertTrue(runtime.use_incremental_resume_prompts)
+        self.assertEqual(3, runtime.max_session_generations)
+        self.assertEqual(10, runtime.max_total_turns)
+        self.assertEqual(2, runtime.max_no_progress_turns)
+
+        with self.assertRaisesRegex(ValueError, "requires ssh_runtime"):
+            self._load(configured + SESSION_RUNTIME)
+        with self.assertRaisesRegex(ValueError, "unknown field"):
+            self._load(
+                configured + SSH_RUNTIME + SESSION_RUNTIME + "unexpected = 1\n"
+            )
+        with self.assertRaisesRegex(ValueError, "missing required"):
+            self._load(
+                (configured + SSH_RUNTIME + SESSION_RUNTIME).replace(
+                    "max_no_progress_turns = 2\n",
+                    "",
+                )
+            )
+
+    def test_session_runtime_rejects_protocol_digest_and_type_boundaries(self) -> None:
+        configured = VALID.replace(
+            'codex_version = "0.1.0"',
+            'codex_version = "0.1.0"\nssh_version = "9.6"',
+        )
+        content = configured + SSH_RUNTIME + SESSION_RUNTIME
+        with self.assertRaisesRegex(ValueError, "fresh audit generation is not implemented"):
+            self._load(
+                content.replace(
+                    "rotate_before_final_audit = false",
+                    "rotate_before_final_audit = true",
+                )
+            )
+        for invalid_protocol in ("1", "3", "true"):
+            with self.subTest(protocol=invalid_protocol):
+                with self.assertRaisesRegex(ValueError, "must equal 2"):
+                    self._load(
+                        content.replace(
+                            "protocol_version = 2",
+                            f"protocol_version = {invalid_protocol}",
+                        )
+                    )
+        for invalid_digest in ("A" * 64, "a" * 63, "g" * 64):
+            with self.subTest(digest=invalid_digest[:8]):
+                with self.assertRaisesRegex(ValueError, "lowercase SHA-256"):
+                    self._load(
+                        content.replace(
+                            'agent_policy_digest = "' + "a" * 64 + '"',
+                            f'agent_policy_digest = "{invalid_digest}"',
+                        )
+                    )
+
+        positive_fields = (
+            "max_turns_per_session",
+            "rotate_after_input_tokens",
+            "rotate_after_session_age_seconds",
+            "max_session_generations",
+            "max_total_turns",
+            "max_no_progress_turns",
+        )
+        original_values = ("4", "120000", "14400", "3", "10", "2")
+        for field, original in zip(positive_fields, original_values, strict=True):
+            for invalid in ("0", "-1", "true"):
+                with self.subTest(field=field, invalid=invalid):
+                    with self.assertRaisesRegex(ValueError, "positive integer"):
+                        self._load(
+                            content.replace(
+                                f"{field} = {original}",
+                                f"{field} = {invalid}",
+                            )
+                        )
+        for field, original in (
+            ("rotate_before_final_audit", "false"),
+            ("use_incremental_resume_prompts", "true"),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "boolean"):
+                    self._load(
+                        content.replace(f"{field} = {original}", f"{field} = 1")
+                    )
 
 
 if __name__ == "__main__":

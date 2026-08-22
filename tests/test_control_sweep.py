@@ -175,6 +175,21 @@ class _ChangingSnapshotTracker(FakeTracker):
             return super().get_task(repository, task_id)
 
 
+class _ChangingCommentsTracker(FakeTracker):
+    def __init__(self, snapshots: tuple[tuple[TrackerComment, ...], ...]) -> None:
+        super().__init__()
+        self._comment_snapshots = iter(snapshots)
+
+    def list_comments(
+        self, repository: str, task_id: str
+    ) -> tuple[TrackerComment, ...]:
+        self._record("list_comments", repository, task_id)
+        try:
+            return next(self._comment_snapshots)
+        except StopIteration:
+            return super().list_comments(repository, task_id)
+
+
 class _InterruptingDeliveryTracker(FakeTracker):
     def __init__(
         self,
@@ -856,6 +871,34 @@ class SshControlSweepTests(unittest.TestCase):
                 replace(claimed, updated_at="2026-08-13T01:02:00Z"),
             )
         )
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+
+        result = self._sweep(tracker, _RecordingSource()).run_once(turn_id=TURN_ID)
+
+        self.assertEqual(ControlSweepStatus.RETRY, result.status)
+        self.assertEqual("issue_snapshot_changed_during_freeze", result.reason)
+        self.assertIsNone(self.store.get_active_turn())
+        self.assertEqual(
+            [RunnerOperation.PREPARE],
+            [call.operation for call in self.transport.calls],
+        )
+
+    def test_continuously_changing_comments_retry_without_starting_turn(self) -> None:
+        task = _ready_task()
+        comments = tuple(
+            (
+                TrackerComment(
+                    "C1",
+                    "alice",
+                    f"/codex-context revision {revision}",
+                    "2026-08-13T01:00:00Z",
+                    f"2026-08-13T01:0{revision}:00Z",
+                ),
+            )
+            for revision in range(1, 5)
+        )
+        tracker = _ChangingCommentsTracker(comments)
         tracker.ready_tasks = (task,)
         tracker.tasks[task.task_id] = task
 

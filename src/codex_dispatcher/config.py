@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -72,12 +73,29 @@ class SlackRuntimeConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionRuntimeConfig:
+    """Explicit requested v2 policy; absence keeps the legacy v1 runtime."""
+
+    protocol_version: int
+    agent_policy_digest: str
+    max_turns_per_session: int
+    rotate_after_input_tokens: int
+    rotate_after_session_age_seconds: int
+    rotate_before_final_audit: bool
+    use_incremental_resume_prompts: bool
+    max_session_generations: int
+    max_total_turns: int
+    max_no_progress_turns: int
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     scheduler: SchedulerConfig
     tools: ToolPins
     repositories: tuple[RepositoryConfig, ...]
     ssh_runtime: SshRuntimeConfig | None = None
     slack_runtime: SlackRuntimeConfig | None = None
+    session_runtime: SessionRuntimeConfig | None = None
 
 
 def _expect_table(value: Any, path: str) -> dict[str, Any]:
@@ -104,6 +122,18 @@ def _string(value: Any, path: str) -> str:
 def _positive_int(value: Any, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{path} must be a positive integer")
+    return value
+
+
+def _boolean(value: Any, path: str) -> bool:
+    if type(value) is not bool:
+        raise ValueError(f"{path} must be a boolean")
+    return value
+
+
+def _lowercase_sha256(value: Any, path: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ValueError(f"{path} must be a lowercase SHA-256 digest")
     return value
 
 
@@ -152,7 +182,11 @@ def load_config(path: Path) -> Config:
         raise ValueError(f"invalid TOML in {path}: {exc}") from exc
 
     required_root = frozenset({"scheduler", "tools", "repositories"})
-    unknown_root = set(raw) - required_root - {"ssh_runtime", "slack_runtime"}
+    unknown_root = set(raw) - required_root - {
+        "ssh_runtime",
+        "slack_runtime",
+        "session_runtime",
+    }
     missing_root = required_root - set(raw)
     if unknown_root:
         raise ValueError(f"root has unknown field(s): {', '.join(sorted(unknown_root))}")
@@ -235,10 +269,17 @@ def load_config(path: Path) -> Config:
         if "slack_runtime" not in raw
         else _parse_slack_runtime(raw["slack_runtime"])
     )
+    session_runtime = (
+        None
+        if "session_runtime" not in raw
+        else _parse_session_runtime(raw["session_runtime"])
+    )
     if ssh_runtime is not None and "ssh_version" not in tools:
         raise ValueError("tools.ssh_version is required when ssh_runtime is configured")
     if slack_runtime is not None and ssh_runtime is None:
         raise ValueError("slack_runtime requires ssh_runtime")
+    if session_runtime is not None and ssh_runtime is None:
+        raise ValueError("session_runtime requires ssh_runtime")
     return Config(
         scheduler=SchedulerConfig(
             database_path=Path(
@@ -267,6 +308,7 @@ def load_config(path: Path) -> Config:
         repositories=tuple(parsed_repositories),
         ssh_runtime=ssh_runtime,
         slack_runtime=slack_runtime,
+        session_runtime=session_runtime,
     )
 
 
@@ -404,4 +446,71 @@ def _parse_slack_runtime(value: Any) -> SlackRuntimeConfig:
         channel_id=channel_id,
         request_timeout_seconds=timeout,
         idempotency_contract=idempotency_contract,
+    )
+
+
+def _parse_session_runtime(value: Any) -> SessionRuntimeConfig:
+    table = _expect_table(value, "session_runtime")
+    fields = frozenset(
+        {
+            "protocol_version",
+            "agent_policy_digest",
+            "max_turns_per_session",
+            "rotate_after_input_tokens",
+            "rotate_after_session_age_seconds",
+            "rotate_before_final_audit",
+            "use_incremental_resume_prompts",
+            "max_session_generations",
+            "max_total_turns",
+            "max_no_progress_turns",
+        }
+    )
+    _check_keys(table, fields, "session_runtime")
+    protocol_version = table["protocol_version"]
+    if type(protocol_version) is not int or protocol_version != 2:
+        raise ValueError("session_runtime.protocol_version must equal 2")
+    rotate_before_final_audit = _boolean(
+        table["rotate_before_final_audit"],
+        "session_runtime.rotate_before_final_audit",
+    )
+    if rotate_before_final_audit:
+        raise ValueError(
+            "session_runtime.rotate_before_final_audit=true is not supported; "
+            "fresh audit generation is not implemented"
+        )
+    return SessionRuntimeConfig(
+        protocol_version=protocol_version,
+        agent_policy_digest=_lowercase_sha256(
+            table["agent_policy_digest"],
+            "session_runtime.agent_policy_digest",
+        ),
+        max_turns_per_session=_positive_int(
+            table["max_turns_per_session"],
+            "session_runtime.max_turns_per_session",
+        ),
+        rotate_after_input_tokens=_positive_int(
+            table["rotate_after_input_tokens"],
+            "session_runtime.rotate_after_input_tokens",
+        ),
+        rotate_after_session_age_seconds=_positive_int(
+            table["rotate_after_session_age_seconds"],
+            "session_runtime.rotate_after_session_age_seconds",
+        ),
+        rotate_before_final_audit=rotate_before_final_audit,
+        use_incremental_resume_prompts=_boolean(
+            table["use_incremental_resume_prompts"],
+            "session_runtime.use_incremental_resume_prompts",
+        ),
+        max_session_generations=_positive_int(
+            table["max_session_generations"],
+            "session_runtime.max_session_generations",
+        ),
+        max_total_turns=_positive_int(
+            table["max_total_turns"],
+            "session_runtime.max_total_turns",
+        ),
+        max_no_progress_turns=_positive_int(
+            table["max_no_progress_turns"],
+            "session_runtime.max_no_progress_turns",
+        ),
     )

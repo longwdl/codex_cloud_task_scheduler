@@ -10,6 +10,8 @@
   "git_timeout_seconds": 120,
   "codex_timeout_seconds": 3600,
   "execution_mode": "rootless_docker",
+  "policy_root": "/srv/codex-runner/etc/runner-codex-policy",
+  "policy_digest": "0000000000000000000000000000000000000000000000000000000000000000",
   "docker_runtime": {
     "docker_path": "/usr/bin/docker",
     "docker_host": "unix:///run/user/1002/docker.sock",

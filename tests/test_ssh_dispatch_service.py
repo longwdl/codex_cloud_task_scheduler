@@ -6,7 +6,11 @@ import unittest
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 
+from codex_dispatcher.codex_jsonl import CodexTurnUsage
+from codex_dispatcher.config import SessionRuntimeConfig
+from codex_dispatcher.publisher import VerifiedBundle
 from codex_dispatcher.runner_protocol import RunnerOperation, parse_agent_result
 from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_dispatch_planning import SshDispatchPlanningError
@@ -26,6 +30,9 @@ from tests.test_ssh_dispatch_planning import BASE_SHA, claimed_task
 
 
 SESSION = "123e4567-e89b-12d3-a456-426614174000"
+SESSION_2 = "223e4567-e89b-12d3-a456-426614174000"
+POLICY_DIGEST = "d" * 64
+POLICY_DIGEST_2 = "e" * 64
 
 
 def source_bundle(base_sha: str = BASE_SHA) -> SourceBundle:
@@ -48,16 +55,34 @@ def blocked_result():
     )
 
 
+def session_runtime_config(**overrides: object) -> SessionRuntimeConfig:
+    values: dict[str, object] = {
+        "protocol_version": 2,
+        "agent_policy_digest": POLICY_DIGEST,
+        "max_turns_per_session": 4,
+        "rotate_after_input_tokens": 120_000,
+        "rotate_after_session_age_seconds": 14_400,
+        "rotate_before_final_audit": False,
+        "use_incremental_resume_prompts": True,
+        "max_session_generations": 3,
+        "max_total_turns": 10,
+        "max_no_progress_turns": 2,
+    }
+    values.update(overrides)
+    return SessionRuntimeConfig(**values)  # type: ignore[arg-type]
+
+
 class OfflineSshDispatchServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.store = StateStore(Path(self.temp_dir.name) / "state.db")
         self.store.migrate()
         self.transport = FakeSshRunnerTransport()
+        self.verifier = FakeBundleVerifier()
         self.orchestrator = OfflineTurnOrchestrator(
             store=self.store,
             transport=self.transport,
-            bundle_verifier=FakeBundleVerifier(),
+            bundle_verifier=self.verifier,
         )
         self.service = OfflineSshDispatchService(
             config=make_config(global_max_active=4),
@@ -128,6 +153,382 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
             [RunnerOperation.PREPARE, RunnerOperation.START, RunnerOperation.RESUME],
             [call.operation for call in self.transport.calls],
         )
+
+    def test_v2_generation_starts_then_resumes_with_only_new_context(self) -> None:
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(),
+        )
+        service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+        item = service.resolve_and_prepare(
+            claimed_task(), base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        usage = CodexTurnUsage(2_000, 1_000, 0, 100, 50)
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, blocked_result(), usage=usage),
+        )
+        initial_comments = (
+            {"id": "C1", "author": "alice", "body": "/codex-context initial"},
+        )
+
+        first = service.run_claimed_turn(
+            claimed_task(),
+            comments=initial_comments,
+            turn_id="turn_" + "3" * 32,
+        )
+
+        self.assertEqual(TurnState.BLOCKED, first.turn.state)
+        self.assertIsNone(first.work_item.codex_session_id)
+        generation = self.store.get_live_session_generation(item.work_item_id)
+        self.assertIsNotNone(generation)
+        assert generation is not None
+        self.assertEqual(SESSION, generation.codex_session_id)
+        persisted_usage = self.store.get_turn_usage(first.turn.turn_id)
+        self.assertIsNotNone(persisted_usage)
+        assert persisted_usage is not None
+        self.assertEqual(usage.input_tokens, persisted_usage.input_tokens)
+        self.assertEqual(
+            usage.cached_input_tokens, persisted_usage.cached_input_tokens
+        )
+        self.assertEqual(usage.output_tokens, persisted_usage.output_tokens)
+
+        service.resolve_and_prepare(claimed_task(), base_sha="b" * 40)
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, blocked_result(), usage=usage),
+        )
+        second = service.run_claimed_turn(
+            replace(claimed_task(), updated_at="2026-08-13T02:00:00Z"),
+            comments=initial_comments
+            + (
+                {
+                    "id": "C2",
+                    "author": "alice",
+                    "body": "/codex-context answer",
+                },
+            ),
+            turn_id="turn_" + "4" * 32,
+        )
+
+        self.assertEqual(TurnState.BLOCKED, second.turn.state)
+        self.assertEqual(
+            [2, 2],
+            [call.version for call in self.transport.calls if call.turn_id],
+        )
+        turn_prompts = self.store.list_session_generation_turn_prompt_inputs(
+            generation.session_generation_id
+        )
+        self.assertEqual(["full", "delta"], [item.prompt_kind.value for item in turn_prompts])
+        self.assertEqual(("C2",), second.turn.included_comment_ids)
+
+    def test_v2_turn_budget_rotates_to_a_fresh_session_atomically(self) -> None:
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(max_turns_per_session=1),
+        )
+        service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+        item = service.resolve_and_prepare(
+            claimed_task(), base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        comments = (
+            {"id": "C1", "author": "alice", "body": "/codex-context initial"},
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, blocked_result()),
+        )
+        service.run_claimed_turn(
+            claimed_task(), comments=comments, turn_id="turn_" + "5" * 32
+        )
+        service.resolve_and_prepare(claimed_task(), base_sha=BASE_SHA)
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION_2, BASE_SHA, blocked_result()),
+        )
+
+        second = service.run_claimed_turn(
+            replace(claimed_task(), updated_at="2026-08-13T02:00:00Z"),
+            comments=comments,
+            turn_id="turn_" + "6" * 32,
+        )
+
+        generations = self.store.list_session_generations(item.work_item_id)
+        self.assertEqual(2, len(generations))
+        self.assertEqual("retired", generations[0].state.value)
+        self.assertEqual("active", generations[1].state.value)
+        self.assertEqual("turn_budget", generations[1].rotation_reason)
+        self.assertEqual(SESSION_2, generations[1].codex_session_id)
+        self.assertEqual(
+            [RunnerOperation.START, RunnerOperation.START],
+            [call.operation for call in self.transport.calls if call.turn_id],
+        )
+        self.assertEqual(("C1",), second.turn.included_comment_ids)
+
+    def test_v2_rotation_threshold_cannot_hide_issue_or_context_drift(self) -> None:
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(max_turns_per_session=1),
+        )
+        service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+        item = service.resolve_and_prepare(
+            claimed_task(), base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        comments = (
+            {"id": "C1", "author": "alice", "body": "/codex-context initial"},
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, blocked_result()),
+        )
+        service.run_claimed_turn(
+            claimed_task(), comments=comments, turn_id="turn_" + "a" * 32
+        )
+        service.resolve_and_prepare(claimed_task(), base_sha=BASE_SHA)
+
+        with self.assertRaisesRegex(
+            SshDispatchPlanningError, "Issue semantic content changed"
+        ):
+            service.run_claimed_turn(
+                replace(claimed_task(), title="Unreviewed semantic edit"),
+                comments=comments,
+                turn_id="turn_" + "b" * 32,
+            )
+        with self.assertRaisesRegex(
+            SshDispatchPlanningError, "previously delivered approved context was edited"
+        ):
+            service.run_claimed_turn(
+                claimed_task(),
+                comments=(
+                    {
+                        "id": "C1",
+                        "author": "alice",
+                        "body": "/codex-context edited",
+                    },
+                ),
+                turn_id="turn_" + "c" * 32,
+            )
+
+        generations = self.store.list_session_generations(item.work_item_id)
+        self.assertEqual(1, len(generations))
+        self.assertEqual("active", generations[0].state.value)
+        self.assertEqual(1, len(self.store.list_turns(item.work_item_id)))
+        self.assertEqual(
+            1,
+            len([call for call in self.transport.calls if call.turn_id is not None]),
+        )
+
+    def test_v2_policy_change_rotates_to_new_digest(self) -> None:
+        first_config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(),
+        )
+        first_service = OfflineSshDispatchService(
+            config=first_config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+        item = first_service.resolve_and_prepare(
+            claimed_task(), base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        comments = (
+            {"id": "C1", "author": "alice", "body": "/codex-context initial"},
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, blocked_result()),
+        )
+        first_service.run_claimed_turn(
+            claimed_task(), comments=comments, turn_id="turn_" + "d" * 32
+        )
+        first_service.resolve_and_prepare(claimed_task(), base_sha=BASE_SHA)
+
+        upgraded_service = OfflineSshDispatchService(
+            config=replace(
+                make_config(global_max_active=4),
+                session_runtime=session_runtime_config(
+                    agent_policy_digest=POLICY_DIGEST_2
+                ),
+            ),
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION_2, BASE_SHA, blocked_result()),
+        )
+        upgraded_service.run_claimed_turn(
+            claimed_task(), comments=comments, turn_id="turn_" + "e" * 32
+        )
+
+        generations = self.store.list_session_generations(item.work_item_id)
+        self.assertEqual(["retired", "active"], [item.state.value for item in generations])
+        self.assertEqual(POLICY_DIGEST, generations[0].policy_sha256)
+        self.assertEqual(POLICY_DIGEST_2, generations[1].policy_sha256)
+        self.assertEqual("policy_changed", generations[1].rotation_reason)
+
+    def test_v2_activation_rotates_imported_legacy_session(self) -> None:
+        item = self.service.resolve_and_prepare(
+            claimed_task(), base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, blocked_result()),
+        )
+        legacy_turn = self.service.run_claimed_turn(
+            claimed_task(), turn_id="turn_" + "f" * 32
+        )
+        legacy_generation_id = "sg_" + "f" * 32
+        now = "2026-08-13T02:00:00Z"
+        with self.store._transaction() as connection:
+            connection.execute(
+                "INSERT INTO session_generations ("
+                "session_generation_id, work_item_id, generation_number, state, role, "
+                "codex_session_id, start_head_sha, policy_sha256, rotation_reason, "
+                "created_at, started_at, updated_at"
+                ") VALUES (?, ?, 1, 'active', 'implementation', ?, ?, NULL, "
+                "'legacy_migration', ?, ?, ?)",
+                (
+                    legacy_generation_id,
+                    item.work_item_id,
+                    SESSION,
+                    BASE_SHA,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO turn_session_generations (turn_id, session_generation_id) "
+                "VALUES (?, ?)",
+                (legacy_turn.turn.turn_id, legacy_generation_id),
+            )
+
+        v2_service = OfflineSshDispatchService(
+            config=replace(
+                make_config(global_max_active=4),
+                session_runtime=session_runtime_config(),
+            ),
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+        v2_service.resolve_and_prepare(claimed_task(), base_sha=BASE_SHA)
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION_2, BASE_SHA, blocked_result()),
+        )
+        v2_service.run_claimed_turn(
+            claimed_task(), turn_id="turn_" + "0" * 32
+        )
+
+        generations = self.store.list_session_generations(item.work_item_id)
+        self.assertEqual(["retired", "active"], [item.state.value for item in generations])
+        self.assertIsNone(generations[0].policy_sha256)
+        self.assertEqual(POLICY_DIGEST, generations[1].policy_sha256)
+        self.assertEqual("legacy_policy_activation", generations[1].rotation_reason)
+
+    def test_v2_interrupted_start_reconciles_without_a_second_start(self) -> None:
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(),
+        )
+        service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+        item = service.resolve_and_prepare(
+            claimed_task(), base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, blocked_result()),
+        )
+        self.transport.interrupt_next(RunnerOperation.START)
+
+        interrupted = service.run_claimed_turn(
+            claimed_task(), turn_id="turn_" + "7" * 32
+        )
+        self.assertEqual(TurnState.RECONCILING, interrupted.turn.state)
+        generation = self.store.get_live_session_generation(item.work_item_id)
+        self.assertIsNotNone(generation)
+        assert generation is not None
+        self.assertEqual("starting", generation.state.value)
+
+        reconciled = self.orchestrator.reconcile_turn(interrupted.turn.turn_id)
+
+        self.assertEqual(TurnState.BLOCKED, reconciled.turn.state)
+        generation = self.store.get_live_session_generation(item.work_item_id)
+        self.assertIsNotNone(generation)
+        assert generation is not None
+        self.assertEqual("active", generation.state.value)
+        self.assertEqual(SESSION, generation.codex_session_id)
+        self.assertEqual(
+            [RunnerOperation.START, RunnerOperation.STATUS],
+            [call.operation for call in self.transport.calls if call.turn_id],
+        )
+
+    def test_v2_publication_advances_work_item_and_generation_together(self) -> None:
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(),
+        )
+        service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+        item = service.resolve_and_prepare(
+            claimed_task(), base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        artifact = b"v2-checkpoint"
+        head_sha = "b" * 40
+        self.verifier.register(
+            VerifiedBundle(
+                bundle_sha256=sha256(artifact).hexdigest(),
+                head_sha=head_sha,
+                parent_anchor_sha=BASE_SHA,
+                changed_paths=("src/codex_dispatcher/parser.py",),
+                commit_count=1,
+                size_bytes=len(artifact),
+            )
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, head_sha, blocked_result(), artifact),
+        )
+        progress = service.run_claimed_turn(
+            claimed_task(), turn_id="turn_" + "8" * 32
+        )
+        self.assertEqual(TurnState.CHECKPOINTING, progress.turn.state)
+
+        completed = service.publish_checkpoint(
+            progress.turn.turn_id,
+            publisher=SimpleNamespace(
+                publish=lambda artifact, *, plan, work_item: SimpleNamespace(
+                    observed_remote_sha=plan.source_sha
+                )
+            ),
+        )
+
+        generation = self.store.get_turn_session_generation(progress.turn.turn_id)
+        self.assertIsNotNone(generation)
+        assert generation is not None
+        self.assertEqual(head_sha, completed.work_item.last_published_sha)
+        self.assertEqual(head_sha, generation.last_published_sha)
+        self.assertEqual(TurnState.BLOCKED, completed.turn.state)
 
     def test_missing_or_conflicting_source_bundle_fails_before_persistence(self) -> None:
         for bundle in (None, source_bundle("b" * 40)):

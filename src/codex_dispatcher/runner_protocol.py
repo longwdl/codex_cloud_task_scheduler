@@ -14,6 +14,7 @@ from codex_dispatcher.work_items import (
     validate_git_sha,
     validate_repository,
     validate_session_id,
+    validate_session_generation_id,
     validate_sha256,
     validate_turn_id,
     validate_work_item_id,
@@ -21,6 +22,7 @@ from codex_dispatcher.work_items import (
 
 
 PROTOCOL_VERSION = 1
+NEXT_PROTOCOL_VERSION = 2
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_RESULT_BYTES = 256 * 1024
 MAX_INPUT_ARTIFACT_BYTES = 100 * 1024 * 1024
@@ -40,7 +42,7 @@ class RunnerOperation(StrEnum):
     ARCHIVE = "archive"
 
 
-_REQUEST_FIELDS = {
+_V1_REQUEST_FIELDS = {
     RunnerOperation.PREPARE: frozenset(
         {
             "version",
@@ -84,6 +86,21 @@ _REQUEST_FIELDS = {
 }
 
 
+_V2_GENERATION_FIELDS = frozenset(
+    {"session_generation_id", "session_generation", "agent_policy_digest"}
+)
+_V2_REQUEST_FIELDS = {
+    RunnerOperation.START: _V1_REQUEST_FIELDS[RunnerOperation.START]
+    | _V2_GENERATION_FIELDS,
+    RunnerOperation.RESUME: _V1_REQUEST_FIELDS[RunnerOperation.RESUME]
+    | _V2_GENERATION_FIELDS,
+    RunnerOperation.STATUS: _V1_REQUEST_FIELDS[RunnerOperation.STATUS]
+    | _V2_GENERATION_FIELDS,
+    RunnerOperation.STOP: _V1_REQUEST_FIELDS[RunnerOperation.STOP]
+    | _V2_GENERATION_FIELDS,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class RunnerRequest:
     operation: RunnerOperation
@@ -99,16 +116,22 @@ class RunnerRequest:
     expected_head_sha: str | None = None
     source_bundle_sha256: str | None = None
     source_bundle_size: int | None = None
+    session_generation_id: str | None = None
+    session_generation: int | None = None
+    agent_policy_digest: str | None = None
     version: int = PROTOCOL_VERSION
 
     def __post_init__(self) -> None:
         if not isinstance(self.operation, RunnerOperation):
             raise RunnerProtocolError("operation must be a RunnerOperation")
-        if type(self.version) is not int or self.version != PROTOCOL_VERSION:
+        if type(self.version) is not int or self.version not in {
+            PROTOCOL_VERSION,
+            NEXT_PROTOCOL_VERSION,
+        }:
             raise RunnerProtocolError("unsupported Runner protocol version")
         validate_work_item_id(self.work_item_id)
         payload = self.to_mapping()
-        expected = _REQUEST_FIELDS[self.operation]
+        expected = _request_fields(self.version, self.operation)
         if set(payload) != expected:
             raise RunnerProtocolError("Runner request fields do not match the operation")
         if self.turn_id is not None:
@@ -138,6 +161,20 @@ class RunnerRequest:
             or not 1 <= self.source_bundle_size <= MAX_INPUT_ARTIFACT_BYTES
         ):
             raise RunnerProtocolError("source_bundle_size is invalid")
+        if self.session_generation_id is not None:
+            try:
+                validate_session_generation_id(self.session_generation_id)
+            except ValueError as exc:
+                raise RunnerProtocolError(str(exc)) from exc
+        if self.session_generation is not None and (
+            type(self.session_generation) is not int or self.session_generation <= 0
+        ):
+            raise RunnerProtocolError("session_generation must be a positive integer")
+        if self.agent_policy_digest is not None:
+            try:
+                validate_sha256(self.agent_policy_digest, "agent_policy_digest")
+            except ValueError as exc:
+                raise RunnerProtocolError(str(exc)) from exc
 
     def to_mapping(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -157,6 +194,9 @@ class RunnerRequest:
             ("expected_head_sha", self.expected_head_sha),
             ("source_bundle_sha256", self.source_bundle_sha256),
             ("source_bundle_size", self.source_bundle_size),
+            ("session_generation_id", self.session_generation_id),
+            ("session_generation", self.session_generation),
+            ("agent_policy_digest", self.agent_policy_digest),
         )
         payload.update((name, value) for name, value in optional if value is not None)
         return payload
@@ -175,7 +215,10 @@ def parse_runner_request(value: str | bytes) -> RunnerRequest:
         operation = RunnerOperation(payload["op"])
     except (TypeError, ValueError) as exc:
         raise RunnerProtocolError("unsupported Runner operation") from exc
-    if set(payload) != _REQUEST_FIELDS[operation]:
+    version = payload.get("version")
+    if type(version) is not int:
+        raise RunnerProtocolError("unsupported Runner protocol version")
+    if set(payload) != _request_fields(version, operation):
         raise RunnerProtocolError("Runner request has unexpected or missing fields")
     try:
         return RunnerRequest(
@@ -193,9 +236,20 @@ def parse_runner_request(value: str | bytes) -> RunnerRequest:
             expected_head_sha=payload.get("expected_head_sha"),
             source_bundle_sha256=payload.get("source_bundle_sha256"),
             source_bundle_size=payload.get("source_bundle_size"),
+            session_generation_id=payload.get("session_generation_id"),
+            session_generation=payload.get("session_generation"),
+            agent_policy_digest=payload.get("agent_policy_digest"),
         )
     except (TypeError, ValueError) as exc:
         raise RunnerProtocolError(str(exc)) from exc
+
+
+def _request_fields(version: int, operation: RunnerOperation) -> frozenset[str]:
+    if version == PROTOCOL_VERSION:
+        return _V1_REQUEST_FIELDS[operation]
+    if version == NEXT_PROTOCOL_VERSION and operation in _V2_REQUEST_FIELDS:
+        return _V2_REQUEST_FIELDS[operation]
+    raise RunnerProtocolError("unsupported Runner protocol version or operation")
 
 
 class AgentResultStatus(StrEnum):

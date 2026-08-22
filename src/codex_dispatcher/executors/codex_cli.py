@@ -17,6 +17,15 @@ _FIXED_AUTH_CONFIG = (
     "-c",
     'cli_auth_credentials_store="file"',
 )
+_RUNNER_POLICY_CONFIG = (
+    "--strict-config",
+    "--model",
+    "gpt-5.6-sol",
+    "-c",
+    'model_reasoning_effort="xhigh"',
+    "--enable",
+    "multi_agent",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +64,7 @@ def build_codex_invocation(
     output_schema: Path,
     session_id: str | None = None,
     egress_proxy_url: str | None = None,
+    enable_runner_policy: bool = False,
 ) -> CodexInvocationPlan:
     """Build fixed argv; the prompt is deliberately absent and must use standard input."""
     _validate_paths(
@@ -65,6 +75,9 @@ def build_codex_invocation(
             (output_schema, "output_schema"),
         )
     )
+    if not isinstance(enable_runner_policy, bool):
+        raise ValueError("enable_runner_policy must be a bool")
+    policy = _RUNNER_POLICY_CONFIG if enable_runner_policy else ()
     common = (
         "--json",
         "--dangerously-bypass-approvals-and-sandbox",
@@ -72,12 +85,20 @@ def build_codex_invocation(
         str(output_schema),
     )
     if session_id is None:
-        argv = (str(codex_path), *_FIXED_AUTH_CONFIG, "exec", *common, "-")
+        argv = (
+            str(codex_path),
+            *_FIXED_AUTH_CONFIG,
+            *policy,
+            "exec",
+            *common,
+            "-",
+        )
     else:
         session_id = validate_session_id(session_id)
         argv = (
             str(codex_path),
             *_FIXED_AUTH_CONFIG,
+            *policy,
             "exec",
             "resume",
             session_id,

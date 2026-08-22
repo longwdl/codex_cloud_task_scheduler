@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from dataclasses import dataclass
 from hashlib import sha256
@@ -14,21 +15,36 @@ from codex_dispatcher.command_runner import run_command
 from codex_dispatcher.executors.codex_docker import (
     CONTAINER_CODE_MODE_HOST_PATH,
     DOCKER_NETWORK,
+    DOCKER_LABEL_POLICY_DIGEST,
+    DOCKER_LABEL_SESSION_GENERATION,
+    DOCKER_LABEL_SESSION_GENERATION_ID,
+    DOCKER_LABEL_TURN,
+    DOCKER_LABEL_WORK_ITEM,
     DOCKER_NETWORK_GATEWAY,
     DOCKER_NETWORK_SUBNET,
     ROOTLESS_HOST_PROXY_URL,
     DockerCodexRuntime,
 )
-from codex_dispatcher.runner_protocol import RunnerOperation, RunnerRequest
+from codex_dispatcher.runner_protocol import (
+    NEXT_PROTOCOL_VERSION,
+    RunnerOperation,
+    RunnerRequest,
+)
 from codex_dispatcher.runner_workspace import RunnerWorkspacePaths
-from codex_dispatcher.work_items import validate_session_id, validate_work_item_id
+from codex_dispatcher.work_items import (
+    validate_session_generation_id,
+    validate_session_id,
+    validate_work_item_id,
+)
 
 
 _SESSION_BINDING_VERSION = 1
 _TOOL_BINDING_VERSION = 1
 _AUTH_BINDING_VERSION = 1
+_GENERATION_RECORD_VERSION = 1
 _MAX_SESSION_BINDING_BYTES = 4096
 _MAX_AUTH_BYTES = 1024 * 1024
+_PINNED_IMAGE_RE = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
 
 
 class RunnerDockerError(RuntimeError):
@@ -48,6 +64,10 @@ class DockerWorkItemContext:
     image: str
     codex_sha256: str
     code_mode_host_sha256: str
+    session_generation_id: str | None = None
+    session_generation: int | None = None
+    agent_policy_digest: str | None = None
+    generation_record: Path | None = None
 
 
 def prepare_docker_work_item(
@@ -76,6 +96,14 @@ def prepare_docker_work_item(
     _trusted_regular_file(output_schema, "output schema", secret=False)
     if output_schema.name != "agent-result.schema.json":
         raise RunnerDockerError("output schema name is invalid")
+
+    if request.version == NEXT_PROTOCOL_VERSION:
+        return _prepare_docker_generation(
+            runtime=runtime,
+            paths=paths,
+            request=request,
+            auth_file=auth_file,
+        )
 
     codex_home = paths.state / "codex-home"
     work_item_auth = codex_home / "auth.json"
@@ -185,6 +213,317 @@ def prepare_docker_work_item(
     )
 
 
+def _prepare_docker_generation(
+    *,
+    runtime: DockerCodexRuntime,
+    paths: RunnerWorkspacePaths,
+    request: RunnerRequest,
+    auth_file: Path,
+) -> DockerWorkItemContext:
+    assert request.session_generation_id is not None
+    assert request.session_generation is not None
+    assert request.agent_policy_digest is not None
+    create_root = request.operation is RunnerOperation.START
+    generation_root, records = _generation_records(
+        paths.state,
+        create_root=create_root,
+    )
+    if any(record[0] != request.work_item_id for record in records.values()):
+        raise RunnerDockerError("Docker generation WorkItem identity conflicts")
+    highest = max((record[2] for record in records.values()), default=0)
+    generation_directory = generation_root / request.session_generation_id
+    expected_record = (
+        request.work_item_id,
+        request.session_generation_id,
+        request.session_generation,
+        request.agent_policy_digest,
+        runtime.image,
+        runtime.codex_sha256,
+        runtime.code_mode_host_sha256,
+    )
+    if request.operation is RunnerOperation.START:
+        if request.session_generation <= highest:
+            raise RunnerDockerError(
+                "Docker START generation must advance persisted state"
+            )
+        if generation_directory.exists() or generation_directory.is_symlink():
+            raise RunnerDockerError("Docker START generation already exists")
+        _create_protected_directory(
+            generation_directory,
+            parent=generation_root,
+            field="Docker generation directory",
+        )
+        generation_record = generation_directory / "generation.json"
+        _persist_binding(
+            generation_record,
+            {
+                "version": _GENERATION_RECORD_VERSION,
+                "work_item_id": request.work_item_id,
+                "session_generation_id": request.session_generation_id,
+                "session_generation": request.session_generation,
+                "agent_policy_digest": request.agent_policy_digest,
+                "image": runtime.image,
+                "codex_sha256": runtime.codex_sha256,
+                "code_mode_host_sha256": runtime.code_mode_host_sha256,
+            },
+            "Docker generation record",
+        )
+        if _read_generation_record(generation_record) != expected_record:
+            raise RunnerDockerError("Docker generation record conflicts")
+    else:
+        if request.session_generation != highest:
+            raise RunnerDockerError(
+                "Docker RESUME requires the latest persisted generation"
+            )
+        observed = records.get(request.session_generation_id)
+        if observed != expected_record:
+            raise RunnerDockerError("Docker RESUME generation binding is unavailable")
+        generation_record = generation_directory / "generation.json"
+
+    codex_home = generation_directory / "codex-home"
+    work_item_auth = codex_home / "auth.json"
+    auth_binding = generation_directory / "codex-auth-binding.json"
+    session_binding = generation_directory / "codex-session.json"
+    tool_binding = generation_directory / "codex-session-tools.json"
+    if request.operation is RunnerOperation.START:
+        _create_protected_directory(
+            codex_home,
+            parent=generation_directory,
+            field="generation Codex home",
+        )
+        _seed_work_item_auth(
+            state=generation_directory,
+            source=auth_file,
+            destination=work_item_auth,
+            binding=auth_binding,
+            work_item_id=request.work_item_id,
+        )
+    else:
+        assert request.session_id is not None
+        _owned_protected_directory(codex_home, "generation Codex home")
+        _validate_bound_auth(
+            work_item_auth,
+            auth_binding,
+            request.work_item_id,
+        )
+        session = _read_session_binding(session_binding)
+        tools = _read_tool_binding(tool_binding)
+        expected_session = (
+            request.work_item_id,
+            request.session_id,
+            runtime.image,
+            runtime.codex_sha256,
+        )
+        if session != expected_session or tools != (
+            *expected_session,
+            runtime.code_mode_host_sha256,
+        ):
+            raise RunnerDockerError("Docker RESUME session binding is unavailable")
+
+    return DockerWorkItemContext(
+        request.work_item_id,
+        paths.repository,
+        generation_directory,
+        codex_home,
+        work_item_auth,
+        auth_binding,
+        session_binding,
+        tool_binding,
+        runtime.image,
+        runtime.codex_sha256,
+        runtime.code_mode_host_sha256,
+        request.session_generation_id,
+        request.session_generation,
+        request.agent_policy_digest,
+        generation_record,
+    )
+
+
+def load_docker_generation_receipt(
+    *,
+    runtime: DockerCodexRuntime,
+    paths: RunnerWorkspacePaths,
+    request: RunnerRequest,
+) -> tuple[DockerWorkItemContext, str] | None:
+    """Read one exact v2 session/tool receipt without mutating Runner state."""
+    if (
+        request.version != NEXT_PROTOCOL_VERSION
+        or request.operation is not RunnerOperation.STATUS
+    ):
+        raise ValueError("request must be a v2 STATUS operation")
+    assert request.session_generation_id is not None
+    assert request.session_generation is not None
+    assert request.agent_policy_digest is not None
+    _validate_runtime(runtime)
+    _owned_protected_directory(paths.root, "WorkItem root")
+    _owned_protected_directory(paths.repository, "WorkItem repository")
+    _owned_protected_directory(paths.state, "WorkItem state")
+    generation_root, records = _generation_records(paths.state, create_root=False)
+    if any(record[0] != request.work_item_id for record in records.values()):
+        raise RunnerDockerError("Docker generation WorkItem identity conflicts")
+    generation_directory = generation_root / request.session_generation_id
+    observed = records.get(request.session_generation_id)
+    expected = (
+        request.work_item_id,
+        request.session_generation_id,
+        request.session_generation,
+        request.agent_policy_digest,
+        runtime.image,
+        runtime.codex_sha256,
+        runtime.code_mode_host_sha256,
+    )
+    if observed != expected:
+        raise RunnerDockerError("Docker STATUS generation binding is unavailable")
+    codex_home = generation_directory / "codex-home"
+    context = DockerWorkItemContext(
+        request.work_item_id,
+        paths.repository,
+        generation_directory,
+        codex_home,
+        codex_home / "auth.json",
+        generation_directory / "codex-auth-binding.json",
+        generation_directory / "codex-session.json",
+        generation_directory / "codex-session-tools.json",
+        runtime.image,
+        runtime.codex_sha256,
+        runtime.code_mode_host_sha256,
+        request.session_generation_id,
+        request.session_generation,
+        request.agent_policy_digest,
+        generation_directory / "generation.json",
+    )
+    _owned_protected_directory(codex_home, "generation Codex home")
+    validate_docker_auth_state(context)
+    session = _read_session_binding(context.session_binding, required=False)
+    tools = _read_tool_binding(context.tool_binding, required=False)
+    if session is None and tools is None:
+        return None
+    if session is None or tools is None:
+        raise RunnerDockerError("Docker generation receipt is incomplete")
+    expected_session_prefix = (
+        request.work_item_id,
+        session[1],
+        runtime.image,
+        runtime.codex_sha256,
+    )
+    if session != expected_session_prefix or tools != (
+        *expected_session_prefix,
+        runtime.code_mode_host_sha256,
+    ):
+        raise RunnerDockerError("Docker generation receipt conflicts")
+    return context, session[1]
+
+
+def _generation_records(
+    state: Path,
+    *,
+    create_root: bool,
+) -> tuple[Path, dict[str, tuple[str, str, int, str, str, str, str]]]:
+    root = state / "generations"
+    if not root.exists():
+        if not create_root:
+            raise RunnerDockerError("Docker generations directory is unavailable")
+        _create_protected_directory(
+            root,
+            parent=state,
+            field="Docker generations directory",
+        )
+    _owned_protected_directory(root, "Docker generations directory")
+    records: dict[str, tuple[str, str, int, str, str, str, str]] = {}
+    numbers: set[int] = set()
+    try:
+        entries = tuple(root.iterdir())
+    except OSError as exc:
+        raise RunnerDockerError("Docker generations directory is unavailable") from exc
+    for entry in entries:
+        try:
+            generation_id = validate_session_generation_id(entry.name)
+        except ValueError as exc:
+            raise RunnerDockerError(
+                "Docker generations directory contains an invalid entry"
+            ) from exc
+        _owned_protected_directory(entry, "Docker generation directory")
+        record = _read_generation_record(entry / "generation.json")
+        if record[1] != generation_id or record[2] in numbers:
+            raise RunnerDockerError("Docker generation records conflict")
+        records[generation_id] = record
+        numbers.add(record[2])
+    return root, records
+
+
+def _read_generation_record(
+    path: Path,
+) -> tuple[str, str, int, str, str, str, str]:
+    try:
+        if path.lstat().st_nlink != 1:
+            raise RunnerDockerError("Docker generation record is invalid")
+    except OSError as exc:
+        raise RunnerDockerError("Docker generation record is unavailable") from exc
+    payload = _read_binding_payload(
+        path,
+        required=True,
+        field="Docker generation record",
+    )
+    assert payload is not None
+    expected_fields = {
+        "version",
+        "work_item_id",
+        "session_generation_id",
+        "session_generation",
+        "agent_policy_digest",
+        "image",
+        "codex_sha256",
+        "code_mode_host_sha256",
+    }
+    try:
+        if set(payload) != expected_fields or payload["version"] != (
+            _GENERATION_RECORD_VERSION
+        ):
+            raise ValueError("unexpected fields")
+        work_item_id = validate_work_item_id(payload["work_item_id"])
+        generation_id = validate_session_generation_id(
+            payload["session_generation_id"]
+        )
+        generation = payload["session_generation"]
+        if type(generation) is not int or generation <= 0:
+            raise ValueError("invalid generation")
+        policy_digest = _validate_binding_sha256(
+            payload["agent_policy_digest"], "agent policy"
+        )
+        image = payload["image"]
+        if not isinstance(image, str) or not _PINNED_IMAGE_RE.fullmatch(image):
+            raise ValueError("invalid image")
+        codex_sha256 = _validate_binding_sha256(payload["codex_sha256"], "Codex")
+        code_mode_sha256 = _validate_binding_sha256(
+            payload["code_mode_host_sha256"], "code-mode host"
+        )
+    except (TypeError, ValueError) as exc:
+        raise RunnerDockerError("Docker generation record is malformed") from exc
+    return (
+        work_item_id,
+        generation_id,
+        generation,
+        policy_digest,
+        image,
+        codex_sha256,
+        code_mode_sha256,
+    )
+
+
+def _create_protected_directory(path: Path, *, parent: Path, field: str) -> None:
+    _owned_protected_directory(parent, f"{field} parent")
+    try:
+        path.mkdir(mode=0o700)
+        descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise RunnerDockerError(f"{field} could not be created") from exc
+    _owned_protected_directory(path, field)
+
+
 def validate_docker_command_boundary(
     *,
     runtime: DockerCodexRuntime,
@@ -199,19 +538,53 @@ def validate_docker_command_boundary(
     _owned_protected_directory(context.repository, "WorkItem repository")
     _owned_protected_directory(context.state, "WorkItem state")
     _owned_protected_directory(context.codex_home, "WorkItem Codex home")
-    if (
-        context.state != context.repository.parent / "runner-state"
-        or context.codex_home != context.state / "codex-home"
-        or context.auth_file != context.codex_home / "auth.json"
-        or context.auth_binding != context.state / "codex-auth-binding.json"
-        or context.session_binding != context.state / "codex-session.json"
-        or context.tool_binding != context.state / "codex-session-tools.json"
+    common_invalid = (
+        context.repository != context.repository.parent / "repo"
         or context.image != runtime.image
         or context.codex_sha256 != runtime.codex_sha256
         or context.code_mode_host_sha256 != runtime.code_mode_host_sha256
         or runtime.code_mode_host_path
         != codex_path.with_name(CONTAINER_CODE_MODE_HOST_PATH.name)
-    ):
+    )
+    if context.session_generation_id is None:
+        layout_invalid = (
+            context.state != context.repository.parent / "runner-state"
+            or context.codex_home != context.state / "codex-home"
+            or context.auth_file != context.codex_home / "auth.json"
+            or context.auth_binding != context.state / "codex-auth-binding.json"
+            or context.session_binding != context.state / "codex-session.json"
+            or context.tool_binding != context.state / "codex-session-tools.json"
+            or context.session_generation is not None
+            or context.agent_policy_digest is not None
+            or context.generation_record is not None
+        )
+    else:
+        expected_generation_directory = (
+            context.repository.parent
+            / "runner-state"
+            / "generations"
+            / context.session_generation_id
+        )
+        layout_invalid = (
+            context.state != expected_generation_directory
+            or context.codex_home != context.state / "codex-home"
+            or context.auth_file != context.codex_home / "auth.json"
+            or context.auth_binding != context.state / "codex-auth-binding.json"
+            or context.session_binding != context.state / "codex-session.json"
+            or context.tool_binding != context.state / "codex-session-tools.json"
+            or context.generation_record != context.state / "generation.json"
+            or _read_generation_record(context.generation_record)
+            != (
+                context.work_item_id,
+                context.session_generation_id,
+                context.session_generation,
+                context.agent_policy_digest,
+                context.image,
+                context.codex_sha256,
+                context.code_mode_host_sha256,
+            )
+        )
+    if common_invalid or layout_invalid:
         raise RunnerDockerError("Docker WorkItem context is inconsistent")
     _validate_codex_binary(codex_path, runtime.codex_sha256, "Codex executable")
     _validate_codex_binary(
@@ -252,25 +625,6 @@ def bind_docker_session(
         context.image,
         context.codex_sha256,
     )
-    existing_session_binding = _read_session_binding(
-        context.session_binding, required=False
-    )
-    if existing_session_binding is None:
-        _persist_binding(
-            context.session_binding,
-            {
-                "version": _SESSION_BINDING_VERSION,
-                "work_item_id": work_item_id,
-                "session_id": session_id,
-                "image": context.image,
-                "codex_sha256": context.codex_sha256,
-            },
-            "WorkItem Codex session binding",
-        )
-        existing_session_binding = _read_session_binding(context.session_binding)
-    if existing_session_binding != expected_session_binding:
-        raise RunnerDockerError("WorkItem Codex session binding conflicts")
-
     expected_tool_binding = (
         *expected_session_binding,
         context.code_mode_host_sha256,
@@ -294,6 +648,109 @@ def bind_docker_session(
         existing_tool_binding = _read_tool_binding(context.tool_binding)
     if existing_tool_binding != expected_tool_binding:
         raise RunnerDockerError("WorkItem Codex tool binding conflicts")
+
+    # The session binding is the durable receipt commit marker. The complete
+    # tool identity must reach disk first so a visible receipt can never be
+    # paired with a missing tool binding after a host crash.
+    existing_session_binding = _read_session_binding(
+        context.session_binding, required=False
+    )
+    if existing_session_binding is None:
+        _persist_binding(
+            context.session_binding,
+            {
+                "version": _SESSION_BINDING_VERSION,
+                "work_item_id": work_item_id,
+                "session_id": session_id,
+                "image": context.image,
+                "codex_sha256": context.codex_sha256,
+            },
+            "WorkItem Codex session binding",
+        )
+        existing_session_binding = _read_session_binding(context.session_binding)
+    if existing_session_binding != expected_session_binding:
+        raise RunnerDockerError("WorkItem Codex session binding conflicts")
+
+
+def docker_generation_container_is_running(
+    *,
+    runtime: DockerCodexRuntime,
+    request: RunnerRequest,
+) -> bool:
+    """Prove that the exact deterministic v2 Turn container is still running."""
+    if request.version != NEXT_PROTOCOL_VERSION or request.turn_id is None:
+        raise ValueError("request must identify one v2 Turn")
+    assert request.session_generation_id is not None
+    assert request.session_generation is not None
+    assert request.agent_policy_digest is not None
+    _validate_runtime(runtime)
+    container_name = f"codex-{request.turn_id}"
+    result = run_command(
+        (
+            str(runtime.docker_path),
+            f"--host={runtime.docker_host}",
+            "container",
+            "inspect",
+            container_name,
+            "--format={{json .}}",
+        ),
+        timeout_seconds=10.0,
+        max_output_bytes=64 * 1024,
+        env={"DOCKER_CONFIG": str(runtime.cli_config_directory)},
+    )
+    if result.returncode != 0:
+        return False
+    if (
+        result.timed_out
+        or result.error is not None
+        or result.stdout_truncated
+        or result.stderr_truncated
+        or result.stderr
+    ):
+        raise RunnerDockerError("Docker container inspection failed")
+    try:
+        payload = json.loads(result.stdout, object_pairs_hook=_unique_object)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise RunnerDockerError(
+            "Docker container inspection output is malformed"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RunnerDockerError("Docker container inspection output is malformed")
+    config = payload.get("Config")
+    host_config = payload.get("HostConfig")
+    network_settings = payload.get("NetworkSettings")
+    state = payload.get("State")
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    networks = (
+        network_settings.get("Networks")
+        if isinstance(network_settings, dict)
+        else None
+    )
+    expected_labels = {
+        DOCKER_LABEL_WORK_ITEM: request.work_item_id,
+        DOCKER_LABEL_SESSION_GENERATION_ID: request.session_generation_id,
+        DOCKER_LABEL_SESSION_GENERATION: str(request.session_generation),
+        DOCKER_LABEL_TURN: request.turn_id,
+        DOCKER_LABEL_POLICY_DIGEST: request.agent_policy_digest,
+    }
+    return bool(
+        payload.get("Name") == f"/{container_name}"
+        and isinstance(config, dict)
+        and config.get("Image") == runtime.image
+        and isinstance(labels, dict)
+        and all(labels.get(key) == value for key, value in expected_labels.items())
+        and isinstance(host_config, dict)
+        and host_config.get("NetworkMode") == DOCKER_NETWORK
+        and isinstance(networks, dict)
+        and set(networks) == {DOCKER_NETWORK}
+        and isinstance(state, dict)
+        and state.get("Running") is True
+        and state.get("Paused") is False
+        and state.get("Restarting") is False
+        and state.get("Dead") is False
+        and type(state.get("Pid")) is int
+        and state["Pid"] > 0
+    )
 
 
 def _seed_work_item_auth(

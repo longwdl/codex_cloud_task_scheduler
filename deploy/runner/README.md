@@ -53,6 +53,44 @@ root-or-Runner-owned, non-writable parent chain so an administrator account with
 replace a trusted executable through a writable package-manager directory. Mutable directories and
 lock files must be owned by the executing account with no group or world access.
 
+## Codex policy bundle
+
+For protocol v2 on `rootless_docker`, install the complete reviewed
+`config/runner-codex-policy/` tree as root-owned, non-group/world-writable
+`/srv/codex-runner/etc/runner-codex-policy/`. Configure its absolute path and
+the reviewed `manifest.json` `policy_digest` in the protected Runner
+configuration. The Runner rejects a missing, extra, symlinked, writable, or
+digest-mismatched policy file before a Turn and rechecks it immediately before
+each Codex container command. Do not copy the offline example digest: its all-
+zero value is intentionally un-installable.
+
+The policy fields remain optional for a v1-only rootless Runner so an upgraded
+Runner package does not change legacy argv or mounts. A v2 request is rejected
+before Turn persistence unless the exact bundle is configured and valid.
+
+The container mounts only `config.toml`, `agents/`, and `requirements.toml`
+read-only into its Codex paths. It does not mount the complete policy directory
+or let `/workspace` supply configuration. The CLI runs with `--strict-config`,
+the fixed `gpt-5.6-sol`/`xhigh` primary, and `multi_agent` enabled. Login status
+is deliberately outside this policy mount because it is not an agent Turn.
+
+Activate this in two ordered steps: install and validate the Runner bundle and
+Runner configuration first, then enable the Control Host `[session_runtime]`
+table with the exact same `agent_policy_digest`. Never enable the Control Host
+v2 request path against a v1-only Runner.
+
+`rotate_before_final_audit=true` is deliberately rejected until a separate
+fresh audit generation is implemented. Keep it `false`; it is not a soft or
+best-effort switch.
+
+Before activation, take a Control Host SQLite backup and preserve the previous
+Runner config/package. Roll back by stopping new sweeps and restoring both the
+database and the two configs to the same pre-activation boundary. Do not merely
+remove `[session_runtime]` after a v2 WorkItem has started: the legacy
+`work_items.codex_session_id` is intentionally not populated by v2, so a mixed
+rollback could start an unrelated v1 session. Generation directories are audit
+state and must not be deleted during rollback.
+
 ## SSH contract
 
 Install `codex-runner-sshd.conf` only after creating the account and fixed wrapper. The key file must

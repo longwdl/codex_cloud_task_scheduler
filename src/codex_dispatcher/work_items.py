@@ -17,6 +17,7 @@ from codex_dispatcher.task_spec import TaskSpecError, normalize_repo_path
 _REPOSITORY_COMPONENT_RE = re.compile(r"[A-Za-z0-9_.-]{1,100}")
 _WORK_ITEM_ID_RE = re.compile(r"wi_[0-9a-f]{24}")
 _TURN_ID_RE = re.compile(r"turn_[0-9a-f]{32}")
+_SESSION_GENERATION_ID_RE = re.compile(r"sg_[0-9a-f]{24}(?:[0-9a-f]{8})?")
 _GIT_SHA_RE = re.compile(r"[0-9a-f]{40,64}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
@@ -51,6 +52,27 @@ class TurnState(StrEnum):
     FAILED = "failed"
     BLOCKED = "blocked"
     INTERRUPTED = "interrupted"
+
+
+class SessionGenerationState(StrEnum):
+    PLANNED = "planned"
+    STARTING = "starting"
+    ACTIVE = "active"
+    RETIRING = "retiring"
+    RETIRED = "retired"
+    FAILED = "failed"
+
+
+class SessionGenerationRole(StrEnum):
+    IMPLEMENTATION = "implementation"
+    AUDIT = "audit"
+    CI_REPAIR = "ci_repair"
+    SALVAGE = "salvage"
+
+
+class PromptKind(StrEnum):
+    FULL = "full"
+    DELTA = "delta"
 
 
 ACTIVE_TURN_STATES: Final[frozenset[TurnState]] = frozenset(
@@ -145,6 +167,25 @@ _TURN_TRANSITIONS: Final[dict[TurnState, frozenset[TurnState]]] = {
     TurnState.FAILED: frozenset(),
     TurnState.BLOCKED: frozenset(),
     TurnState.INTERRUPTED: frozenset(),
+}
+
+_SESSION_GENERATION_TRANSITIONS: Final[
+    dict[SessionGenerationState, frozenset[SessionGenerationState]]
+] = {
+    SessionGenerationState.PLANNED: frozenset(
+        {SessionGenerationState.STARTING, SessionGenerationState.FAILED}
+    ),
+    SessionGenerationState.STARTING: frozenset(
+        {SessionGenerationState.ACTIVE, SessionGenerationState.FAILED}
+    ),
+    SessionGenerationState.ACTIVE: frozenset(
+        {SessionGenerationState.RETIRING, SessionGenerationState.FAILED}
+    ),
+    SessionGenerationState.RETIRING: frozenset(
+        {SessionGenerationState.RETIRED, SessionGenerationState.FAILED}
+    ),
+    SessionGenerationState.RETIRED: frozenset(),
+    SessionGenerationState.FAILED: frozenset(),
 }
 
 
@@ -350,6 +391,228 @@ class WorkItem:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionGeneration:
+    """One replaceable Codex session generation within a stable WorkItem."""
+
+    session_generation_id: str
+    work_item_id: str
+    generation_number: int
+    state: SessionGenerationState
+    role: SessionGenerationRole
+    start_head_sha: str
+    created_at: str
+    updated_at: str
+    codex_session_id: str | None = None
+    last_published_sha: str | None = None
+    policy_sha256: str | None = None
+    rotation_reason: str | None = None
+    baseline_issue_revision: str | None = None
+    baseline_issue_content_sha256: str | None = None
+    baseline_task_spec_sha256: str | None = None
+    baseline_prompt_sha256: str | None = None
+    baseline_approved_comment_ids: tuple[str, ...] | None = None
+    baseline_approved_context_sha256: str | None = None
+    started_at: str | None = None
+    retired_at: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.state, SessionGenerationState):
+            raise ValueError("state must be a SessionGenerationState")
+        if not isinstance(self.role, SessionGenerationRole):
+            raise ValueError("role must be a SessionGenerationRole")
+        validate_session_generation_id(self.session_generation_id)
+        validate_work_item_id(self.work_item_id)
+        _positive_int(self.generation_number, "generation_number")
+        validate_git_sha(self.start_head_sha, "start_head_sha")
+        _bounded_text(self.created_at, "created_at", maximum=64)
+        _bounded_text(self.updated_at, "updated_at", maximum=64)
+        if self.codex_session_id is not None:
+            validate_session_id(self.codex_session_id)
+        if self.last_published_sha is not None:
+            validate_git_sha(self.last_published_sha, "last_published_sha")
+        if self.policy_sha256 is not None:
+            validate_sha256(self.policy_sha256, "policy_sha256")
+        elif self.rotation_reason != "legacy_migration":
+            raise ValueError("policy_sha256 is required outside legacy migration rows")
+        if self.rotation_reason is not None:
+            _bounded_text(self.rotation_reason, "rotation_reason", maximum=256)
+        baseline_values = (
+            self.baseline_issue_revision,
+            self.baseline_issue_content_sha256,
+            self.baseline_task_spec_sha256,
+            self.baseline_prompt_sha256,
+            self.baseline_approved_comment_ids,
+            self.baseline_approved_context_sha256,
+        )
+        if any(value is None for value in baseline_values) and any(
+            value is not None for value in baseline_values
+        ):
+            raise ValueError("SessionGeneration baseline fields must be recorded together")
+        if self.baseline_issue_revision is not None:
+            _bounded_text(self.baseline_issue_revision, "baseline_issue_revision", maximum=256)
+            assert self.baseline_issue_content_sha256 is not None
+            assert self.baseline_task_spec_sha256 is not None
+            assert self.baseline_prompt_sha256 is not None
+            assert self.baseline_approved_comment_ids is not None
+            assert self.baseline_approved_context_sha256 is not None
+            validate_sha256(self.baseline_issue_content_sha256, "baseline_issue_content_sha256")
+            validate_sha256(self.baseline_task_spec_sha256, "baseline_task_spec_sha256")
+            validate_sha256(self.baseline_prompt_sha256, "baseline_prompt_sha256")
+            _validate_comment_ids(
+                self.baseline_approved_comment_ids, "baseline_approved_comment_ids"
+            )
+            validate_sha256(
+                self.baseline_approved_context_sha256,
+                "baseline_approved_context_sha256",
+            )
+        for field, value in (("started_at", self.started_at), ("retired_at", self.retired_at)):
+            if value is not None:
+                _bounded_text(value, field, maximum=64)
+        if self.state in {
+            SessionGenerationState.STARTING,
+            SessionGenerationState.ACTIVE,
+            SessionGenerationState.RETIRING,
+            SessionGenerationState.RETIRED,
+        } and self.started_at is None:
+            raise ValueError("started_at is required after a SessionGeneration starts")
+        if self.state is SessionGenerationState.ACTIVE and self.codex_session_id is None:
+            raise ValueError("an active SessionGeneration requires a Codex session")
+        if (
+            self.state
+            in {
+                SessionGenerationState.STARTING,
+                SessionGenerationState.ACTIVE,
+                SessionGenerationState.RETIRING,
+                SessionGenerationState.RETIRED,
+            }
+            and self.rotation_reason != "legacy_migration"
+            and self.baseline_issue_revision is None
+        ):
+            raise ValueError("a non-legacy SessionGeneration requires a baseline before starting")
+        if self.state in {SessionGenerationState.RETIRED, SessionGenerationState.FAILED}:
+            if self.retired_at is None:
+                raise ValueError("retired_at is required for terminal SessionGeneration")
+        elif self.retired_at is not None:
+            raise ValueError("retired_at is only allowed for terminal SessionGeneration")
+
+    @classmethod
+    def new(
+        cls,
+        *,
+        work_item_id: str,
+        generation_number: int,
+        role: SessionGenerationRole,
+        start_head_sha: str,
+        policy_sha256: str,
+        session_generation_id: str | None = None,
+        rotation_reason: str | None = None,
+        at: str | None = None,
+    ) -> "SessionGeneration":
+        now = at or utc_now_iso()
+        return cls(
+            session_generation_id=session_generation_id or f"sg_{uuid4().hex}",
+            work_item_id=work_item_id,
+            generation_number=generation_number,
+            state=SessionGenerationState.PLANNED,
+            role=role,
+            start_head_sha=start_head_sha,
+            policy_sha256=policy_sha256,
+            rotation_reason=rotation_reason,
+            created_at=now,
+            updated_at=now,
+        )
+
+    @property
+    def is_live(self) -> bool:
+        return self.state not in {
+            SessionGenerationState.RETIRED,
+            SessionGenerationState.FAILED,
+        }
+
+    def transition_to(
+        self, state: SessionGenerationState, *, at: str | None = None
+    ) -> "SessionGeneration":
+        if state not in _SESSION_GENERATION_TRANSITIONS[self.state]:
+            raise InvalidStateTransition(
+                f"cannot transition session generation {self.session_generation_id} "
+                f"from {self.state.value} to {state.value}"
+            )
+        now = at or utc_now_iso()
+        if state is SessionGenerationState.ACTIVE and self.codex_session_id is None:
+            raise ValueError("an active SessionGeneration requires a Codex session")
+        if (
+            state is SessionGenerationState.STARTING
+            and self.rotation_reason != "legacy_migration"
+            and self.baseline_issue_revision is None
+        ):
+            raise ValueError("a non-legacy SessionGeneration requires a baseline before starting")
+        started_at = self.started_at
+        if state is SessionGenerationState.STARTING:
+            started_at = now
+        return replace(
+            self,
+            state=state,
+            started_at=started_at,
+            retired_at=(
+                now
+                if state in {SessionGenerationState.RETIRED, SessionGenerationState.FAILED}
+                else None
+            ),
+            updated_at=now,
+        )
+
+    def bind_session(self, session_id: str, *, at: str | None = None) -> "SessionGeneration":
+        session_id = validate_session_id(session_id)
+        if self.state not in {SessionGenerationState.STARTING, SessionGenerationState.ACTIVE}:
+            raise ValueError(
+                "Codex session can only be bound while generation is starting or active"
+            )
+        if self.codex_session_id is not None and self.codex_session_id != session_id:
+            raise ValueError("session generation is already bound to a different Codex session")
+        if self.codex_session_id == session_id:
+            return self
+        return replace(self, codex_session_id=session_id, updated_at=at or utc_now_iso())
+
+    def record_baseline(
+        self,
+        *,
+        issue_revision: str,
+        issue_content_sha256: str,
+        task_spec_sha256: str,
+        prompt_sha256: str,
+        approved_comment_ids: tuple[str, ...],
+        approved_context_sha256: str,
+        at: str | None = None,
+    ) -> "SessionGeneration":
+        if self.state is not SessionGenerationState.PLANNED:
+            raise ValueError("SessionGeneration baseline can only be recorded while planned")
+        candidate = replace(
+            self,
+            baseline_issue_revision=issue_revision,
+            baseline_issue_content_sha256=issue_content_sha256,
+            baseline_task_spec_sha256=task_spec_sha256,
+            baseline_prompt_sha256=prompt_sha256,
+            baseline_approved_comment_ids=approved_comment_ids,
+            baseline_approved_context_sha256=approved_context_sha256,
+            updated_at=at or utc_now_iso(),
+        )
+        if self.baseline_issue_revision is not None:
+            if (
+                self.baseline_issue_revision != candidate.baseline_issue_revision
+                or self.baseline_issue_content_sha256
+                != candidate.baseline_issue_content_sha256
+                or self.baseline_task_spec_sha256 != candidate.baseline_task_spec_sha256
+                or self.baseline_prompt_sha256 != candidate.baseline_prompt_sha256
+                or self.baseline_approved_comment_ids != candidate.baseline_approved_comment_ids
+                or self.baseline_approved_context_sha256
+                != candidate.baseline_approved_context_sha256
+            ):
+                raise ValueError("SessionGeneration already has a different baseline")
+            return self
+        return candidate
+
+
+@dataclass(frozen=True, slots=True)
 class Turn:
     turn_id: str
     work_item_id: str
@@ -488,6 +751,105 @@ class Turn:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class TurnUsage:
+    """Immutable bounded token accounting captured from one completed Runner turn."""
+
+    turn_id: str
+    input_tokens: int
+    cached_input_tokens: int
+    cache_write_input_tokens: int
+    output_tokens: int
+    reasoning_output_tokens: int
+    created_at: str
+    updated_at: str
+
+    def __post_init__(self) -> None:
+        validate_turn_id(self.turn_id)
+        for field in (
+            "input_tokens",
+            "cached_input_tokens",
+            "cache_write_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+        ):
+            _nonnegative_int(getattr(self, field), field)
+        _bounded_text(self.created_at, "created_at", maximum=64)
+        _bounded_text(self.updated_at, "updated_at", maximum=64)
+
+    @classmethod
+    def new(
+        cls,
+        *,
+        turn_id: str,
+        input_tokens: int,
+        cached_input_tokens: int,
+        cache_write_input_tokens: int,
+        output_tokens: int,
+        reasoning_output_tokens: int,
+        at: str | None = None,
+    ) -> "TurnUsage":
+        now = at or utc_now_iso()
+        return cls(
+            turn_id=turn_id,
+            input_tokens=input_tokens,
+            cached_input_tokens=cached_input_tokens,
+            cache_write_input_tokens=cache_write_input_tokens,
+            output_tokens=output_tokens,
+            reasoning_output_tokens=reasoning_output_tokens,
+            created_at=now,
+            updated_at=now,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TurnPromptInput:
+    """Immutable digests of the trusted inputs used to construct one Turn prompt."""
+
+    turn_id: str
+    prompt_kind: PromptKind
+    issue_content_sha256: str
+    task_spec_sha256: str
+    cumulative_approved_context_sha256: str
+    created_at: str
+    updated_at: str
+
+    def __post_init__(self) -> None:
+        validate_turn_id(self.turn_id)
+        if not isinstance(self.prompt_kind, PromptKind):
+            raise ValueError("prompt_kind must be a PromptKind")
+        validate_sha256(self.issue_content_sha256, "issue_content_sha256")
+        validate_sha256(self.task_spec_sha256, "task_spec_sha256")
+        validate_sha256(
+            self.cumulative_approved_context_sha256,
+            "cumulative_approved_context_sha256",
+        )
+        _bounded_text(self.created_at, "created_at", maximum=64)
+        _bounded_text(self.updated_at, "updated_at", maximum=64)
+
+    @classmethod
+    def new(
+        cls,
+        *,
+        turn_id: str,
+        prompt_kind: PromptKind,
+        issue_content_sha256: str,
+        task_spec_sha256: str,
+        cumulative_approved_context_sha256: str,
+        at: str | None = None,
+    ) -> "TurnPromptInput":
+        now = at or utc_now_iso()
+        return cls(
+            turn_id=turn_id,
+            prompt_kind=prompt_kind,
+            issue_content_sha256=issue_content_sha256,
+            task_spec_sha256=task_spec_sha256,
+            cumulative_approved_context_sha256=cumulative_approved_context_sha256,
+            created_at=now,
+            updated_at=now,
+        )
+
+
 def validate_repository(value: str) -> str:
     if not isinstance(value, str) or value.count("/") != 1:
         raise ValueError("repository must be in owner/repository form")
@@ -505,6 +867,12 @@ def validate_work_item_id(value: str) -> str:
 def validate_turn_id(value: str) -> str:
     if not isinstance(value, str) or _TURN_ID_RE.fullmatch(value) is None:
         raise ValueError("turn_id must be a stable turn identifier")
+    return value
+
+
+def validate_session_generation_id(value: str) -> str:
+    if not isinstance(value, str) or _SESSION_GENERATION_ID_RE.fullmatch(value) is None:
+        raise ValueError("session_generation_id must be a stable session-generation identifier")
     return value
 
 
@@ -550,6 +918,24 @@ def validate_branch(value: str) -> str:
 def _positive_int(value: int, field: str) -> int:
     if type(value) is not int or value <= 0:
         raise ValueError(f"{field} must be a positive integer")
+    return value
+
+
+def _validate_comment_ids(value: tuple[str, ...], field: str) -> tuple[str, ...]:
+    if (
+        not isinstance(value, tuple)
+        or len(value) > 1_000
+        or len(set(value)) != len(value)
+    ):
+        raise ValueError(f"{field} must be a bounded unique tuple")
+    for comment_id in value:
+        _bounded_text(comment_id, field, maximum=256)
+    return value
+
+
+def _nonnegative_int(value: int, field: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{field} must be a non-negative integer")
     return value
 
 

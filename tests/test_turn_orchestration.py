@@ -337,6 +337,59 @@ class TurnOrchestrationTests(unittest.TestCase):
         self.assertEqual(0, operations.count(RunnerOperation.RESUME))
         self.assertEqual(1, operations.count(RunnerOperation.STATUS))
 
+    def test_migrated_legacy_generation_reconciles_with_v1_status(self) -> None:
+        item = work_item(47)
+        self.store.create_work_item(item)
+        self.service.prepare_work_item(
+            item.work_item_id, source_bundle=b"fixture-base-bundle"
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(
+                SESSION,
+                "a" * 40,
+                result("needs_input", path="src/legacy.py", summary="Need input"),
+            ),
+        )
+        self.transport.interrupt_next(RunnerOperation.START)
+        progress = self.service.run_turn(
+            item.work_item_id,
+            issue_revision="legacy-revision",
+            prompt=prompt("recover migrated legacy turn\n"),
+            issue_allowed_paths=("src",),
+            turn_id="turn_" + "7" * 32,
+        )
+        generation_id = "sg_" + "7" * 32
+        now = "2026-01-01T01:00:00.000000Z"
+        with self.store._transaction() as connection:
+            connection.execute(
+                "UPDATE work_items SET codex_session_id = ?, updated_at = ? "
+                "WHERE work_item_id = ?",
+                (SESSION, now, item.work_item_id),
+            )
+            connection.execute(
+                "INSERT INTO session_generations ("
+                "session_generation_id, work_item_id, generation_number, state, role, "
+                "codex_session_id, start_head_sha, policy_sha256, rotation_reason, "
+                "created_at, started_at, updated_at"
+                ") VALUES (?, ?, 1, 'active', 'implementation', ?, ?, NULL, "
+                "'legacy_migration', ?, ?, ?)",
+                (generation_id, item.work_item_id, SESSION, "a" * 40, now, now, now),
+            )
+            connection.execute(
+                "INSERT INTO turn_session_generations (turn_id, session_generation_id) "
+                "VALUES (?, ?)",
+                (progress.turn.turn_id, generation_id),
+            )
+
+        reconciled = self.service.reconcile_turn(progress.turn.turn_id)
+
+        self.assertEqual(TurnState.NEEDS_INPUT, reconciled.turn.state)
+        status = self.transport.calls[-1]
+        self.assertEqual(RunnerOperation.STATUS, status.operation)
+        self.assertEqual(1, status.version)
+        self.assertIsNone(status.session_generation_id)
+
     def test_remote_failure_binds_session_and_persists_machine_error(self) -> None:
         item = work_item(45)
         self.store.create_work_item(item)

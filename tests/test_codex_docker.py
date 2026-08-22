@@ -6,15 +6,22 @@ from pathlib import Path
 
 from codex_dispatcher.executors.codex_docker import (
     CONTAINER_CODEX_HOME,
+    DOCKER_LABEL_POLICY_DIGEST,
+    DOCKER_LABEL_SESSION_GENERATION,
+    DOCKER_LABEL_SESSION_GENERATION_ID,
+    DOCKER_LABEL_TURN,
+    DOCKER_LABEL_WORK_ITEM,
     DockerCodexRuntime,
     build_docker_codex_plan,
     build_docker_login_status_plan,
 )
+from codex_dispatcher.runner_policy import PolicyBundle
 
 
 WORK_ITEM = "wi_" + "1" * 24
 TURN = "turn_" + "2" * 32
 SESSION = "123e4567-e89b-12d3-a456-426614174000"
+GENERATION_ID = "sg_" + "d" * 32
 IMAGE = "registry.example.invalid/codex-runner@sha256:" + "a" * 64
 CODEX_SHA256 = "b" * 64
 CODEX_PATH = Path("/srv/codex-runner/tools/codex/0.147.0/bin/codex")
@@ -139,6 +146,7 @@ class DockerCodexPlanTests(unittest.TestCase):
         self.assertFalse(any("--cap-add" in item for item in plan.argv))
         self.assertFalse(any("--pid=host" in item for item in plan.argv))
         self.assertFalse(any("--network=host" in item for item in plan.argv))
+        self.assertFalse(any(item.startswith("--label=") for item in plan.argv))
         self.assertNotIn("--tty", plan.argv)
         self.assertFalse(any("docker.sock,target=" in item for item in plan.argv))
 
@@ -183,6 +191,108 @@ class DockerCodexPlanTests(unittest.TestCase):
         self.assertFalse(any("target=/srv" in item for item in mounts))
         self.assertFalse(any("source=/srv/codex-runner/app,target=" in item for item in mounts))
         self.assertFalse(any("source=/srv/codex-runner/work-items,target=" in item for item in mounts))
+
+    def test_policy_bundle_mounts_exact_three_readonly_targets(self) -> None:
+        policy_root = ROOT / "config" / "runner-codex-policy"
+        manifest = json.loads((policy_root / "manifest.json").read_text(encoding="utf-8"))
+        policy = PolicyBundle.load(policy_root, manifest["policy_digest"])
+        plan = build_docker_codex_plan(
+            runtime=runtime(),
+            work_item_id=WORK_ITEM,
+            turn_id=TURN,
+            codex_path=CODEX_PATH,
+            repository=Path("/srv/codex-runner/work-items/owner__repo/issue-42/repo"),
+            codex_home=Path(
+                "/srv/codex-runner/work-items/owner__repo/issue-42/runner-state/codex-home"
+            ),
+            auth_file=Path(
+                "/srv/codex-runner/work-items/owner__repo/issue-42/"
+                "runner-state/codex-home/auth.json"
+            ),
+            output_schema=Path("/srv/codex-runner/etc/agent-result.schema.json"),
+            session_id=None,
+            policy_bundle=policy,
+        )
+        mounts = tuple(item for item in plan.argv if item.startswith("--mount="))
+
+        self.assertEqual(8, len(mounts))
+        self.assertEqual(
+            f"--mount=type=bind,source={policy.config_path},"
+            "target=/codex-home/config.toml,readonly",
+            mounts[5],
+        )
+        self.assertEqual(
+            f"--mount=type=bind,source={policy.agents_path},"
+            "target=/codex-home/agents,readonly",
+            mounts[6],
+        )
+        self.assertEqual(
+            f"--mount=type=bind,source={policy.requirements_path},"
+            "target=/etc/codex/requirements.toml,readonly",
+            mounts[7],
+        )
+        self.assertIn("--strict-config", plan.argv)
+        self.assertIn("gpt-5.6-sol", plan.argv)
+        self.assertIn("multi_agent", plan.argv)
+        self.assertFalse(any(f"source={policy.root},target=" in item for item in mounts))
+
+    def test_v2_turn_uses_generation_home_and_exact_identity_labels(self) -> None:
+        policy_root = ROOT / "config" / "runner-codex-policy"
+        manifest = json.loads((policy_root / "manifest.json").read_text(encoding="utf-8"))
+        policy = PolicyBundle.load(policy_root, manifest["policy_digest"])
+        work_item_root = Path(
+            "/srv/codex-runner/work-items/owner__repo/issue-42"
+        )
+        codex_home = (
+            work_item_root
+            / "runner-state"
+            / "generations"
+            / GENERATION_ID
+            / "codex-home"
+        )
+        plan = build_docker_codex_plan(
+            runtime=runtime(),
+            work_item_id=WORK_ITEM,
+            turn_id=TURN,
+            codex_path=CODEX_PATH,
+            repository=work_item_root / "repo",
+            codex_home=codex_home,
+            auth_file=codex_home / "auth.json",
+            output_schema=Path("/srv/codex-runner/etc/agent-result.schema.json"),
+            session_id=None,
+            policy_bundle=policy,
+            session_generation_id=GENERATION_ID,
+            session_generation=2,
+            agent_policy_digest=policy.policy_digest,
+        )
+
+        for key, value in (
+            (DOCKER_LABEL_WORK_ITEM, WORK_ITEM),
+            (DOCKER_LABEL_SESSION_GENERATION_ID, GENERATION_ID),
+            (DOCKER_LABEL_SESSION_GENERATION, "2"),
+            (DOCKER_LABEL_TURN, TURN),
+            (DOCKER_LABEL_POLICY_DIGEST, policy.policy_digest),
+        ):
+            self.assertIn(f"--label={key}={value}", plan.argv)
+        self.assertIn(f"source={codex_home},target=/codex-home", "\n".join(plan.argv))
+
+        with self.assertRaisesRegex(ValueError, "exact policy bundle"):
+            build_docker_codex_plan(
+                runtime=runtime(),
+                work_item_id=WORK_ITEM,
+                turn_id=TURN,
+                codex_path=CODEX_PATH,
+                repository=work_item_root / "repo",
+                codex_home=codex_home,
+                auth_file=codex_home / "auth.json",
+                output_schema=Path(
+                    "/srv/codex-runner/etc/agent-result.schema.json"
+                ),
+                session_id=None,
+                session_generation_id=GENERATION_ID,
+                session_generation=2,
+                agent_policy_digest=policy.policy_digest,
+            )
 
     def test_auth_plan_has_no_repository_or_schema_mount(self) -> None:
         plan = build_docker_login_status_plan(

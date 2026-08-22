@@ -66,6 +66,36 @@ class CodexCliInvocationTests(unittest.TestCase):
         self.assertNotIn("--last", plan.argv)
         self.assertNotIn("--ephemeral", plan.argv)
 
+    def test_runner_policy_flags_are_fixed_before_exec_for_start_and_resume(self) -> None:
+        for session_id in (None, SESSION):
+            with self.subTest(session_id=session_id):
+                plan = build_codex_invocation(
+                    codex_path=Path("/usr/local/bin/codex"),
+                    repository_directory=Path("/srv/tasks/issue-1/repo"),
+                    codex_home=CODEX_HOME,
+                    output_schema=Path("/srv/codex-runner/etc/result.schema.json"),
+                    session_id=session_id,
+                    enable_runner_policy=True,
+                )
+                self.assertEqual(
+                    (
+                        "--strict-config",
+                        "--model",
+                        "gpt-5.6-sol",
+                        "-c",
+                        'model_reasoning_effort="xhigh"',
+                        "--enable",
+                        "multi_agent",
+                    ),
+                    plan.argv[5:12],
+                )
+                self.assertLess(plan.argv.index("--strict-config"), plan.argv.index("exec"))
+                if session_id is None:
+                    self.assertNotIn("resume", plan.argv)
+                else:
+                    resume = plan.argv.index("resume")
+                    self.assertEqual(SESSION, plan.argv[resume + 1])
+
     def test_proxy_plan_sets_only_one_fixed_credential_free_endpoint(self) -> None:
         plan = build_codex_invocation(
             codex_path=Path("/usr/local/bin/codex"),

@@ -28,6 +28,24 @@ runner_root = "/srv/codex-runner/work-items"
 connect_timeout_seconds = 10
 operation_timeout_seconds = 3900
 
+# Protocol v2 session generations are disabled when this table is absent.
+# Keep it commented until the matching Control Host and Runner v2 runtime wiring
+# has been deployed and verified. These values are an explicit policy request;
+# merely upgrading the dispatcher must not enable rotation or incremental prompts.
+# Once v2 WorkItems exist, do not remove this table as a standalone rollback;
+# restore the matching pre-activation database and Runner configuration instead.
+# [session_runtime]
+# protocol_version = 2
+# agent_policy_digest = "replace-with-reviewed-lowercase-sha256-policy-digest"
+# max_turns_per_session = 4
+# rotate_after_input_tokens = 120000
+# rotate_after_session_age_seconds = 14400
+# rotate_before_final_audit = false # true is rejected until fresh audit exists
+# use_incremental_resume_prompts = true
+# max_session_generations = 3
+# max_total_turns = 10
+# max_no_progress_turns = 2
+
 # Do not uncomment this table until a controlled live fixture proves that the
 # target Slack app/workspace returns the original receipt for an exact retry.
 # The bot token belongs only in SLACK_BOT_TOKEN, never in TOML.

@@ -14,7 +14,13 @@ from codex_dispatcher.executors.codex_cli import (
     build_codex_login_status_invocation,
     validate_egress_proxy_url,
 )
-from codex_dispatcher.work_items import validate_turn_id, validate_work_item_id
+from codex_dispatcher.work_items import (
+    validate_session_generation_id,
+    validate_sha256,
+    validate_turn_id,
+    validate_work_item_id,
+)
+from codex_dispatcher.runner_policy import PolicyBundle
 
 
 CONTAINER_CODEX_HOME = Path("/codex-home")
@@ -23,6 +29,7 @@ CONTAINER_CODE_MODE_HOST_PATH = Path("/usr/local/bin/codex-code-mode-host")
 CONTAINER_TIMEOUT_PATH = Path("/usr/bin/timeout")
 CONTAINER_REPOSITORY = Path("/workspace")
 CONTAINER_SCHEMA = Path("/runner-contract/agent-result.schema.json")
+CONTAINER_REQUIREMENTS = Path("/etc/codex/requirements.toml")
 DOCKER_NETWORK = "codex-egress"
 DOCKER_NETWORK_SUBNET = "172.30.0.0/24"
 DOCKER_NETWORK_GATEWAY = "172.30.0.1"
@@ -33,6 +40,15 @@ PIDS_LIMIT = 512
 TMPFS_LIMIT_BYTES = 1024 * 1024 * 1024
 AUTH_TIMEOUT_SECONDS = 20
 CONTAINER_KILL_GRACE_SECONDS = 5
+DOCKER_LABEL_WORK_ITEM = "com.openai.codex-dispatcher.work-item"
+DOCKER_LABEL_SESSION_GENERATION_ID = (
+    "com.openai.codex-dispatcher.session-generation-id"
+)
+DOCKER_LABEL_SESSION_GENERATION = (
+    "com.openai.codex-dispatcher.session-generation"
+)
+DOCKER_LABEL_TURN = "com.openai.codex-dispatcher.turn"
+DOCKER_LABEL_POLICY_DIGEST = "com.openai.codex-dispatcher.policy-digest"
 
 _IMAGE_RE = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -152,6 +168,10 @@ def build_docker_codex_plan(
     output_schema: Path,
     session_id: str | None,
     timeout_seconds: float = 3600.0,
+    policy_bundle: PolicyBundle | None = None,
+    session_generation_id: str | None = None,
+    session_generation: int | None = None,
+    agent_policy_digest: str | None = None,
 ) -> DockerCodexPlan:
     """Build a fixed Docker invocation; the Prompt remains standard-input only."""
     proxy_url = _required_proxy_url(runtime)
@@ -174,8 +194,25 @@ def build_docker_codex_plan(
         raise ValueError("timeout_seconds must be positive")
     _validate_work_item_mounts(repository, codex_home)
     _validate_work_item_auth(codex_home, auth_file)
+    generation_labels = _generation_labels(
+        work_item_id=work_item_id,
+        turn_id=turn_id,
+        codex_home=codex_home,
+        session_generation_id=session_generation_id,
+        session_generation=session_generation,
+        agent_policy_digest=agent_policy_digest,
+    )
+    if generation_labels and (
+        policy_bundle is None
+        or agent_policy_digest != policy_bundle.policy_digest
+    ):
+        raise ValueError("Docker generation requires its exact policy bundle")
     if output_schema.name != "agent-result.schema.json":
         raise ValueError("output_schema must name agent-result.schema.json")
+    if policy_bundle is not None:
+        if not isinstance(policy_bundle, PolicyBundle):
+            raise TypeError("policy_bundle must be a PolicyBundle or None")
+        policy_bundle.validate()
     inner = build_codex_invocation(
         codex_path=CONTAINER_CODEX_PATH,
         repository_directory=CONTAINER_REPOSITORY,
@@ -183,9 +220,10 @@ def build_docker_codex_plan(
         output_schema=CONTAINER_SCHEMA,
         session_id=session_id,
         egress_proxy_url=proxy_url,
+        enable_runner_policy=policy_bundle is not None,
     )
     argv = (
-        *_docker_prefix(runtime, f"codex-{turn_id}"),
+        *_docker_prefix(runtime, f"codex-{turn_id}", labels=generation_labels),
         _mount(codex_path, CONTAINER_CODEX_PATH, readonly=True),
         _mount(
             code_mode_host_path,
@@ -195,6 +233,15 @@ def build_docker_codex_plan(
         _mount(repository, CONTAINER_REPOSITORY),
         _mount(codex_home, CONTAINER_CODEX_HOME),
         _mount(output_schema, CONTAINER_SCHEMA, readonly=True),
+        *(
+            (
+                _mount(policy_bundle.config_path, CONTAINER_CODEX_HOME / "config.toml", readonly=True),
+                _mount(policy_bundle.agents_path, CONTAINER_CODEX_HOME / "agents", readonly=True),
+                _mount(policy_bundle.requirements_path, CONTAINER_REQUIREMENTS, readonly=True),
+            )
+            if policy_bundle is not None
+            else ()
+        ),
         *_container_environment(inner.environment),
         f"--workdir={CONTAINER_REPOSITORY}",
         runtime.image,
@@ -208,7 +255,12 @@ def build_docker_codex_plan(
     )
 
 
-def _docker_prefix(runtime: DockerCodexRuntime, name: str) -> tuple[str, ...]:
+def _docker_prefix(
+    runtime: DockerCodexRuntime,
+    name: str,
+    *,
+    labels: tuple[tuple[str, str], ...] = (),
+) -> tuple[str, ...]:
     return (
         str(runtime.docker_path),
         f"--host={runtime.docker_host}",
@@ -218,6 +270,7 @@ def _docker_prefix(runtime: DockerCodexRuntime, name: str) -> tuple[str, ...]:
         "--pull=never",
         "--log-driver=none",
         f"--name={name}",
+        *(f"--label={key}={value}" for key, value in labels),
         "--interactive",
         "--init",
         "--entrypoint=",
@@ -277,16 +330,75 @@ def _mount_source(value: Path, field: str) -> Path:
 def _validate_work_item_mounts(repository: Path, codex_home: Path) -> None:
     work_item_root = repository.parent
     _validate_codex_home(codex_home)
-    if (
-        repository.name != "repo"
-        or codex_home != work_item_root / "runner-state" / "codex-home"
-    ):
+    legacy_home = work_item_root / "runner-state" / "codex-home"
+    generation_home = (
+        work_item_root
+        / "runner-state"
+        / "generations"
+        / codex_home.parent.name
+        / "codex-home"
+    )
+    if repository.name != "repo" or codex_home not in {
+        legacy_home,
+        generation_home,
+    }:
         raise ValueError("container mounts must belong to one WorkItem directory")
 
 
 def _validate_codex_home(codex_home: Path) -> None:
-    if codex_home.name != "codex-home" or codex_home.parent.name != "runner-state":
+    if codex_home.name != "codex-home":
         raise ValueError("codex_home must belong to one WorkItem runner-state")
+    if codex_home.parent.name == "runner-state":
+        return
+    try:
+        validate_session_generation_id(codex_home.parent.name)
+    except ValueError as exc:
+        raise ValueError(
+            "codex_home must belong to one WorkItem runner-state"
+        ) from exc
+    if (
+        codex_home.parent.parent.name != "generations"
+        or codex_home.parent.parent.parent.name != "runner-state"
+    ):
+        raise ValueError("codex_home must belong to one WorkItem runner-state")
+
+
+def _generation_labels(
+    *,
+    work_item_id: str,
+    turn_id: str,
+    codex_home: Path,
+    session_generation_id: str | None,
+    session_generation: int | None,
+    agent_policy_digest: str | None,
+) -> tuple[tuple[str, str], ...]:
+    values = (
+        session_generation_id,
+        session_generation,
+        agent_policy_digest,
+    )
+    if all(value is None for value in values):
+        if codex_home.parent.name != "runner-state":
+            raise ValueError("generation Codex home requires generation identity")
+        return ()
+    if any(value is None for value in values):
+        raise ValueError("Docker generation identity must be complete")
+    assert session_generation_id is not None
+    assert session_generation is not None
+    assert agent_policy_digest is not None
+    validate_session_generation_id(session_generation_id)
+    if type(session_generation) is not int or session_generation <= 0:
+        raise ValueError("session_generation must be a positive integer")
+    validate_sha256(agent_policy_digest, "agent_policy_digest")
+    if codex_home.parent.name != session_generation_id:
+        raise ValueError("Docker generation identity does not match Codex home")
+    return (
+        (DOCKER_LABEL_WORK_ITEM, work_item_id),
+        (DOCKER_LABEL_SESSION_GENERATION_ID, session_generation_id),
+        (DOCKER_LABEL_SESSION_GENERATION, str(session_generation)),
+        (DOCKER_LABEL_TURN, turn_id),
+        (DOCKER_LABEL_POLICY_DIGEST, agent_policy_digest),
+    )
 
 
 def _validate_work_item_auth(codex_home: Path, auth_file: Path) -> None:

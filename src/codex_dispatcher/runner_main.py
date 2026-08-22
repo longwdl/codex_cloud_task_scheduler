@@ -23,6 +23,7 @@ from codex_dispatcher.runner_disk import (
     WorkItemDiskRuntime,
 )
 from codex_dispatcher.runner_protocol import RunnerProtocolError
+from codex_dispatcher.runner_policy import PolicyBundle, PolicyBundleError
 from codex_dispatcher.runner_service import LinuxRunnerService, serve_one
 from codex_dispatcher.runner_transport import RunnerTransportRejected
 from codex_dispatcher.runner_turns import RunnerTurnExecutor
@@ -52,18 +53,24 @@ class RunnerConfiguration:
     execution_mode: str = "direct"
     docker_runtime: DockerCodexRuntime | None = None
     work_item_disk: WorkItemDiskRuntime | None = None
+    policy_bundle: PolicyBundle | None = None
 
     def __post_init__(self) -> None:
         if (
             self.execution_mode == "direct"
             and self.docker_runtime is None
             and self.work_item_disk is None
+            and self.policy_bundle is None
         ):
             return
         if (
             self.execution_mode == "rootless_docker"
             and isinstance(self.docker_runtime, DockerCodexRuntime)
             and isinstance(self.work_item_disk, WorkItemDiskRuntime)
+            and (
+                self.policy_bundle is None
+                or isinstance(self.policy_bundle, PolicyBundle)
+            )
         ):
             return
         raise ValueError("execution mode, Docker, and WorkItem disk are inconsistent")
@@ -102,7 +109,13 @@ def load_runner_configuration(path: Path) -> RunnerConfiguration:
         "git_timeout_seconds",
         "codex_timeout_seconds",
     }
-    optional = {"egress_proxy_url", "execution_mode", "docker_runtime"}
+    optional = {
+        "egress_proxy_url",
+        "execution_mode",
+        "docker_runtime",
+        "policy_root",
+        "policy_digest",
+    }
     if (
         not isinstance(payload, dict)
         or not required.issubset(payload)
@@ -151,13 +164,32 @@ def load_runner_configuration(path: Path) -> RunnerConfiguration:
         raise RunnerConfigurationError("execution_mode is invalid")
     docker_payload = payload.get("docker_runtime")
     if execution_mode == "direct":
-        if "docker_runtime" in payload:
+        if any(
+            field in payload
+            for field in ("docker_runtime", "policy_root", "policy_digest")
+        ):
             raise RunnerConfigurationError(
-                "docker_runtime requires rootless_docker execution_mode"
+                "Docker policy settings require rootless_docker execution_mode"
             )
         docker_runtime = None
         work_item_disk = None
+        policy_bundle = None
     else:
+        policy_fields = {"policy_root", "policy_digest"}.intersection(payload)
+        if policy_fields and policy_fields != {"policy_root", "policy_digest"}:
+            raise RunnerConfigurationError(
+                "rootless_docker policy requires policy_root and policy_digest"
+            )
+        if policy_fields:
+            try:
+                policy_bundle = PolicyBundle.load(
+                    _configured_path(payload["policy_root"], "policy_root"),
+                    payload["policy_digest"],
+                )
+            except (PolicyBundleError, TypeError) as exc:
+                raise RunnerConfigurationError("Runner policy bundle is invalid") from exc
+        else:
+            policy_bundle = None
         docker_runtime, work_item_disk = _load_docker_runtime(
             docker_payload,
             codex_path=codex_path,
@@ -176,6 +208,7 @@ def load_runner_configuration(path: Path) -> RunnerConfiguration:
         execution_mode=execution_mode,
         docker_runtime=docker_runtime,
         work_item_disk=work_item_disk,
+        policy_bundle=policy_bundle,
     )
 
 
@@ -203,6 +236,7 @@ def build_runner_service(configuration: RunnerConfiguration) -> LinuxRunnerServi
         timeout_seconds=configuration.codex_timeout_seconds,
         egress_proxy_url=configuration.egress_proxy_url,
         docker_runtime=configuration.docker_runtime,
+        policy_bundle=configuration.policy_bundle,
     )
     return LinuxRunnerService(
         workspace=workspace,

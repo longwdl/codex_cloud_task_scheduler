@@ -378,14 +378,34 @@ class SshControlSweep:
     ) -> tuple[TrackerTask | None, tuple[TrackerComment, ...]]:
         current = task
         for _ in range(2):
-            comments = self._tracker.list_comments(current.repository, current.task_id)
+            comments_before = self._tracker.list_comments(
+                current.repository, current.task_id
+            )
+            middle = self._tracker.get_task(current.repository, current.task_id)
+            comments_after = self._tracker.list_comments(
+                current.repository, current.task_id
+            )
             latest = self._tracker.get_task(current.repository, current.task_id)
-            if latest is None or not _same_issue(current, latest):
+            if (
+                middle is None
+                or latest is None
+                or not _same_issue(current, middle)
+                or not _same_issue(current, latest)
+            ):
                 return None, ()
-            if latest.state is not TaskState.DISPATCHING or not latest.is_open:
+            if (
+                middle.state is not TaskState.DISPATCHING
+                or latest.state is not TaskState.DISPATCHING
+                or not middle.is_open
+                or not latest.is_open
+            ):
                 return None, ()
-            if latest.updated_at == current.updated_at:
-                return latest, comments
+            if (
+                middle == latest
+                and latest.updated_at == current.updated_at
+                and comments_before == comments_after
+            ):
+                return latest, comments_after
             current = latest
         return None, ()
 

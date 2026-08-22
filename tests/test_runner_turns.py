@@ -8,7 +8,11 @@ import unittest
 from hashlib import sha256
 from pathlib import Path
 
-from codex_dispatcher.runner_protocol import RunnerOperation, RunnerRequest
+from codex_dispatcher.runner_protocol import (
+    NEXT_PROTOCOL_VERSION,
+    RunnerOperation,
+    RunnerRequest,
+)
 from codex_dispatcher.runner_service import LinuxRunnerService, serve_one
 from codex_dispatcher.runner_transport import (
     RunnerTurnRemoteState,
@@ -27,6 +31,8 @@ from tests.test_runner_workspace import GIT, WORK_ITEM, fixture, prepare_request
 SESSION = "123e4567-e89b-12d3-a456-426614174000"
 TURN_ONE = "turn_" + "1" * 32
 TURN_TWO = "turn_" + "2" * 32
+GENERATION_ID = "sg_" + "d" * 32
+POLICY_DIGEST = "e" * 64
 
 
 def fake_codex(
@@ -185,6 +191,41 @@ class RunnerTurnExecutorTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RunnerTurnError, "identity"):
                 turns.execute(conflict, conflicting_prompt)
+
+    def test_v2_start_and_status_are_rejected_before_turn_record_io(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _, base_sha, workspace, turns = self.setUpRunner(root)
+            prompt = b"v2 must not run"
+            generation = {
+                "version": NEXT_PROTOCOL_VERSION,
+                "session_generation_id": GENERATION_ID,
+                "session_generation": 1,
+                "agent_policy_digest": POLICY_DIGEST,
+            }
+            start = RunnerRequest(
+                RunnerOperation.START,
+                WORK_ITEM,
+                turn_id=TURN_ONE,
+                prompt_sha256=sha256(prompt).hexdigest(),
+                input_head_sha=base_sha,
+                **generation,
+            )
+            status = RunnerRequest(
+                RunnerOperation.STATUS, WORK_ITEM, turn_id=TURN_TWO, **generation
+            )
+            records = workspace.paths(WORK_ITEM).state / "turns"
+            self.assertFalse(records.exists())
+            for request, supplied_prompt in ((start, prompt), (status, None)):
+                with self.subTest(operation=request.operation):
+                    with self.assertRaisesRegex(
+                        RunnerTurnError, "requires policy-bound Docker execution"
+                    ):
+                        if supplied_prompt is None:
+                            turns.status(request)
+                        else:
+                            turns.execute(request, supplied_prompt)
+            self.assertFalse(records.exists())
 
     def test_invalid_agent_result_is_durable_failure_not_a_replay(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

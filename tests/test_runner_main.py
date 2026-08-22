@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from hashlib import sha256
 import json
 import os
 import tempfile
@@ -15,6 +16,40 @@ from codex_dispatcher.runner_main import (
     run,
 )
 from codex_dispatcher.executors.codex_docker import ROOTLESS_HOST_PROXY_URL
+
+
+def policy_bundle(root: Path) -> tuple[Path, str]:
+    policy = root / "policy"
+    agents = policy / "agents"
+    agents.mkdir(parents=True, mode=0o700)
+    files = {
+        "config.toml": b'model = "gpt-5.6-sol"\n',
+        "requirements.toml": b'allowed_web_search_modes = ["disabled"]\n',
+        "agents/spark-worker.toml": b'name = "spark_worker"\n',
+        "agents/luna-worker.toml": b'name = "luna_worker"\n',
+        "agents/terra-worker.toml": b'name = "terra_worker"\n',
+        "agents/sol-specialist.toml": b'name = "sol_specialist"\n',
+    }
+    hashes: dict[str, str] = {}
+    for relative, contents in files.items():
+        path = policy / relative
+        path.write_bytes(contents)
+        path.chmod(0o600)
+        hashes[relative] = sha256(contents).hexdigest()
+    digest = sha256(
+        json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+    manifest = {
+        "schema_version": 1,
+        "codex_version": "0.147.0",
+        "policy_digest": digest,
+        "files": hashes,
+    }
+    (policy / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (policy / "manifest.json").chmod(0o600)
+    policy.chmod(0o700)
+    agents.chmod(0o700)
+    return policy, digest
 
 
 def protected_file(path: Path, content: str, *, executable: bool = False) -> None:
@@ -87,7 +122,7 @@ class RunnerMainTests(unittest.TestCase):
             self.assertIsNone(load_runner_configuration(path).egress_proxy_url)
 
     def test_explicit_rootless_docker_configuration_is_strict_and_wired(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
             root = Path(temp_dir)
             path = config(root)
             docker_config = root / "docker-config"
@@ -96,6 +131,9 @@ class RunnerMainTests(unittest.TestCase):
             disk_images.mkdir(mode=0o700)
             payload = json.loads(path.read_text(encoding="utf-8"))
             payload["execution_mode"] = "rootless_docker"
+            policy_root, policy_digest = policy_bundle(root)
+            payload["policy_root"] = str(policy_root)
+            payload["policy_digest"] = policy_digest
             payload["docker_runtime"] = {
                 "docker_path": str(root / "git"),
                 "docker_host": f"unix:///run/user/{os.geteuid()}/docker.sock",
@@ -136,7 +174,9 @@ class RunnerMainTests(unittest.TestCase):
     def test_rejects_implicit_partial_or_wrong_rootless_docker_configuration(self) -> None:
         cases = ("implicit", "partial", "socket", "proxy", "unknown")
         for case in cases:
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_dir:
+            with self.subTest(case=case), tempfile.TemporaryDirectory(
+                dir=Path.cwd()
+            ) as temp_dir:
                 root = Path(temp_dir)
                 path = config(root)
                 docker_config = root / "docker-config"
@@ -166,6 +206,9 @@ class RunnerMainTests(unittest.TestCase):
                 payload["docker_runtime"] = runtime
                 if case != "implicit":
                     payload["execution_mode"] = "rootless_docker"
+                    policy_root, policy_digest = policy_bundle(root)
+                    payload["policy_root"] = str(policy_root)
+                    payload["policy_digest"] = policy_digest
                 if case == "partial":
                     del runtime["image"]
                 elif case == "socket":
@@ -179,9 +222,61 @@ class RunnerMainTests(unittest.TestCase):
                 with self.assertRaises(RunnerConfigurationError):
                     load_runner_configuration(path)
 
+    def test_rootless_docker_accepts_no_policy_but_rejects_partial_or_invalid_policy(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root = Path(temp_dir)
+            path = config(root)
+            docker_config = root / "docker-config"
+            docker_config.mkdir(mode=0o700)
+            disk_images = root / "disk-images"
+            disk_images.mkdir(mode=0o700)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["execution_mode"] = "rootless_docker"
+            payload["docker_runtime"] = {
+                "docker_path": str(root / "git"),
+                "docker_host": f"unix:///run/user/{os.geteuid()}/docker.sock",
+                "cli_config_directory": str(docker_config),
+                "image": "registry.example.invalid/codex-runner@sha256:" + "a" * 64,
+                "codex_sha256": "b" * 64,
+                "code_mode_host_sha256": "c" * 64,
+                "egress_proxy_url": ROOTLESS_HOST_PROXY_URL,
+                "work_item_disk": {
+                    "image_directory": str(disk_images),
+                    "image_size_bytes": 64 * 1024 * 1024,
+                    "host_reserve_bytes": 64 * 1024 * 1024,
+                    "mkfs_ext4_path": str(root / "git"),
+                    "fuse2fs_path": str(root / "git"),
+                    "fusermount_path": str(root / "git"),
+                    "e2fsck_path": str(root / "git"),
+                    "findmnt_path": str(root / "git"),
+                },
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertIsNone(load_runner_configuration(path).policy_bundle)
+
+            policy_root, policy_digest = policy_bundle(root)
+            payload["policy_root"] = str(policy_root)
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(RunnerConfigurationError, "policy requires"):
+                load_runner_configuration(path)
+
+            payload["policy_digest"] = "0" * 64
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(RunnerConfigurationError, "policy bundle"):
+                load_runner_configuration(path)
+
+            payload["policy_digest"] = policy_digest
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertEqual(
+                policy_digest,
+                load_runner_configuration(path).policy_bundle.policy_digest,  # type: ignore[union-attr]
+            )
+
     def test_rootless_docker_requires_trusted_code_mode_host(self) -> None:
         for failure in ("missing", "writable"):
-            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp_dir:
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory(
+                dir=Path.cwd()
+            ) as temp_dir:
                 root = Path(temp_dir)
                 path = config(root)
                 docker_config = root / "docker-config"
@@ -190,6 +285,9 @@ class RunnerMainTests(unittest.TestCase):
                 disk_images.mkdir(mode=0o700)
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 payload["execution_mode"] = "rootless_docker"
+                policy_root, policy_digest = policy_bundle(root)
+                payload["policy_root"] = str(policy_root)
+                payload["policy_digest"] = policy_digest
                 payload["docker_runtime"] = {
                     "docker_path": str(root / "git"),
                     "docker_host": f"unix:///run/user/{os.geteuid()}/docker.sock",

@@ -23,12 +23,21 @@ from codex_dispatcher.slack_reporting import (
 )
 from codex_dispatcher.work_items import (
     ACTIVE_TURN_STATES,
+    PromptKind,
+    SessionGeneration,
+    SessionGenerationRole,
+    SessionGenerationState,
     TaskBranchSource,
     Turn,
+    TurnPromptInput,
     TurnState,
+    TurnUsage,
     WorkItem,
     WorkItemState,
     validate_git_sha,
+    validate_session_generation_id,
+    validate_session_id,
+    validate_sha256,
 )
 
 
@@ -506,6 +515,1163 @@ class StateStore:
                 now,
             )
         return updated
+
+    def plan_session_generation(
+        self,
+        work_item_id: str,
+        *,
+        role: SessionGenerationRole,
+        policy_sha256: str,
+        start_head_sha: str | None = None,
+        rotation_reason: str | None = None,
+        session_generation_id: str | None = None,
+        created_at: str | None = None,
+    ) -> SessionGeneration:
+        """Atomically allocate the next replaceable Codex session generation."""
+        if not isinstance(role, SessionGenerationRole):
+            raise ValueError("role must be a SessionGenerationRole")
+        validate_sha256(policy_sha256, "policy_sha256")
+        now = created_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM work_items WHERE work_item_id = ?", (work_item_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"work item not found: {work_item_id}")
+            work_item = self._row_to_work_item(row)
+            expected_start_head = work_item.last_published_sha or work_item.base_sha
+            if start_head_sha is not None and start_head_sha != expected_start_head:
+                raise ValueError("session generation start head must match the WorkItem anchor")
+            generation = SessionGeneration.new(
+                session_generation_id=session_generation_id,
+                work_item_id=work_item_id,
+                generation_number=int(
+                    connection.execute(
+                        "SELECT COALESCE(MAX(generation_number), 0) + 1 "
+                        "FROM session_generations WHERE work_item_id = ?",
+                        (work_item_id,),
+                    ).fetchone()[0]
+                ),
+                role=role,
+                start_head_sha=expected_start_head,
+                policy_sha256=policy_sha256,
+                rotation_reason=rotation_reason,
+                at=now,
+            )
+            self._insert_session_generation(connection, generation)
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "session_generation_planned",
+                {
+                    "generation_number": generation.generation_number,
+                    "policy_sha256": generation.policy_sha256,
+                    "role": generation.role.value,
+                    "session_generation_id": generation.session_generation_id,
+                    "start_head_sha": generation.start_head_sha,
+                },
+                now,
+            )
+        return generation
+
+    def get_session_generation(self, session_generation_id: str) -> SessionGeneration | None:
+        validate_session_generation_id(session_generation_id)
+        row = self._connection.execute(
+            "SELECT * FROM session_generations WHERE session_generation_id = ?",
+            (session_generation_id,),
+        ).fetchone()
+        return self._row_to_session_generation(row) if row is not None else None
+
+    def list_session_generations(self, work_item_id: str) -> tuple[SessionGeneration, ...]:
+        if self.get_work_item(work_item_id) is None:
+            raise KeyError(f"work item not found: {work_item_id}")
+        return tuple(
+            self._row_to_session_generation(row)
+            for row in self._connection.execute(
+                "SELECT * FROM session_generations WHERE work_item_id = ? "
+                "ORDER BY generation_number",
+                (work_item_id,),
+            )
+        )
+
+    def get_live_session_generation(self, work_item_id: str) -> SessionGeneration | None:
+        rows = self._connection.execute(
+            "SELECT * FROM session_generations WHERE work_item_id = ? "
+            "AND state IN ('planned', 'starting', 'active', 'retiring') "
+            "ORDER BY generation_number LIMIT 2",
+            (work_item_id,),
+        ).fetchall()
+        if len(rows) > 1:
+            raise RuntimeError("database contains more than one live session generation")
+        return self._row_to_session_generation(rows[0]) if rows else None
+
+    def record_session_generation_baseline(
+        self,
+        session_generation_id: str,
+        *,
+        issue_revision: str,
+        issue_content_sha256: str,
+        task_spec_sha256: str,
+        prompt_sha256: str,
+        approved_comment_ids: tuple[str, ...],
+        approved_context_sha256: str,
+        updated_at: str | None = None,
+    ) -> SessionGeneration:
+        """Persist one planned generation's immutable prompt-input baseline."""
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM session_generations WHERE session_generation_id = ?",
+                (session_generation_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"session generation not found: {session_generation_id}")
+            generation = self._row_to_session_generation(row)
+            updated = generation.record_baseline(
+                issue_revision=issue_revision,
+                issue_content_sha256=issue_content_sha256,
+                task_spec_sha256=task_spec_sha256,
+                prompt_sha256=prompt_sha256,
+                approved_comment_ids=approved_comment_ids,
+                approved_context_sha256=approved_context_sha256,
+                at=now,
+            )
+            if updated is generation:
+                return generation
+            cursor = connection.execute(
+                "UPDATE session_generations SET baseline_issue_revision = ?, "
+                "baseline_issue_content_sha256 = ?, baseline_task_spec_sha256 = ?, "
+                "baseline_prompt_sha256 = ?, baseline_approved_comment_ids_json = ?, "
+                "baseline_approved_context_sha256 = ?, updated_at = ? "
+                "WHERE session_generation_id = ? AND state = 'planned' "
+                "AND baseline_issue_revision IS NULL AND baseline_issue_content_sha256 IS NULL "
+                "AND baseline_task_spec_sha256 IS NULL AND baseline_prompt_sha256 IS NULL "
+                "AND baseline_approved_comment_ids_json IS NULL "
+                "AND baseline_approved_context_sha256 IS NULL",
+                (
+                    updated.baseline_issue_revision,
+                    updated.baseline_issue_content_sha256,
+                    updated.baseline_task_spec_sha256,
+                    updated.baseline_prompt_sha256,
+                    json.dumps(updated.baseline_approved_comment_ids, separators=(",", ":")),
+                    updated.baseline_approved_context_sha256,
+                    updated.updated_at,
+                    session_generation_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    f"concurrent session generation baseline update detected: "
+                    f"{session_generation_id}"
+                )
+            self._insert_work_item_event(
+                connection,
+                generation.work_item_id,
+                None,
+                "session_generation_baseline_recorded",
+                {
+                    "approved_comment_ids": updated.baseline_approved_comment_ids,
+                    "baseline_approved_context_sha256": updated.baseline_approved_context_sha256,
+                    "baseline_issue_content_sha256": updated.baseline_issue_content_sha256,
+                    "baseline_issue_revision": updated.baseline_issue_revision,
+                    "baseline_prompt_sha256": updated.baseline_prompt_sha256,
+                    "baseline_task_spec_sha256": updated.baseline_task_spec_sha256,
+                    "session_generation_id": session_generation_id,
+                },
+                now,
+            )
+        return updated
+
+    def begin_session_generation_turn(
+        self,
+        work_item_id: str,
+        *,
+        session_generation_id: str,
+        generation_number: int,
+        policy_sha256: str,
+        prompt_kind: PromptKind,
+        issue_revision: str,
+        issue_content_sha256: str,
+        task_spec_sha256: str,
+        prompt_sha256: str,
+        approved_comment_ids: tuple[str, ...],
+        approved_context_sha256: str,
+        issue_allowed_paths: tuple[str, ...],
+        input_head_sha: str,
+        expected_turn_number: int | None = None,
+        turn_id: str | None = None,
+        created_at: str | None = None,
+    ) -> tuple[WorkItem, SessionGeneration, Turn, TurnPromptInput]:
+        """Atomically snapshot/start a generation and its first or delta Turn."""
+        if not isinstance(prompt_kind, PromptKind):
+            raise ValueError("prompt_kind must be a PromptKind")
+        if not issue_allowed_paths:
+            raise ValueError("issue_allowed_paths must be non-empty for a generation Turn")
+        validate_sha256(policy_sha256, "policy_sha256")
+        validate_git_sha(input_head_sha, "input_head_sha")
+        now = created_at or utc_now_iso()
+        with self._transaction() as connection:
+            work_item_row = connection.execute(
+                "SELECT * FROM work_items WHERE work_item_id = ?", (work_item_id,)
+            ).fetchone()
+            if work_item_row is None:
+                raise KeyError(f"work item not found: {work_item_id}")
+            work_item = self._row_to_work_item(work_item_row)
+            if work_item.state is not WorkItemState.READY:
+                raise ValueError("work item must be ready before beginning a generation Turn")
+            generation = self._require_generation_identity(
+                connection,
+                session_generation_id=session_generation_id,
+                work_item_id=work_item_id,
+                generation_number=generation_number,
+                policy_sha256=policy_sha256,
+            )
+            anchor = generation.last_published_sha or generation.start_head_sha
+            work_item_anchor = work_item.last_published_sha or work_item.base_sha
+            if input_head_sha != anchor or input_head_sha != work_item_anchor:
+                raise ValueError("generation Turn input head does not match the publication anchor")
+            if generation.state is SessionGenerationState.PLANNED:
+                if prompt_kind is not PromptKind.FULL:
+                    raise ValueError("a planned SessionGeneration requires a full prompt")
+                baseline_was_recorded = generation.baseline_issue_revision is not None
+                generation = generation.record_baseline(
+                    issue_revision=issue_revision,
+                    issue_content_sha256=issue_content_sha256,
+                    task_spec_sha256=task_spec_sha256,
+                    prompt_sha256=prompt_sha256,
+                    approved_comment_ids=approved_comment_ids,
+                    approved_context_sha256=approved_context_sha256,
+                    at=now,
+                ).transition_to(SessionGenerationState.STARTING, at=now)
+                approved_ids_json = json.dumps(
+                    generation.baseline_approved_comment_ids,
+                    separators=(",", ":"),
+                )
+                if baseline_was_recorded:
+                    cursor = connection.execute(
+                        "UPDATE session_generations SET state = ?, started_at = ?, updated_at = ? "
+                        "WHERE session_generation_id = ? AND state = 'planned' "
+                        "AND baseline_issue_revision = ? "
+                        "AND baseline_issue_content_sha256 = ? "
+                        "AND baseline_task_spec_sha256 = ? AND baseline_prompt_sha256 = ? "
+                        "AND baseline_approved_comment_ids_json = ? "
+                        "AND baseline_approved_context_sha256 = ?",
+                        (
+                            generation.state.value,
+                            generation.started_at,
+                            generation.updated_at,
+                            session_generation_id,
+                            generation.baseline_issue_revision,
+                            generation.baseline_issue_content_sha256,
+                            generation.baseline_task_spec_sha256,
+                            generation.baseline_prompt_sha256,
+                            approved_ids_json,
+                            generation.baseline_approved_context_sha256,
+                        ),
+                    )
+                else:
+                    cursor = connection.execute(
+                        "UPDATE session_generations SET state = ?, baseline_issue_revision = ?, "
+                        "baseline_issue_content_sha256 = ?, baseline_task_spec_sha256 = ?, "
+                        "baseline_prompt_sha256 = ?, baseline_approved_comment_ids_json = ?, "
+                        "baseline_approved_context_sha256 = ?, started_at = ?, updated_at = ? "
+                        "WHERE session_generation_id = ? AND state = 'planned' "
+                        "AND baseline_issue_revision IS NULL "
+                        "AND baseline_issue_content_sha256 IS NULL "
+                        "AND baseline_task_spec_sha256 IS NULL "
+                        "AND baseline_prompt_sha256 IS NULL "
+                        "AND baseline_approved_comment_ids_json IS NULL "
+                        "AND baseline_approved_context_sha256 IS NULL",
+                        (
+                            generation.state.value,
+                            generation.baseline_issue_revision,
+                            generation.baseline_issue_content_sha256,
+                            generation.baseline_task_spec_sha256,
+                            generation.baseline_prompt_sha256,
+                            approved_ids_json,
+                            generation.baseline_approved_context_sha256,
+                            generation.started_at,
+                            generation.updated_at,
+                            session_generation_id,
+                        ),
+                    )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(
+                        "concurrent session generation baseline/start update detected"
+                    )
+            elif generation.state is SessionGenerationState.ACTIVE:
+                if prompt_kind is not PromptKind.DELTA:
+                    raise ValueError("an active SessionGeneration requires a delta prompt")
+                if generation.codex_session_id is None:
+                    raise RuntimeError("active SessionGeneration has no Codex session")
+                if (
+                    generation.baseline_issue_content_sha256
+                    != issue_content_sha256
+                    or generation.baseline_task_spec_sha256 != task_spec_sha256
+                ):
+                    raise ValueError(
+                        "active SessionGeneration semantic baseline has changed"
+                    )
+            else:
+                raise ValueError("session generation is not ready to begin a Turn")
+            next_number = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(turn_number), 0) + 1 FROM turns WHERE work_item_id = ?",
+                    (work_item_id,),
+                ).fetchone()[0]
+            )
+            if expected_turn_number is not None and next_number != expected_turn_number:
+                raise RuntimeError("Turn number changed after the Prompt snapshot was built")
+            turn = Turn.new(
+                turn_id=turn_id,
+                work_item_id=work_item_id,
+                turn_number=next_number,
+                issue_revision=issue_revision,
+                prompt_sha256=prompt_sha256,
+                input_head_sha=input_head_sha,
+                included_comment_ids=approved_comment_ids,
+                issue_allowed_paths=issue_allowed_paths,
+                at=now,
+            ).transition_to(TurnState.STARTING, at=now)
+            prompt_input = TurnPromptInput.new(
+                turn_id=turn.turn_id,
+                prompt_kind=prompt_kind,
+                issue_content_sha256=issue_content_sha256,
+                task_spec_sha256=task_spec_sha256,
+                cumulative_approved_context_sha256=approved_context_sha256,
+                at=now,
+            )
+            self._insert_turn(connection, turn)
+            connection.execute(
+                "INSERT INTO turn_session_generations(turn_id, session_generation_id) VALUES (?, ?)",
+                (turn.turn_id, session_generation_id),
+            )
+            self._insert_turn_prompt_input(connection, prompt_input)
+            cursor = connection.execute(
+                "UPDATE work_items SET state = ?, updated_at = ? "
+                "WHERE work_item_id = ? AND state = 'ready'",
+                (WorkItemState.RUNNING.value, now, work_item_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"concurrent WorkItem generation Turn start: {work_item_id}")
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                turn.turn_id,
+                "generation_turn_begun",
+                {
+                    "generation_number": generation.generation_number,
+                    "prompt_kind": prompt_kind.value,
+                    "session_generation_id": session_generation_id,
+                    "turn_number": turn.turn_number,
+                },
+                now,
+            )
+        return work_item.transition_to(WorkItemState.RUNNING, at=now), generation, turn, prompt_input
+
+    def get_turn_prompt_input(self, turn_id: str) -> TurnPromptInput | None:
+        row = self._connection.execute(
+            "SELECT * FROM turn_prompt_inputs WHERE turn_id = ?", (turn_id,)
+        ).fetchone()
+        return self._row_to_turn_prompt_input(row) if row is not None else None
+
+    def list_session_generation_turn_prompt_inputs(
+        self, session_generation_id: str
+    ) -> tuple[TurnPromptInput, ...]:
+        validate_session_generation_id(session_generation_id)
+        return tuple(
+            self._row_to_turn_prompt_input(row)
+            for row in self._connection.execute(
+                "SELECT turn_prompt_inputs.* FROM turn_prompt_inputs "
+                "JOIN turn_session_generations USING(turn_id) "
+                "JOIN turns USING(turn_id) WHERE session_generation_id = ? "
+                "ORDER BY turns.turn_number",
+                (session_generation_id,),
+            )
+        )
+
+    def list_session_generation_turns(self, session_generation_id: str) -> tuple[Turn, ...]:
+        """Return one generation's Turns in durable execution order."""
+        if self.get_session_generation(session_generation_id) is None:
+            raise KeyError(f"session generation not found: {session_generation_id}")
+        return tuple(
+            self._row_to_turn(row)
+            for row in self._connection.execute(
+                "SELECT turns.* FROM turns JOIN turn_session_generations USING(turn_id) "
+                "WHERE session_generation_id = ? ORDER BY turns.turn_number",
+                (session_generation_id,),
+            )
+        )
+
+    def rotate_session_generation(
+        self,
+        work_item_id: str,
+        *,
+        current_session_generation_id: str,
+        current_generation_number: int,
+        rotation_reason: str,
+        expected_current_policy_sha256: str | None = None,
+        new_policy_sha256: str | None = None,
+        policy_sha256: str | None = None,
+        new_role: SessionGenerationRole = SessionGenerationRole.IMPLEMENTATION,
+        new_session_generation_id: str | None = None,
+        updated_at: str | None = None,
+    ) -> tuple[SessionGeneration, SessionGeneration]:
+        """Retire one idle active generation and atomically plan its replacement."""
+        if not isinstance(new_role, SessionGenerationRole):
+            raise ValueError("new_role must be a SessionGenerationRole")
+        if (
+            not isinstance(rotation_reason, str)
+            or not rotation_reason
+            or len(rotation_reason) > 256
+            or any(ord(character) < 32 or ord(character) == 127 for character in rotation_reason)
+        ):
+            raise ValueError("rotation_reason must be non-empty bounded text")
+        if policy_sha256 is not None:
+            if (
+                expected_current_policy_sha256 is not None
+                or new_policy_sha256 is not None
+            ):
+                raise ValueError("legacy policy_sha256 cannot be combined with split policy digests")
+            expected_current_policy_sha256 = policy_sha256
+            new_policy_sha256 = policy_sha256
+        if new_policy_sha256 is None:
+            raise ValueError("new_policy_sha256 is required")
+        validate_sha256(new_policy_sha256, "new_policy_sha256")
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            work_item = self._require_work_item(connection, work_item_id)
+            if work_item.state is not WorkItemState.READY:
+                raise ValueError("work item must be ready before rotating a session generation")
+            placeholders = ", ".join("?" for _ in ACTIVE_TURN_STATES)
+            active_turn = connection.execute(
+                f"SELECT turn_id FROM turns WHERE state IN ({placeholders}) LIMIT 1",
+                tuple(state.value for state in ACTIVE_TURN_STATES),
+            ).fetchone()
+            if active_turn is not None:
+                raise ValueError("cannot rotate while an active Turn exists")
+            current = self._require_generation_identity(
+                connection,
+                session_generation_id=current_session_generation_id,
+                work_item_id=work_item_id,
+                generation_number=current_generation_number,
+                policy_sha256=expected_current_policy_sha256,
+                allow_legacy_policy=True,
+            )
+            if current.state is not SessionGenerationState.ACTIVE:
+                raise ValueError("only an active session generation can be rotated")
+            work_item_anchor = work_item.last_published_sha or work_item.base_sha
+            generation_anchor = current.last_published_sha or current.start_head_sha
+            if work_item_anchor != generation_anchor:
+                raise ValueError("work item and session generation publication anchors differ")
+            retiring = current.transition_to(SessionGenerationState.RETIRING, at=now)
+            retired = retiring.transition_to(SessionGenerationState.RETIRED, at=now)
+            next_number = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(generation_number), 0) + 1 "
+                    "FROM session_generations WHERE work_item_id = ?",
+                    (work_item_id,),
+                ).fetchone()[0]
+            )
+            replacement = SessionGeneration.new(
+                session_generation_id=new_session_generation_id,
+                work_item_id=work_item_id,
+                generation_number=next_number,
+                role=new_role,
+                start_head_sha=work_item_anchor,
+                policy_sha256=new_policy_sha256,
+                rotation_reason=rotation_reason,
+                at=now,
+            )
+            cursor = connection.execute(
+                "UPDATE session_generations SET state = ?, retired_at = ?, updated_at = ? "
+                "WHERE session_generation_id = ? AND state = 'active'",
+                (
+                    retired.state.value,
+                    retired.retired_at,
+                    retired.updated_at,
+                    current_session_generation_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    f"concurrent session generation rotation detected: "
+                    f"{current_session_generation_id}"
+                )
+            self._insert_session_generation(connection, replacement)
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "session_generation_rotated",
+                {
+                    "from_generation_number": current.generation_number,
+                    "from_session_generation_id": current.session_generation_id,
+                    "rotation_reason": rotation_reason,
+                    "to_generation_number": replacement.generation_number,
+                    "to_session_generation_id": replacement.session_generation_id,
+                },
+                now,
+            )
+        return retired, replacement
+
+    def record_generation_turn_running(
+        self,
+        turn_id: str,
+        *,
+        session_generation_id: str,
+        generation_number: int,
+        policy_sha256: str,
+        session_id: str,
+        updated_at: str | None = None,
+    ) -> tuple[SessionGeneration, Turn]:
+        """Record a proven started session and a running Turn in one transaction."""
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            generation, turn = self._require_bound_generation_turn(
+                connection,
+                turn_id=turn_id,
+                session_generation_id=session_generation_id,
+                generation_number=generation_number,
+                policy_sha256=policy_sha256,
+            )
+            if generation.state is SessionGenerationState.STARTING:
+                generation = generation.bind_session(session_id, at=now).transition_to(
+                    SessionGenerationState.ACTIVE, at=now
+                )
+                cursor = connection.execute(
+                    "UPDATE session_generations SET state = ?, codex_session_id = ?, updated_at = ? "
+                    "WHERE session_generation_id = ? AND state = 'starting' "
+                    "AND (codex_session_id IS NULL OR codex_session_id = ?)",
+                    (
+                        generation.state.value,
+                        generation.codex_session_id,
+                        now,
+                        session_generation_id,
+                        session_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(
+                        "concurrent session generation activation detected"
+                    )
+            elif generation.state is SessionGenerationState.ACTIVE:
+                generation = generation.bind_session(session_id, at=now)
+            else:
+                raise ValueError("session generation cannot record a running Turn")
+            if turn.state is TurnState.STARTING or turn.state is TurnState.RECONCILING:
+                turn = turn.transition_to(TurnState.RUNNING, at=now)
+                connection.execute(
+                    "UPDATE turns SET state = ?, started_at = ?, updated_at = ? WHERE turn_id = ?",
+                    (turn.state.value, turn.started_at, now, turn_id),
+                )
+            elif turn.state is not TurnState.RUNNING:
+                raise ValueError("Turn cannot record a running receipt")
+        return generation, turn
+
+    def record_generation_turn_unknown(
+        self,
+        turn_id: str,
+        *,
+        session_generation_id: str,
+        generation_number: int,
+        policy_sha256: str,
+        session_id: str | None = None,
+        updated_at: str | None = None,
+    ) -> tuple[SessionGeneration, Turn]:
+        """Persist an ambiguous execution receipt without activating the generation."""
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            generation, turn = self._require_bound_generation_turn(
+                connection,
+                turn_id=turn_id,
+                session_generation_id=session_generation_id,
+                generation_number=generation_number,
+                policy_sha256=policy_sha256,
+            )
+            if generation.state not in {
+                SessionGenerationState.STARTING,
+                SessionGenerationState.ACTIVE,
+            }:
+                raise ValueError(
+                    "unknown execution requires a starting or active generation"
+                )
+            if session_id is not None:
+                updated_generation = generation.bind_session(session_id, at=now)
+                if updated_generation is not generation:
+                    cursor = connection.execute(
+                        "UPDATE session_generations SET codex_session_id = ?, updated_at = ? "
+                        "WHERE session_generation_id = ? AND codex_session_id IS NULL",
+                        (session_id, now, session_generation_id),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError(
+                            "concurrent session generation receipt binding detected"
+                        )
+                    generation = updated_generation
+            if turn.state is TurnState.STARTING:
+                turn = turn.transition_to(TurnState.RECONCILING, at=now)
+                connection.execute(
+                    "UPDATE turns SET state = ?, updated_at = ? WHERE turn_id = ?",
+                    (turn.state.value, now, turn_id),
+                )
+            elif turn.state is not TurnState.RECONCILING:
+                raise ValueError("Turn cannot record an unknown execution receipt")
+        return generation, turn
+
+    def record_generation_turn_failed(
+        self,
+        turn_id: str,
+        *,
+        session_generation_id: str,
+        generation_number: int,
+        policy_sha256: str,
+        error_code: str,
+        session_id: str | None = None,
+        updated_at: str | None = None,
+    ) -> tuple[WorkItem, SessionGeneration, Turn]:
+        """Terminalize a generation failure, its Turn, and its WorkItem atomically."""
+        if not isinstance(error_code, str) or not error_code or len(error_code) > 128:
+            raise ValueError("error_code must be bounded non-empty text")
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            generation, turn = self._require_bound_generation_turn(
+                connection,
+                turn_id=turn_id,
+                session_generation_id=session_generation_id,
+                generation_number=generation_number,
+                policy_sha256=policy_sha256,
+            )
+            work_item = self._require_work_item(connection, turn.work_item_id)
+            if generation.state is not SessionGenerationState.FAILED:
+                if session_id is not None:
+                    generation = generation.bind_session(session_id, at=now)
+                generation = generation.transition_to(SessionGenerationState.FAILED, at=now)
+                connection.execute(
+                    "UPDATE session_generations SET state = ?, codex_session_id = ?, "
+                    "retired_at = ?, updated_at = ? WHERE session_generation_id = ?",
+                    (
+                        generation.state.value,
+                        generation.codex_session_id,
+                        generation.retired_at,
+                        now,
+                        session_generation_id,
+                    ),
+                )
+            elif session_id is not None and generation.codex_session_id != session_id:
+                raise ValueError("failed generation is bound to a different Codex session")
+            if turn.state is not TurnState.BLOCKED:
+                if turn.state not in ACTIVE_TURN_STATES:
+                    raise ValueError("Turn cannot record a failure receipt")
+                turn = replace(turn, error_code=error_code).transition_to(TurnState.BLOCKED, at=now)
+                connection.execute(
+                    "UPDATE turns SET state = ?, error_code = ?, finished_at = ?, updated_at = ? "
+                    "WHERE turn_id = ?",
+                    (turn.state.value, error_code, turn.finished_at, now, turn_id),
+                )
+            elif turn.error_code != error_code:
+                raise ValueError("Turn already has a different recorded error")
+            if work_item.state is WorkItemState.RUNNING:
+                work_item = work_item.transition_to(WorkItemState.BLOCKED, at=now)
+                connection.execute(
+                    "UPDATE work_items SET state = ?, updated_at = ? WHERE work_item_id = ?",
+                    (work_item.state.value, now, work_item.work_item_id),
+                )
+            elif work_item.state is not WorkItemState.BLOCKED:
+                raise ValueError("WorkItem cannot record a generation failure")
+        return work_item, generation, turn
+
+    def record_generation_turn_finished(
+        self,
+        turn_id: str,
+        *,
+        session_generation_id: str,
+        generation_number: int,
+        policy_sha256: str,
+        session_id: str,
+        output_sha256: str,
+        output_head_sha: str,
+        result_status: str,
+        result_summary: str,
+        input_tokens: int,
+        cached_input_tokens: int,
+        cache_write_input_tokens: int,
+        output_tokens: int,
+        reasoning_output_tokens: int,
+        updated_at: str | None = None,
+    ) -> tuple[WorkItem, SessionGeneration, Turn, TurnUsage]:
+        """Record a terminal Agent receipt and usage without splitting its durability."""
+        now = updated_at or utc_now_iso()
+        usage = TurnUsage.new(
+            turn_id=turn_id,
+            input_tokens=input_tokens,
+            cached_input_tokens=cached_input_tokens,
+            cache_write_input_tokens=cache_write_input_tokens,
+            output_tokens=output_tokens,
+            reasoning_output_tokens=reasoning_output_tokens,
+            at=now,
+        )
+        with self._transaction() as connection:
+            generation, turn = self._require_bound_generation_turn(
+                connection,
+                turn_id=turn_id,
+                session_generation_id=session_generation_id,
+                generation_number=generation_number,
+                policy_sha256=policy_sha256,
+            )
+            work_item = self._require_work_item(connection, turn.work_item_id)
+            if generation.state is SessionGenerationState.STARTING:
+                generation = generation.bind_session(session_id, at=now).transition_to(
+                    SessionGenerationState.ACTIVE, at=now
+                )
+                cursor = connection.execute(
+                    "UPDATE session_generations SET state = ?, codex_session_id = ?, updated_at = ? "
+                    "WHERE session_generation_id = ? AND state = 'starting' "
+                    "AND (codex_session_id IS NULL OR codex_session_id = ?)",
+                    (
+                        generation.state.value,
+                        generation.codex_session_id,
+                        now,
+                        session_generation_id,
+                        session_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(
+                        "concurrent session generation activation detected"
+                    )
+            elif generation.state is SessionGenerationState.ACTIVE:
+                generation = generation.bind_session(session_id, at=now)
+            else:
+                raise ValueError("session generation cannot record a finished Turn")
+            candidate = replace(
+                turn,
+                output_sha256=output_sha256,
+                output_head_sha=output_head_sha,
+                result_status=result_status,
+                result_summary=result_summary,
+                updated_at=now,
+            )
+            if turn.output_sha256 is not None:
+                if (
+                    turn.output_sha256 != candidate.output_sha256
+                    or turn.output_head_sha != candidate.output_head_sha
+                    or turn.result_status != candidate.result_status
+                    or turn.result_summary != candidate.result_summary
+                ):
+                    raise ValueError("Turn already has a different recorded result")
+                candidate = turn
+            else:
+                connection.execute(
+                    "UPDATE turns SET output_sha256 = ?, output_head_sha = ?, result_status = ?, "
+                    "result_summary = ?, updated_at = ? WHERE turn_id = ? AND output_sha256 IS NULL",
+                    (
+                        candidate.output_sha256,
+                        candidate.output_head_sha,
+                        candidate.result_status,
+                        candidate.result_summary,
+                        now,
+                        turn_id,
+                    ),
+                )
+            existing_usage = connection.execute(
+                "SELECT * FROM turn_usage WHERE turn_id = ?", (turn_id,)
+            ).fetchone()
+            if existing_usage is not None:
+                persisted_usage = self._row_to_turn_usage(existing_usage)
+                if (
+                    persisted_usage.input_tokens != usage.input_tokens
+                    or persisted_usage.cached_input_tokens
+                    != usage.cached_input_tokens
+                    or persisted_usage.cache_write_input_tokens
+                    != usage.cache_write_input_tokens
+                    or persisted_usage.output_tokens != usage.output_tokens
+                    or persisted_usage.reasoning_output_tokens
+                    != usage.reasoning_output_tokens
+                ):
+                    raise ValueError("Turn already has different recorded usage")
+                usage = persisted_usage
+            else:
+                connection.execute(
+                    "INSERT INTO turn_usage (turn_id, input_tokens, cached_input_tokens, "
+                    "cache_write_input_tokens, output_tokens, reasoning_output_tokens, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        usage.turn_id,
+                        usage.input_tokens,
+                        usage.cached_input_tokens,
+                        usage.cache_write_input_tokens,
+                        usage.output_tokens,
+                        usage.reasoning_output_tokens,
+                        usage.created_at,
+                        usage.updated_at,
+                    ),
+                )
+            if turn.output_sha256 is not None and turn.state not in ACTIVE_TURN_STATES:
+                return work_item, generation, turn, usage
+            if work_item.state is not WorkItemState.RUNNING:
+                raise ValueError("work item is not running")
+            if output_head_sha != turn.input_head_sha:
+                next_turn = candidate.transition_to(TurnState.CHECKPOINTING, at=now)
+                next_work_item = work_item
+            else:
+                outcome = {
+                    "completed": (TurnState.FINISHED, WorkItemState.REVIEW),
+                    "needs_input": (TurnState.NEEDS_INPUT, WorkItemState.WAITING_INPUT),
+                    "blocked": (TurnState.BLOCKED, WorkItemState.BLOCKED),
+                }.get(result_status)
+                if outcome is None:
+                    raise ValueError("result_status is unsupported")
+                next_turn = candidate.transition_to(outcome[0], at=now)
+                next_work_item = work_item.transition_to(outcome[1], at=now)
+            if turn.state is not next_turn.state:
+                connection.execute(
+                    "UPDATE turns SET state = ?, started_at = ?, finished_at = ?, updated_at = ? "
+                    "WHERE turn_id = ?",
+                    (
+                        next_turn.state.value,
+                        next_turn.started_at,
+                        next_turn.finished_at,
+                        now,
+                        turn_id,
+                    ),
+                )
+            if next_work_item is not work_item:
+                connection.execute(
+                    "UPDATE work_items SET state = ?, updated_at = ? WHERE work_item_id = ?",
+                    (next_work_item.state.value, now, work_item.work_item_id),
+                )
+        return next_work_item, generation, next_turn, usage
+
+    def record_generation_publication(
+        self,
+        turn_id: str,
+        *,
+        previous_sha: str,
+        head_sha: str,
+        updated_at: str | None = None,
+    ) -> tuple[WorkItem, SessionGeneration]:
+        """Advance matching WorkItem and generation publication anchors together."""
+        previous_sha = validate_git_sha(previous_sha, "previous_sha")
+        head_sha = validate_git_sha(head_sha, "head_sha")
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            generation, turn = self._require_bound_generation_turn_by_turn(connection, turn_id)
+            work_item = self._require_work_item(connection, turn.work_item_id)
+            work_anchor = work_item.last_published_sha or work_item.base_sha
+            generation_anchor = generation.last_published_sha or generation.start_head_sha
+            if work_item.last_published_sha == head_sha and generation.last_published_sha == head_sha:
+                return work_item, generation
+            if previous_sha != work_anchor or previous_sha != generation_anchor or head_sha == previous_sha:
+                raise ValueError("publication anchor no longer matches the bound generation")
+            connection.execute(
+                "UPDATE work_items SET last_published_sha = ?, updated_at = ? WHERE work_item_id = ?",
+                (head_sha, now, work_item.work_item_id),
+            )
+            connection.execute(
+                "UPDATE session_generations SET last_published_sha = ?, updated_at = ? "
+                "WHERE session_generation_id = ?",
+                (head_sha, now, generation.session_generation_id),
+            )
+            self._insert_work_item_event(
+                connection,
+                work_item.work_item_id,
+                turn_id,
+                "generation_commit_published",
+                {"head_sha": head_sha, "previous_sha": previous_sha},
+                now,
+            )
+            work_item = replace(work_item, last_published_sha=head_sha, updated_at=now)
+            generation = replace(generation, last_published_sha=head_sha, updated_at=now)
+        return work_item, generation
+
+    def transition_session_generation(
+        self,
+        session_generation_id: str,
+        state: SessionGenerationState,
+        *,
+        updated_at: str | None = None,
+    ) -> SessionGeneration:
+        if not isinstance(state, SessionGenerationState):
+            raise ValueError("state must be a SessionGenerationState")
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM session_generations WHERE session_generation_id = ?",
+                (session_generation_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"session generation not found: {session_generation_id}")
+            generation = self._row_to_session_generation(row)
+            if generation.state is state:
+                return generation
+            updated = generation.transition_to(state, at=now)
+            cursor = connection.execute(
+                "UPDATE session_generations SET state = ?, started_at = ?, retired_at = ?, "
+                "updated_at = ? WHERE session_generation_id = ? AND state = ?",
+                (
+                    updated.state.value,
+                    updated.started_at,
+                    updated.retired_at,
+                    updated.updated_at,
+                    session_generation_id,
+                    generation.state.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    f"concurrent session generation update detected: {session_generation_id}"
+                )
+            self._insert_work_item_event(
+                connection,
+                generation.work_item_id,
+                None,
+                "session_generation_state_changed",
+                {
+                    "from": generation.state.value,
+                    "session_generation_id": session_generation_id,
+                    "to": state.value,
+                },
+                now,
+            )
+        return updated
+
+    def bind_session_generation_codex_session(
+        self,
+        session_generation_id: str,
+        session_id: str,
+        *,
+        updated_at: str | None = None,
+    ) -> SessionGeneration:
+        validate_session_id(session_id)
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM session_generations WHERE session_generation_id = ?",
+                (session_generation_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"session generation not found: {session_generation_id}")
+            generation = self._row_to_session_generation(row)
+            updated = generation.bind_session(session_id, at=now)
+            if updated is generation:
+                return generation
+            cursor = connection.execute(
+                "UPDATE session_generations SET codex_session_id = ?, updated_at = ? "
+                "WHERE session_generation_id = ? AND codex_session_id IS NULL",
+                (session_id, now, session_generation_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    f"concurrent session generation binding detected: {session_generation_id}"
+                )
+            self._insert_work_item_event(
+                connection,
+                generation.work_item_id,
+                None,
+                "session_generation_codex_session_bound",
+                {"session_generation_id": session_generation_id, "session_id": session_id},
+                now,
+            )
+        return updated
+
+    def bind_turn_session_generation(
+        self,
+        turn_id: str,
+        session_generation_id: str,
+        *,
+        updated_at: str | None = None,
+    ) -> SessionGeneration:
+        """Bind a Turn once to a generation from the same WorkItem."""
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            turn_row = connection.execute(
+                "SELECT * FROM turns WHERE turn_id = ?", (turn_id,)
+            ).fetchone()
+            if turn_row is None:
+                raise KeyError(f"turn not found: {turn_id}")
+            turn = self._row_to_turn(turn_row)
+            generation_row = connection.execute(
+                "SELECT * FROM session_generations WHERE session_generation_id = ?",
+                (session_generation_id,),
+            ).fetchone()
+            if generation_row is None:
+                raise KeyError(f"session generation not found: {session_generation_id}")
+            generation = self._row_to_session_generation(generation_row)
+            if generation.work_item_id != turn.work_item_id:
+                raise ValueError("Turn and session generation must belong to the same WorkItem")
+            existing = connection.execute(
+                "SELECT session_generation_id FROM turn_session_generations WHERE turn_id = ?",
+                (turn_id,),
+            ).fetchone()
+            if existing is not None:
+                if existing["session_generation_id"] != session_generation_id:
+                    raise ValueError("Turn is already bound to a different session generation")
+                return generation
+            if not generation.is_live:
+                raise ValueError("a Turn cannot first bind to a terminal session generation")
+            connection.execute(
+                "INSERT INTO turn_session_generations(turn_id, session_generation_id) "
+                "VALUES (?, ?)",
+                (turn_id, session_generation_id),
+            )
+            self._insert_work_item_event(
+                connection,
+                turn.work_item_id,
+                turn_id,
+                "turn_session_generation_bound",
+                {"session_generation_id": session_generation_id},
+                now,
+            )
+        return generation
+
+    def get_turn_session_generation(self, turn_id: str) -> SessionGeneration | None:
+        row = self._connection.execute(
+            "SELECT session_generations.* FROM turn_session_generations "
+            "JOIN session_generations USING(session_generation_id) "
+            "WHERE turn_session_generations.turn_id = ?",
+            (turn_id,),
+        ).fetchone()
+        return self._row_to_session_generation(row) if row is not None else None
+
+    def record_session_generation_published_sha(
+        self,
+        session_generation_id: str,
+        *,
+        previous_sha: str,
+        head_sha: str,
+        updated_at: str | None = None,
+    ) -> SessionGeneration:
+        """Advance one live generation's immutable publication anchor once."""
+        previous_sha = validate_git_sha(previous_sha, "previous_sha")
+        head_sha = validate_git_sha(head_sha, "head_sha")
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM session_generations WHERE session_generation_id = ?",
+                (session_generation_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"session generation not found: {session_generation_id}")
+            generation = self._row_to_session_generation(row)
+            if generation.state not in {
+                SessionGenerationState.ACTIVE,
+                SessionGenerationState.RETIRING,
+            }:
+                raise ValueError("only active or retiring session generations can publish")
+            current_anchor = generation.last_published_sha or generation.start_head_sha
+            if generation.last_published_sha == head_sha:
+                return generation
+            if previous_sha != current_anchor:
+                raise ValueError("publication anchor no longer matches the session generation")
+            if head_sha == current_anchor:
+                raise ValueError("published SHA must advance the session generation anchor")
+            cursor = connection.execute(
+                "UPDATE session_generations SET last_published_sha = ?, updated_at = ? "
+                "WHERE session_generation_id = ? AND "
+                "((last_published_sha IS NULL AND start_head_sha = ?) OR last_published_sha = ?)",
+                (head_sha, now, session_generation_id, previous_sha, previous_sha),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    f"concurrent session generation publication update detected: "
+                    f"{session_generation_id}"
+                )
+            self._insert_work_item_event(
+                connection,
+                generation.work_item_id,
+                None,
+                "session_generation_commit_published",
+                {
+                    "head_sha": head_sha,
+                    "previous_sha": previous_sha,
+                    "session_generation_id": session_generation_id,
+                },
+                now,
+            )
+        updated = self.get_session_generation(session_generation_id)
+        assert updated is not None
+        return updated
+
+    def record_turn_usage(
+        self,
+        turn_id: str,
+        *,
+        input_tokens: int,
+        cached_input_tokens: int,
+        cache_write_input_tokens: int,
+        output_tokens: int,
+        reasoning_output_tokens: int,
+        created_at: str | None = None,
+    ) -> TurnUsage:
+        """Write one immutable Runner token-usage receipt for a Turn."""
+        usage = TurnUsage.new(
+            turn_id=turn_id,
+            input_tokens=input_tokens,
+            cached_input_tokens=cached_input_tokens,
+            cache_write_input_tokens=cache_write_input_tokens,
+            output_tokens=output_tokens,
+            reasoning_output_tokens=reasoning_output_tokens,
+            at=created_at,
+        )
+        with self._transaction() as connection:
+            turn_row = connection.execute(
+                "SELECT * FROM turns WHERE turn_id = ?", (turn_id,)
+            ).fetchone()
+            if turn_row is None:
+                raise KeyError(f"turn not found: {turn_id}")
+            existing_row = connection.execute(
+                "SELECT * FROM turn_usage WHERE turn_id = ?", (turn_id,)
+            ).fetchone()
+            if existing_row is not None:
+                existing = self._row_to_turn_usage(existing_row)
+                if (
+                    existing.input_tokens != usage.input_tokens
+                    or existing.cached_input_tokens != usage.cached_input_tokens
+                    or existing.cache_write_input_tokens != usage.cache_write_input_tokens
+                    or existing.output_tokens != usage.output_tokens
+                    or existing.reasoning_output_tokens != usage.reasoning_output_tokens
+                ):
+                    raise ValueError("Turn already has different recorded usage")
+                return existing
+            connection.execute(
+                "INSERT INTO turn_usage (turn_id, input_tokens, cached_input_tokens, "
+                "cache_write_input_tokens, output_tokens, reasoning_output_tokens, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    usage.turn_id,
+                    usage.input_tokens,
+                    usage.cached_input_tokens,
+                    usage.cache_write_input_tokens,
+                    usage.output_tokens,
+                    usage.reasoning_output_tokens,
+                    usage.created_at,
+                    usage.updated_at,
+                ),
+            )
+            turn = self._row_to_turn(turn_row)
+            self._insert_work_item_event(
+                connection,
+                turn.work_item_id,
+                turn_id,
+                "turn_usage_recorded",
+                {
+                    "cache_write_input_tokens": usage.cache_write_input_tokens,
+                    "cached_input_tokens": usage.cached_input_tokens,
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "reasoning_output_tokens": usage.reasoning_output_tokens,
+                },
+                usage.created_at,
+            )
+        return usage
+
+    def get_turn_usage(self, turn_id: str) -> TurnUsage | None:
+        row = self._connection.execute(
+            "SELECT * FROM turn_usage WHERE turn_id = ?", (turn_id,)
+        ).fetchone()
+        return self._row_to_turn_usage(row) if row is not None else None
 
     def bind_slack_thread(
         self,
@@ -1257,6 +2423,166 @@ class StateStore:
         )
 
     @staticmethod
+    def _insert_turn_prompt_input(
+        connection: sqlite3.Connection, prompt_input: TurnPromptInput
+    ) -> None:
+        connection.execute(
+            "INSERT INTO turn_prompt_inputs (turn_id, prompt_kind, issue_content_sha256, "
+            "task_spec_sha256, cumulative_approved_context_sha256, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                prompt_input.turn_id,
+                prompt_input.prompt_kind.value,
+                prompt_input.issue_content_sha256,
+                prompt_input.task_spec_sha256,
+                prompt_input.cumulative_approved_context_sha256,
+                prompt_input.created_at,
+                prompt_input.updated_at,
+            ),
+        )
+
+    def _require_generation_identity(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        session_generation_id: str,
+        work_item_id: str,
+        generation_number: int,
+        policy_sha256: str | None,
+        allow_legacy_policy: bool = False,
+    ) -> SessionGeneration:
+        validate_session_generation_id(session_generation_id)
+        if policy_sha256 is None:
+            if not allow_legacy_policy:
+                raise ValueError("policy_sha256 must be a SHA-256 digest")
+        else:
+            validate_sha256(policy_sha256, "policy_sha256")
+        if type(generation_number) is not int or generation_number <= 0:
+            raise ValueError("generation_number must be a positive integer")
+        row = connection.execute(
+            "SELECT * FROM session_generations WHERE session_generation_id = ?",
+            (session_generation_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"session generation not found: {session_generation_id}")
+        generation = self._row_to_session_generation(row)
+        if generation.work_item_id != work_item_id or generation.generation_number != generation_number:
+            raise ValueError("session generation identity does not match the requested Turn")
+        if policy_sha256 is None:
+            if (
+                generation.policy_sha256 is not None
+                or generation.rotation_reason != "legacy_migration"
+            ):
+                raise ValueError("legacy session generation policy does not match")
+        elif generation.policy_sha256 != policy_sha256:
+            raise ValueError("session generation policy does not match")
+        return generation
+
+    def _require_bound_generation_turn(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        turn_id: str,
+        session_generation_id: str,
+        generation_number: int,
+        policy_sha256: str,
+    ) -> tuple[SessionGeneration, Turn]:
+        turn = self._require_turn(connection, turn_id)
+        generation = self._require_generation_identity(
+            connection,
+            session_generation_id=session_generation_id,
+            work_item_id=turn.work_item_id,
+            generation_number=generation_number,
+            policy_sha256=policy_sha256,
+        )
+        row = connection.execute(
+            "SELECT session_generation_id FROM turn_session_generations WHERE turn_id = ?",
+            (turn_id,),
+        ).fetchone()
+        if row is None or row["session_generation_id"] != session_generation_id:
+            raise ValueError("Turn is not bound to the requested session generation")
+        return generation, turn
+
+    def _require_bound_generation_turn_by_turn(
+        self, connection: sqlite3.Connection, turn_id: str
+    ) -> tuple[SessionGeneration, Turn]:
+        turn = self._require_turn(connection, turn_id)
+        row = connection.execute(
+            "SELECT session_generations.* FROM session_generations "
+            "JOIN turn_session_generations USING(session_generation_id) WHERE turn_id = ?",
+            (turn_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Turn is not bound to a session generation")
+        return self._row_to_session_generation(row), turn
+
+    def _require_turn(self, connection: sqlite3.Connection, turn_id: str) -> Turn:
+        row = connection.execute("SELECT * FROM turns WHERE turn_id = ?", (turn_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"turn not found: {turn_id}")
+        return self._row_to_turn(row)
+
+    def _require_work_item(self, connection: sqlite3.Connection, work_item_id: str) -> WorkItem:
+        row = connection.execute(
+            "SELECT * FROM work_items WHERE work_item_id = ?", (work_item_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"work item not found: {work_item_id}")
+        return self._row_to_work_item(row)
+
+    def _require_running_work_item(
+        self, connection: sqlite3.Connection, work_item_id: str
+    ) -> WorkItem:
+        work_item = self._require_work_item(connection, work_item_id)
+        if work_item.state not in {WorkItemState.RUNNING, WorkItemState.BLOCKED}:
+            raise ValueError("work item is not running")
+        return work_item
+
+    @staticmethod
+    def _insert_session_generation(
+        connection: sqlite3.Connection, generation: SessionGeneration
+    ) -> None:
+        fields = (
+            "session_generation_id",
+            "work_item_id",
+            "generation_number",
+            "state",
+            "role",
+            "codex_session_id",
+            "start_head_sha",
+            "last_published_sha",
+            "policy_sha256",
+            "rotation_reason",
+            "baseline_issue_revision",
+            "baseline_issue_content_sha256",
+            "baseline_task_spec_sha256",
+            "baseline_prompt_sha256",
+            "baseline_approved_comment_ids_json",
+            "baseline_approved_context_sha256",
+            "created_at",
+            "started_at",
+            "retired_at",
+            "updated_at",
+        )
+        values = tuple(
+            getattr(generation, field).value
+            if field in {"state", "role"}
+            else (
+                json.dumps(generation.baseline_approved_comment_ids, separators=(",", ":"))
+                if generation.baseline_approved_comment_ids is not None
+                else None
+            )
+            if field == "baseline_approved_comment_ids_json"
+            else getattr(generation, field)
+            for field in fields
+        )
+        connection.execute(
+            f"INSERT INTO session_generations ({', '.join(fields)}) "
+            f"VALUES ({', '.join('?' for _ in fields)})",
+            values,
+        )
+
+    @staticmethod
     def _insert_work_item_event(
         connection: sqlite3.Connection,
         work_item_id: str,
@@ -1329,6 +2655,21 @@ class StateStore:
         return WorkItem(**values)
 
     @staticmethod
+    def _row_to_session_generation(row: sqlite3.Row) -> SessionGeneration:
+        values = dict(row)
+        values["state"] = SessionGenerationState(values["state"])
+        values["role"] = SessionGenerationRole(values["role"])
+        raw_comment_ids = values.pop("baseline_approved_comment_ids_json")
+        values["baseline_approved_comment_ids"] = (
+            None
+            if raw_comment_ids is None
+            else StateStore._parse_string_tuple(
+                raw_comment_ids, "persisted SessionGeneration baseline comment IDs"
+            )
+        )
+        return SessionGeneration(**values)
+
+    @staticmethod
     def _row_to_turn(row: sqlite3.Row) -> Turn:
         values = dict(row)
         values["state"] = TurnState(values["state"])
@@ -1341,6 +2682,16 @@ class StateStore:
             raw_allowed_paths, "persisted Turn allowed paths"
         )
         return Turn(**values)
+
+    @staticmethod
+    def _row_to_turn_usage(row: sqlite3.Row) -> TurnUsage:
+        return TurnUsage(**dict(row))
+
+    @staticmethod
+    def _row_to_turn_prompt_input(row: sqlite3.Row) -> TurnPromptInput:
+        values = dict(row)
+        values["prompt_kind"] = PromptKind(values["prompt_kind"])
+        return TurnPromptInput(**values)
 
     @staticmethod
     def _row_to_slack_delivery(row: sqlite3.Row) -> SlackDeliveryRecord:

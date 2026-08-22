@@ -31,12 +31,22 @@ class CodexTerminalStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class CodexTurnUsage:
+    input_tokens: int
+    cached_input_tokens: int
+    cache_write_input_tokens: int
+    output_tokens: int
+    reasoning_output_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
 class CodexExecutionSummary:
     session_id: str
     status: CodexTerminalStatus
     event_count: int
     final_message: str | None
     errors: tuple[str, ...]
+    usage: CodexTurnUsage | None = None
 
 
 def parse_codex_jsonl(
@@ -74,6 +84,7 @@ def parse_codex_jsonl(
     session_id: str | None = None
     terminal: CodexTerminalStatus | None = None
     final_message: str | None = None
+    usage: CodexTurnUsage | None = None
     errors: list[str] = []
 
     for index, line in enumerate(lines):
@@ -135,6 +146,17 @@ def parse_codex_jsonl(
                 if event_type == "turn.completed"
                 else CodexTerminalStatus.FAILED
             )
+            raw_usage = event.get("usage")
+            if event_type == "turn.completed" and raw_usage is not None:
+                usage = _parse_turn_usage(raw_usage)
+                if usage is None:
+                    raise CodexJsonlError(
+                        "Codex turn usage must be a usage object", code="usage_invalid"
+                    )
+            elif event_type == "turn.failed" and "usage" in event:
+                raise CodexJsonlError(
+                    "failed Codex turns must not contain usage", code="usage_invalid"
+                )
         elif event_type == "error":
             message = event.get("message")
             if isinstance(message, str) and message:
@@ -169,7 +191,41 @@ def parse_codex_jsonl(
             "completed Codex output is missing the final agent message",
             code="missing_final_message",
         )
-    return CodexExecutionSummary(session_id, terminal, len(lines), final_message, tuple(errors))
+    return CodexExecutionSummary(
+        session_id=session_id,
+        status=terminal,
+        event_count=len(lines),
+        final_message=final_message,
+        errors=tuple(errors),
+        usage=usage,
+    )
+
+
+def _parse_turn_usage(value: Any) -> CodexTurnUsage | None:
+    if not isinstance(value, dict):
+        return None
+    required_keys = {
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+    }
+    if set(value.keys()) != required_keys:
+        return None
+    parsed: dict[str, int] = {}
+    for key in required_keys:
+        raw = value[key]
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            return None
+        parsed[key] = raw
+    return CodexTurnUsage(
+        input_tokens=parsed["input_tokens"],
+        cached_input_tokens=parsed["cached_input_tokens"],
+        cache_write_input_tokens=parsed["cache_write_input_tokens"],
+        output_tokens=parsed["output_tokens"],
+        reasoning_output_tokens=parsed["reasoning_output_tokens"],
+    )
 
 
 def _bounded_redacted(value: str, explicit_secrets: tuple[str, ...]) -> str:

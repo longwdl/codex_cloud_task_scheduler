@@ -5,6 +5,7 @@ import unittest
 
 from codex_dispatcher.codex_jsonl import (
     CodexJsonlError,
+    CodexTurnUsage,
     CodexTerminalStatus,
     parse_codex_jsonl,
 )
@@ -19,6 +20,13 @@ def jsonl(*events: object) -> str:
 
 class CodexJsonlTests(unittest.TestCase):
     def test_parses_one_session_terminal_event_and_redacted_agent_message(self) -> None:
+        usage = {
+            "input_tokens": 1,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 2,
+            "reasoning_output_tokens": 3,
+        }
         output = jsonl(
             {"type": "thread.started", "thread_id": SESSION},
             {"type": "turn.started"},
@@ -26,13 +34,89 @@ class CodexJsonlTests(unittest.TestCase):
                 "type": "item.completed",
                 "item": {"type": "agent_message", "text": "done token=secret-value"},
             },
-            {"type": "turn.completed"},
+            {"type": "turn.completed", "usage": usage},
         )
         summary = parse_codex_jsonl(output, expected_session_id=SESSION)
         self.assertEqual(SESSION, summary.session_id)
         self.assertEqual(CodexTerminalStatus.COMPLETED, summary.status)
         self.assertEqual("done token=[REDACTED]", summary.final_message)
+        self.assertEqual(
+            CodexTurnUsage(
+                input_tokens=1,
+                cached_input_tokens=0,
+                cache_write_input_tokens=0,
+                output_tokens=2,
+                reasoning_output_tokens=3,
+            ),
+            summary.usage,
+        )
         self.assertEqual(4, summary.event_count)
+
+    def test_failed_turn_has_no_usage(self) -> None:
+        output = jsonl(
+            {"type": "thread.started", "thread_id": SESSION},
+            {"type": "turn.failed", "error": {"message": "provider failed"}},
+        )
+        summary = parse_codex_jsonl(output)
+        self.assertIsNone(summary.usage)
+
+        with self.assertRaises(CodexJsonlError) as raised:
+            parse_codex_jsonl(
+                jsonl(
+                    {"type": "thread.started", "thread_id": SESSION},
+                    {"type": "turn.failed", "usage": {}},
+                )
+            )
+        self.assertEqual("usage_invalid", raised.exception.code)
+
+    def test_rejects_invalid_turn_usage_in_terminal_event(self) -> None:
+        malformed_usage_cases = (
+            {
+                "input_tokens": 1,
+                "cached_input_tokens": 2,
+                "cache_write_input_tokens": 3,
+                "output_tokens": 4,
+            },
+            {
+                "input_tokens": 1,
+                "cached_input_tokens": 2,
+                "cache_write_input_tokens": 3,
+                "output_tokens": 4,
+                "reasoning_output_tokens": 5,
+                "extra": 6,
+            },
+            {
+                "input_tokens": True,
+                "cached_input_tokens": 2,
+                "cache_write_input_tokens": 3,
+                "output_tokens": 4,
+                "reasoning_output_tokens": 5,
+            },
+            {
+                "input_tokens": 1,
+                "cached_input_tokens": -1,
+                "cache_write_input_tokens": 3,
+                "output_tokens": 4,
+                "reasoning_output_tokens": 5,
+            },
+            {
+                "input_tokens": "1",
+                "cached_input_tokens": 2,
+                "cache_write_input_tokens": 3,
+                "output_tokens": 4,
+                "reasoning_output_tokens": 5,
+            },
+            [],
+        )
+        for usage in malformed_usage_cases:
+            with self.subTest(usage=usage):
+                output = jsonl(
+                    {"type": "thread.started", "thread_id": SESSION},
+                    {"type": "turn.failed", "usage": usage},
+                )
+                with self.assertRaises(CodexJsonlError) as raised:
+                    parse_codex_jsonl(output)
+                self.assertEqual("usage_invalid", raised.exception.code)
 
     def test_failed_turn_redacts_provider_errors(self) -> None:
         output = jsonl(

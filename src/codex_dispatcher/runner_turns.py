@@ -11,11 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from codex_dispatcher.codex_jsonl import (
+    MAX_EVENT_BYTES,
     CodexJsonlError,
     CodexTerminalStatus,
     parse_codex_jsonl,
 )
-from codex_dispatcher.command_runner import run_binary_command
+from codex_dispatcher.command_runner import BinaryCommandResult, run_binary_command
 from codex_dispatcher.executors.codex_cli import (
     build_codex_invocation,
     build_codex_login_status_invocation,
@@ -31,11 +32,15 @@ from codex_dispatcher.runner_docker import (
     DockerWorkItemContext,
     RunnerDockerError,
     bind_docker_session,
+    docker_generation_container_is_running,
+    load_docker_generation_receipt,
     prepare_docker_work_item,
     validate_docker_auth_state,
     validate_docker_command_boundary,
 )
 from codex_dispatcher.runner_protocol import (
+    NEXT_PROTOCOL_VERSION,
+    PROTOCOL_VERSION,
     RunnerOperation,
     RunnerProtocolError,
     RunnerRequest,
@@ -43,6 +48,7 @@ from codex_dispatcher.runner_protocol import (
     parse_agent_result,
     parse_runner_request,
 )
+from codex_dispatcher.runner_policy import PolicyBundle, PolicyBundleError
 from codex_dispatcher.runner_transport import (
     RunnerTurnRemoteState,
     RunnerTurnReply,
@@ -53,6 +59,7 @@ from codex_dispatcher.runner_workspace import (
     RunnerWorkspaceError,
     RunnerWorkspacePaths,
 )
+from codex_dispatcher.work_items import validate_session_id
 
 
 _TURN_RECORD_VERSION = 1
@@ -84,6 +91,7 @@ class RunnerTurnExecutor:
         timeout_seconds: float = 3600.0,
         egress_proxy_url: str | None = None,
         docker_runtime: DockerCodexRuntime | None = None,
+        policy_bundle: PolicyBundle | None = None,
     ) -> None:
         for path, field in (
             (codex_path, "codex_path"),
@@ -108,11 +116,17 @@ class RunnerTurnExecutor:
             docker_runtime, DockerCodexRuntime
         ):
             raise TypeError("docker_runtime must be a DockerCodexRuntime or None")
+        if policy_bundle is not None and not isinstance(policy_bundle, PolicyBundle):
+            raise TypeError("policy_bundle must be a PolicyBundle or None")
+        if docker_runtime is None and policy_bundle is not None:
+            raise ValueError("policy_bundle requires Docker Codex execution")
         self._docker_runtime = docker_runtime
+        self._policy_bundle = policy_bundle
 
     def execute(self, request: RunnerRequest, prompt: bytes) -> RunnerTurnReply:
         if request.operation not in {RunnerOperation.START, RunnerOperation.RESUME}:
             raise ValueError("request must start or resume a Turn")
+        self._require_activated_protocol(request)
         if not isinstance(prompt, bytes) or not prompt:
             raise ValueError("prompt must be non-empty bytes")
         if sha256(prompt).hexdigest() != request.prompt_sha256:
@@ -128,6 +142,8 @@ class RunnerTurnExecutor:
             if existing.state == "finished":
                 assert existing.reply is not None
                 return existing.reply
+            if request.version == NEXT_PROTOCOL_VERSION:
+                return self._v2_executing_reply(request, paths)
             return self._unknown_reply(request, "turn_outcome_unresolved")
 
         paths = self._workspace.validate_turn_anchor(
@@ -141,6 +157,7 @@ class RunnerTurnExecutor:
     def status(self, request: RunnerRequest) -> RunnerTurnReply:
         if request.operation is not RunnerOperation.STATUS:
             raise ValueError("request must be a STATUS operation")
+        self._require_activated_protocol(request)
         assert request.turn_id is not None
         paths = self._workspace.paths(request.work_item_id)
         record = self._read_record(
@@ -151,9 +168,20 @@ class RunnerTurnExecutor:
         if (
             record.request.work_item_id != request.work_item_id
             or record.request.turn_id != request.turn_id
+            or record.request.version != request.version
         ):
             raise RunnerTurnError("Turn record identity is inconsistent")
+        if request.version == NEXT_PROTOCOL_VERSION and (
+            record.request.version != request.version
+            or record.request.session_generation_id
+            != request.session_generation_id
+            or record.request.session_generation != request.session_generation
+            or record.request.agent_policy_digest != request.agent_policy_digest
+        ):
+            raise RunnerTurnError("Turn generation identity is inconsistent")
         if record.state != "finished":
+            if request.version == NEXT_PROTOCOL_VERSION:
+                return self._v2_executing_reply(request, paths)
             return RunnerTurnReply(
                 RunnerOperation.STATUS,
                 request.work_item_id,
@@ -164,6 +192,71 @@ class RunnerTurnExecutor:
             )
         assert record.reply is not None
         return replace(record.reply, operation=RunnerOperation.STATUS)
+
+    def _require_activated_protocol(self, request: RunnerRequest) -> None:
+        if request.version == PROTOCOL_VERSION:
+            return
+        if request.version != NEXT_PROTOCOL_VERSION:
+            raise RunnerTurnError("Runner protocol version is not activated")
+        if request.operation is RunnerOperation.STOP:
+            raise RunnerTurnError("Runner STOP is not activated")
+        if self._docker_runtime is None or self._policy_bundle is None:
+            raise RunnerTurnError("v2 requires policy-bound Docker execution")
+        if request.agent_policy_digest != self._policy_bundle.policy_digest:
+            raise RunnerTurnError("v2 agent policy digest does not match Runner policy")
+        try:
+            self._policy_bundle.validate()
+        except PolicyBundleError as exc:
+            raise RunnerTurnError("v2 Runner policy is invalid") from exc
+
+    def _v2_executing_reply(
+        self,
+        request: RunnerRequest,
+        paths: RunnerWorkspacePaths,
+    ) -> RunnerTurnReply:
+        assert self._docker_runtime is not None
+        status_request = RunnerRequest(
+            RunnerOperation.STATUS,
+            request.work_item_id,
+            turn_id=request.turn_id,
+            session_generation_id=request.session_generation_id,
+            session_generation=request.session_generation,
+            agent_policy_digest=request.agent_policy_digest,
+            version=NEXT_PROTOCOL_VERSION,
+        )
+        try:
+            receipt = load_docker_generation_receipt(
+                runtime=self._docker_runtime,
+                paths=paths,
+                request=status_request,
+            )
+        except (RunnerDockerError, OSError, ValueError):
+            receipt = None
+        if receipt is None:
+            return self._unknown_reply(request, "turn_outcome_unresolved")
+        _, session_id = receipt
+        try:
+            running = docker_generation_container_is_running(
+                runtime=self._docker_runtime,
+                request=request,
+            )
+        except (RunnerDockerError, OSError, ValueError):
+            running = False
+        if not running:
+            return self._unknown_reply(
+                request,
+                "turn_outcome_unresolved",
+                session_id=session_id,
+            )
+        assert request.turn_id is not None
+        return RunnerTurnReply(
+            request.operation,
+            request.work_item_id,
+            request.turn_id,
+            RunnerTurnRemoteState.RUNNING,
+            session_id=session_id,
+            **self._v2_reply_fields(request),
+        )
 
     def _run_codex(
         self,
@@ -253,8 +346,13 @@ class RunnerTurnExecutor:
     ) -> RunnerTurnReply:
         assert self._docker_runtime is not None
         assert request.turn_id is not None
+        is_v2 = request.version == NEXT_PROTOCOL_VERSION
+        active_policy = self._policy_bundle if is_v2 else None
         auth_file = self._codex_home / "auth.json"
+        receipt_hook: _ThreadStartedReceiptHook | None = None
         try:
+            if active_policy is not None:
+                active_policy.validate()
             context = prepare_docker_work_item(
                 runtime=self._docker_runtime,
                 paths=paths,
@@ -290,7 +388,15 @@ class RunnerTurnExecutor:
                 output_schema=self._output_schema,
                 session_id=request.session_id,
                 timeout_seconds=self._timeout_seconds,
+                policy_bundle=active_policy,
+                session_generation_id=(
+                    request.session_generation_id if is_v2 else None
+                ),
+                session_generation=request.session_generation if is_v2 else None,
+                agent_policy_digest=request.agent_policy_digest if is_v2 else None,
             )
+            if is_v2:
+                receipt_hook = _ThreadStartedReceiptHook(request, context)
             command = run_binary_command(
                 plan.argv,
                 timeout_seconds=self._timeout_seconds + 15.0,
@@ -299,11 +405,20 @@ class RunnerTurnExecutor:
                 env=plan.environment,
                 input_bytes=prompt,
                 cwd=str(context.state),
+                stdout_line_hook=receipt_hook,
             )
-        except (RunnerDockerError, OSError, ValueError):
+        except (RunnerDockerError, PolicyBundleError, OSError, ValueError):
             return self._failed_reply(request, "docker_boundary_invalid")
         if command.timed_out:
             raise RunnerTurnError("Docker Turn outcome is unresolved")
+        if is_v2:
+            assert receipt_hook is not None
+            return self._finish_v2_docker_command(
+                request=request,
+                command=command,
+                context=context,
+                receipt_hook=receipt_hook,
+            )
         try:
             validate_docker_auth_state(context)
         except RunnerDockerError:
@@ -371,6 +486,121 @@ class RunnerTurnExecutor:
             result=result,
         )
 
+    def _finish_v2_docker_command(
+        self,
+        *,
+        request: RunnerRequest,
+        command: BinaryCommandResult,
+        context: DockerWorkItemContext,
+        receipt_hook: _ThreadStartedReceiptHook,
+    ) -> RunnerTurnReply:
+        assert self._policy_bundle is not None
+        try:
+            validate_docker_auth_state(context)
+            self._policy_bundle.validate()
+        except (RunnerDockerError, PolicyBundleError):
+            return self._failed_reply(
+                request,
+                "docker_boundary_invalid",
+                session_id=receipt_hook.session_id,
+            )
+        if (
+            command.stdout_truncated
+            or command.stderr_truncated
+            or command.returncode is None
+        ):
+            return self._failed_reply(
+                request,
+                "codex_process_failed",
+                session_id=receipt_hook.session_id,
+            )
+        try:
+            summary = parse_codex_jsonl(
+                command.stdout,
+                expected_session_id=request.session_id,
+            )
+        except CodexJsonlError as exc:
+            return self._failed_reply(
+                request,
+                f"codex_output_{exc.code}",
+                session_id=receipt_hook.session_id,
+            )
+        try:
+            bind_docker_session(
+                context,
+                work_item_id=request.work_item_id,
+                session_id=summary.session_id,
+            )
+        except RunnerDockerError:
+            return self._failed_reply(
+                request,
+                "codex_session_binding_failed",
+                session_id=summary.session_id,
+            )
+        if (
+            receipt_hook.session_id is not None
+            and receipt_hook.session_id != summary.session_id
+        ):
+            return self._failed_reply(
+                request,
+                "codex_session_binding_failed",
+                session_id=summary.session_id,
+            )
+        if command.error not in {None, "command stdout hook failed"}:
+            return self._failed_reply(
+                request,
+                "codex_process_failed",
+                session_id=summary.session_id,
+            )
+        if command.returncode != 0 or summary.status is not (
+            CodexTerminalStatus.COMPLETED
+        ):
+            return self._failed_reply(
+                request,
+                "codex_turn_failed",
+                session_id=summary.session_id,
+            )
+        if summary.usage is None:
+            return self._failed_reply(
+                request,
+                "codex_output_usage_missing",
+                session_id=summary.session_id,
+            )
+        assert summary.final_message is not None
+        try:
+            result = parse_agent_result(summary.final_message)
+        except RunnerProtocolError:
+            return self._failed_reply(
+                request,
+                "agent_result_invalid",
+                session_id=summary.session_id,
+            )
+        try:
+            head_sha = self._workspace.current_head(
+                request.work_item_id,
+                require_clean=True,
+            )
+        except RunnerWorkspaceError:
+            return self._failed_reply(
+                request,
+                "checkpoint_invalid",
+                session_id=summary.session_id,
+            )
+        canonical = agent_result_to_json(result)
+        assert request.turn_id is not None
+        return RunnerTurnReply(
+            request.operation,
+            request.work_item_id,
+            request.turn_id,
+            RunnerTurnRemoteState.FINISHED,
+            session_id=summary.session_id,
+            head_sha=head_sha,
+            output_sha256=sha256(canonical.encode("utf-8")).hexdigest(),
+            result=result,
+            usage=summary.usage,
+            **self._v2_reply_fields(request),
+        )
+
     def _docker_authentication_is_ready(
         self,
         request: RunnerRequest,
@@ -435,8 +665,9 @@ class RunnerTurnExecutor:
             and command.stderr == _CHATGPT_LOGIN_STATUS
         )
 
-    @staticmethod
+    @classmethod
     def _failed_reply(
+        cls,
         request: RunnerRequest,
         error_code: str,
         *,
@@ -450,19 +681,38 @@ class RunnerTurnExecutor:
             RunnerTurnRemoteState.FAILED,
             session_id=session_id,
             error_code=error_code,
+            **cls._v2_reply_fields(request),
         )
 
-    @staticmethod
-    def _unknown_reply(request: RunnerRequest, error_code: str) -> RunnerTurnReply:
+    @classmethod
+    def _unknown_reply(
+        cls,
+        request: RunnerRequest,
+        error_code: str,
+        *,
+        session_id: str | None = None,
+    ) -> RunnerTurnReply:
         assert request.turn_id is not None
         return RunnerTurnReply(
             request.operation,
             request.work_item_id,
             request.turn_id,
             RunnerTurnRemoteState.UNKNOWN,
-            session_id=request.session_id,
+            session_id=session_id if session_id is not None else request.session_id,
             error_code=error_code,
+            **cls._v2_reply_fields(request),
         )
+
+    @staticmethod
+    def _v2_reply_fields(request: RunnerRequest) -> dict[str, object]:
+        if request.version != NEXT_PROTOCOL_VERSION:
+            return {}
+        return {
+            "session_generation_id": request.session_generation_id,
+            "session_generation": request.session_generation,
+            "agent_policy_digest": request.agent_policy_digest,
+            "version": request.version,
+        }
 
     @staticmethod
     def _record_path(state_directory: Path, turn_id: str) -> Path:
@@ -530,6 +780,10 @@ class RunnerTurnExecutor:
                 reply.operation is not request.operation
                 or reply.work_item_id != request.work_item_id
                 or reply.turn_id != request.turn_id
+                or reply.version != request.version
+                or reply.session_generation_id != request.session_generation_id
+                or reply.session_generation != request.session_generation
+                or reply.agent_policy_digest != request.agent_policy_digest
             ):
                 raise RunnerTurnError("Turn record reply identity is invalid")
         return _TurnRecord(request, payload["state"], reply)
@@ -559,6 +813,63 @@ class RunnerTurnExecutor:
                 temporary.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+class _ThreadStartedReceiptHook:
+    """Persist the first valid streamed v2 session identity before Turn exit."""
+
+    __slots__ = ("_context", "_request", "session_id")
+
+    def __init__(
+        self,
+        request: RunnerRequest,
+        context: DockerWorkItemContext,
+    ) -> None:
+        self._request = request
+        self._context = context
+        self.session_id: str | None = None
+
+    def __call__(self, raw_line: bytes) -> None:
+        if (
+            not isinstance(raw_line, bytes)
+            or not raw_line
+            or len(raw_line) > MAX_EVENT_BYTES
+            or b"\x00" in raw_line
+        ):
+            raise RunnerTurnError("streamed Codex event exceeds its safe boundary")
+        try:
+            event = json.loads(
+                raw_line.decode("utf-8"),
+                object_pairs_hook=_unique_object,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise RunnerTurnError("streamed Codex event is malformed") from exc
+        if not isinstance(event, dict):
+            raise RunnerTurnError("streamed Codex event is not an object")
+        event_type = event.get("type")
+        if not isinstance(event_type, str) or not event_type or len(event_type) > 128:
+            raise RunnerTurnError("streamed Codex event type is invalid")
+        if event_type != "thread.started":
+            return
+        if self.session_id is not None:
+            raise RunnerTurnError("streamed Codex session identity is duplicated")
+        try:
+            session_id = validate_session_id(event.get("thread_id"))
+        except ValueError as exc:
+            raise RunnerTurnError(
+                "streamed Codex session identity is invalid"
+            ) from exc
+        if (
+            self._request.session_id is not None
+            and session_id != self._request.session_id
+        ):
+            raise RunnerTurnError("streamed Codex session identity conflicts")
+        bind_docker_session(
+            self._context,
+            work_item_id=self._request.work_item_id,
+            session_id=session_id,
+        )
+        self.session_id = session_id
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

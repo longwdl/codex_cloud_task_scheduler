@@ -108,6 +108,7 @@ class RunningBinaryCommand:
 
 
 BinaryCommandStartedHook = Callable[[RunningBinaryCommand], None]
+BinaryCommandStdoutLineHook = Callable[[bytes], None]
 
 
 def run_command(
@@ -151,6 +152,7 @@ def run_binary_command(
     secrets: Sequence[str] = (),
     cwd: str | None = None,
     started_hook: BinaryCommandStartedHook | None = None,
+    stdout_line_hook: BinaryCommandStdoutLineHook | None = None,
 ) -> BinaryCommandResult:
     """Run fixed argv and return bounded bytes; callers must never log raw output."""
     normalized_argv = _validate_argv(argv)
@@ -162,6 +164,8 @@ def run_binary_command(
         raise TypeError("input_bytes must be bytes")
     if started_hook is not None and not callable(started_hook):
         raise TypeError("started_hook must be callable or None")
+    if stdout_line_hook is not None and not callable(stdout_line_hook):
+        raise TypeError("stdout_line_hook must be callable or None")
     command_env = _command_environment(env)
     try:
         process = subprocess.Popen(
@@ -186,10 +190,15 @@ def run_binary_command(
     stderr_buffer = bytearray()
     stdout_truncated = [False]
     stderr_truncated = [False]
+    stdout_hook_failed = [False]
     readers = [
         threading.Thread(
             target=_drain_bounded,
             args=(process.stdout, stdout_buffer, stdout_truncated, max_output_bytes),
+            kwargs={
+                "line_hook": stdout_line_hook,
+                "line_hook_failed": stdout_hook_failed,
+            },
             daemon=True,
         ),
         threading.Thread(
@@ -241,6 +250,8 @@ def run_binary_command(
         error = "command timed out"
     elif hook_failed:
         error = "command start hook failed"
+    elif stdout_hook_failed[0]:
+        error = "command stdout hook failed"
     return BinaryCommandResult(
         None if timed_out else process.returncode,
         bytes(stdout_buffer),
@@ -281,8 +292,16 @@ def _validate_argv(argv: Sequence[str]) -> list[str]:
 
 
 def _drain_bounded(
-    stream: BinaryIO, buffer: bytearray, truncated: list[bool], maximum: int
+    stream: BinaryIO,
+    buffer: bytearray,
+    truncated: list[bool],
+    maximum: int,
+    *,
+    line_hook: BinaryCommandStdoutLineHook | None = None,
+    line_hook_failed: list[bool] | None = None,
 ) -> None:
+    partial_line = bytearray()
+    observe_lines = line_hook is not None
     try:
         while chunk := stream.read(8192):
             remaining = maximum - len(buffer)
@@ -290,7 +309,38 @@ def _drain_bounded(
                 buffer.extend(chunk[:remaining])
             if len(chunk) > max(remaining, 0):
                 truncated[0] = True
+            if observe_lines:
+                line_start = 0
+                while line_start < len(chunk):
+                    newline_at = chunk.find(b"\n", line_start)
+                    line_end = len(chunk) if newline_at < 0 else newline_at
+                    line_remaining = maximum - len(partial_line)
+                    if line_remaining > 0:
+                        partial_line.extend(
+                            chunk[line_start:line_end][:line_remaining]
+                        )
+                    if newline_at < 0:
+                        break
+                    if partial_line:
+                        try:
+                            assert line_hook is not None
+                            line_hook(bytes(partial_line))
+                        except Exception:
+                            if line_hook_failed is not None:
+                                line_hook_failed[0] = True
+                            observe_lines = False
+                    partial_line.clear()
+                    if not observe_lines:
+                        break
+                    line_start = newline_at + 1
     finally:
+        if observe_lines and partial_line:
+            try:
+                assert line_hook is not None
+                line_hook(bytes(partial_line))
+            except Exception:
+                if line_hook_failed is not None:
+                    line_hook_failed[0] = True
         stream.close()
 
 

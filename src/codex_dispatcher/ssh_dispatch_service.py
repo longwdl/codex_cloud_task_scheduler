@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Iterable
 
 from codex_dispatcher.config import Config, RepositoryConfig
@@ -21,8 +22,10 @@ from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_dispatch_planning import (
     SshDispatchPlanningError,
     WorkItemAction,
+    build_ssh_generation_turn_plan,
     build_ssh_turn_plan,
     resolve_ssh_work_item,
+    validate_ssh_active_generation_continuity,
 )
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.trackers.base import Tracker, TrackerTask
@@ -32,7 +35,14 @@ from codex_dispatcher.turn_orchestration import (
     TurnOrchestrationError,
     TurnProgress,
 )
-from codex_dispatcher.work_items import WorkItem, WorkItemState
+from codex_dispatcher.work_items import (
+    SessionGeneration,
+    SessionGenerationRole,
+    SessionGenerationState,
+    Turn,
+    WorkItem,
+    WorkItemState,
+)
 
 
 class OfflineSshDispatchService:
@@ -127,6 +137,151 @@ class OfflineSshDispatchService:
         if work_item is None:
             raise SshDispatchPlanningError("Issue does not have a persisted WorkItem")
         turn_number = self._store.next_turn_number(work_item.work_item_id)
+        session_runtime = self._config.session_runtime
+        if session_runtime is not None:
+            generations = self._store.list_session_generations(work_item.work_item_id)
+            if len(generations) >= session_runtime.max_session_generations and not any(
+                generation.is_live for generation in generations
+            ):
+                raise SshDispatchPlanningError(
+                    "session generation budget is exhausted"
+                )
+            if turn_number > session_runtime.max_total_turns:
+                raise SshDispatchPlanningError("total Turn budget is exhausted")
+            generation = self._store.get_live_session_generation(
+                work_item.work_item_id
+            )
+            if generation is None:
+                generation = self._store.plan_session_generation(
+                    work_item.work_item_id,
+                    role=SessionGenerationRole.IMPLEMENTATION,
+                    policy_sha256=session_runtime.agent_policy_digest,
+                )
+            generation_turns = self._store.list_session_generation_turns(
+                generation.session_generation_id
+            )
+            prompt_inputs = self._store.list_session_generation_turn_prompt_inputs(
+                generation.session_generation_id
+            )
+            delivered_comment_ids: tuple[str, ...] = ()
+            delivered_context_sha256: str | None = None
+            prior_status: str | None = None
+            prior_summary: str | None = None
+            if generation.state is SessionGenerationState.PLANNED:
+                if generation_turns or prompt_inputs:
+                    raise SshDispatchPlanningError(
+                        "planned session generation already contains Turn state"
+                    )
+                if generation.policy_sha256 != session_runtime.agent_policy_digest:
+                    raise SshDispatchPlanningError(
+                        "planned session generation policy conflicts with configuration"
+                    )
+            elif generation.state is SessionGenerationState.ACTIVE:
+                is_legacy = generation.policy_sha256 is None
+                if is_legacy:
+                    if generation.rotation_reason != "legacy_migration":
+                        raise SshDispatchPlanningError(
+                            "policy-free generation is not an imported legacy session"
+                        )
+                else:
+                    if (
+                        not generation_turns
+                        or len(generation_turns) != len(prompt_inputs)
+                        or prompt_inputs[-1].turn_id != generation_turns[-1].turn_id
+                    ):
+                        raise SshDispatchPlanningError(
+                            "active session generation has incomplete prompt receipts"
+                        )
+                    prior_turn = generation_turns[-1]
+                    if (
+                        prior_turn.result_status is None
+                        or prior_turn.result_summary is None
+                    ):
+                        raise SshDispatchPlanningError(
+                            "active session generation has no prior structured result"
+                        )
+                    delivered_comment_ids = tuple(
+                        sorted(
+                            {
+                                comment_id
+                                for item in generation_turns
+                                for comment_id in item.included_comment_ids
+                            }
+                        )
+                    )
+                    delivered_context_sha256 = (
+                        prompt_inputs[-1].cumulative_approved_context_sha256
+                    )
+                    prior_status = prior_turn.result_status
+                    prior_summary = prior_turn.result_summary
+                    validate_ssh_active_generation_continuity(
+                        task=task,
+                        repository=repository,
+                        work_item=work_item,
+                        session_generation=generation,
+                        comments=comments,
+                        delivered_comment_ids=delivered_comment_ids,
+                        delivered_context_sha256=delivered_context_sha256,
+                    )
+
+                if generation.policy_sha256 != session_runtime.agent_policy_digest:
+                    rotation_reason = (
+                        "legacy_policy_activation" if is_legacy else "policy_changed"
+                    )
+                else:
+                    rotation_reason = self._rotation_reason(
+                        generation=generation,
+                        generation_turns=generation_turns,
+                    )
+                if rotation_reason is not None:
+                    if len(generations) >= session_runtime.max_session_generations:
+                        raise SshDispatchPlanningError(
+                            "session generation budget is exhausted before required rotation"
+                        )
+                    _, generation = self._store.rotate_session_generation(
+                        work_item.work_item_id,
+                        current_session_generation_id=(
+                            generation.session_generation_id
+                        ),
+                        current_generation_number=generation.generation_number,
+                        expected_current_policy_sha256=generation.policy_sha256,
+                        new_policy_sha256=session_runtime.agent_policy_digest,
+                        rotation_reason=rotation_reason,
+                    )
+                    generation_turns = ()
+                    prompt_inputs = ()
+                    delivered_comment_ids = ()
+                    delivered_context_sha256 = None
+                    prior_status = None
+                    prior_summary = None
+            else:
+                raise SshDispatchPlanningError(
+                    "live session generation is not eligible for a new Turn"
+                )
+            generation_plan = build_ssh_generation_turn_plan(
+                task=task,
+                repository=repository,
+                work_item=work_item,
+                session_generation=generation,
+                turn_number=turn_number,
+                agent_policy_digest=session_runtime.agent_policy_digest,
+                comments=comments,
+                delivered_comment_ids=delivered_comment_ids,
+                delivered_context_sha256=delivered_context_sha256,
+                prior_status=prior_status,
+                prior_summary=prior_summary,
+            )
+            return self._orchestrator.run_generation_turn(
+                work_item.work_item_id,
+                session_generation=generation,
+                issue_revision=generation_plan.issue_revision,
+                prompt=generation_plan.prompt,
+                prompt_kind=generation_plan.prompt_kind,
+                inputs=generation_plan.inputs,
+                issue_allowed_paths=generation_plan.task_spec.allowed_paths,
+                expected_turn_number=generation_plan.turn_number,
+                turn_id=turn_id,
+            )
         plan = build_ssh_turn_plan(
             task=task,
             repository=repository,
@@ -142,6 +297,62 @@ class OfflineSshDispatchService:
             expected_turn_number=plan.turn_number,
             turn_id=turn_id,
         )
+
+    def _rotation_reason(
+        self,
+        *,
+        generation: SessionGeneration,
+        generation_turns: tuple[Turn, ...],
+    ) -> str | None:
+        runtime = self._config.session_runtime
+        assert runtime is not None
+        if len(generation_turns) >= runtime.max_turns_per_session:
+            return "turn_budget"
+        if not runtime.use_incremental_resume_prompts and generation_turns:
+            return "incremental_prompts_disabled"
+        if generation_turns:
+            usage = self._store.get_turn_usage(generation_turns[-1].turn_id)
+            if usage is None:
+                raise SshDispatchPlanningError(
+                    "protocol-v2 Turn is missing its usage receipt"
+                )
+            if usage.input_tokens >= runtime.rotate_after_input_tokens:
+                return "context_pressure"
+            trailing_no_progress = 0
+            for turn in reversed(generation_turns):
+                if turn.output_head_sha != turn.input_head_sha:
+                    break
+                trailing_no_progress += 1
+            if trailing_no_progress >= runtime.max_no_progress_turns:
+                if generation.generation_number > 1:
+                    raise SshDispatchPlanningError(
+                        "no progress continued after a session rotation"
+                    )
+                return "no_progress"
+        if generation.started_at is None:
+            raise SshDispatchPlanningError(
+                "active session generation has no start timestamp"
+            )
+        try:
+            started_at = datetime.fromisoformat(
+                generation.started_at.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise SshDispatchPlanningError(
+                "session generation start timestamp is invalid"
+            ) from exc
+        if started_at.tzinfo is None:
+            raise SshDispatchPlanningError(
+                "session generation start timestamp is invalid"
+            )
+        age_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
+        if age_seconds < 0:
+            raise SshDispatchPlanningError(
+                "session generation start timestamp is in the future"
+            )
+        if age_seconds >= runtime.rotate_after_session_age_seconds:
+            return "session_age"
+        return None
 
     def publish_checkpoint(
         self,

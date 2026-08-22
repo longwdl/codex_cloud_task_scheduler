@@ -1,0 +1,27 @@
+allowed_web_search_modes = ["disabled"]
+allow_login_shell = false
+allow_managed_hooks_only = true
+allow_remote_control = false
+check_for_update_on_startup = false
+
+[mcp_servers]
+
+[plugins]
+
+[features]
+multi_agent = true
+apps = false
+plugins = false
+hooks = false
+memories = false
+browser_use = false
+browser_use_external = false
+browser_use_full_cdp_access = false
+computer_use = false
+image_generation = false
+in_app_browser = false
+in_app_updates = false
+plugin_sharing = false
+remote_plugin = false
+skill_mcp_dependency_install = false
+workspace_dependencies = false

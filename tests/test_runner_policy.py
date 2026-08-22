@@ -1,0 +1,116 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from hashlib import sha256
+from pathlib import Path
+
+from codex_dispatcher.runner_policy import PolicyBundle, PolicyBundleError
+
+
+_FILES = {
+    "config.toml": b'model = "gpt-5.6-sol"\n',
+    "requirements.toml": b'allowed_web_search_modes = ["disabled"]\n',
+    "agents/spark-worker.toml": b'name = "spark_worker"\n',
+    "agents/luna-worker.toml": b'name = "luna_worker"\n',
+    "agents/terra-worker.toml": b'name = "terra_worker"\n',
+    "agents/sol-specialist.toml": b'name = "sol_specialist"\n',
+}
+
+
+def make_bundle(root: Path) -> tuple[Path, str]:
+    bundle = root / "policy"
+    agents = bundle / "agents"
+    agents.mkdir(parents=True, mode=0o700)
+    file_hashes: dict[str, str] = {}
+    for relative, contents in _FILES.items():
+        target = bundle / relative
+        target.write_bytes(contents)
+        target.chmod(0o600)
+        file_hashes[relative] = sha256(contents).hexdigest()
+    digest = sha256(
+        json.dumps(file_hashes, sort_keys=True, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+    (bundle / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "codex_version": "0.147.0",
+                "policy_digest": digest,
+                "files": file_hashes,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (bundle / "manifest.json").chmod(0o600)
+    bundle.chmod(0o700)
+    agents.chmod(0o700)
+    return bundle, digest
+
+
+class PolicyBundleTests(unittest.TestCase):
+    def test_validates_exact_hash_pinned_bundle_and_revalidates_drift(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root, digest = make_bundle(Path(temp_dir))
+            bundle = PolicyBundle.load(root, digest)
+            self.assertEqual(root, bundle.root)
+            self.assertEqual(root / "agents", bundle.agents_path)
+
+            (root / "config.toml").write_text('model = "other"\n', encoding="utf-8")
+            with self.assertRaisesRegex(PolicyBundleError, "digest"):
+                bundle.validate()
+
+    def test_rejects_unknown_missing_and_symlinked_files(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root, digest = make_bundle(Path(temp_dir))
+            (root / "extra.toml").write_text("x = 1\n", encoding="utf-8")
+            (root / "extra.toml").chmod(0o600)
+            with self.assertRaisesRegex(PolicyBundleError, "unknown"):
+                PolicyBundle.load(root, digest)
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root, digest = make_bundle(Path(temp_dir))
+            (root / "agents" / "luna-worker.toml").unlink()
+            with self.assertRaisesRegex(PolicyBundleError, "unknown"):
+                PolicyBundle.load(root, digest)
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root, digest = make_bundle(Path(temp_dir))
+            target = root / "config.toml"
+            replacement = root / "replacement.toml"
+            target.replace(replacement)
+            target.symlink_to(replacement)
+            with self.assertRaisesRegex(PolicyBundleError, "unknown|trusted"):
+                PolicyBundle.load(root, digest)
+
+    def test_rejects_writable_paths_and_mismatched_digest(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root, digest = make_bundle(Path(temp_dir))
+            (root / "agents").chmod(0o770)
+            with self.assertRaisesRegex(PolicyBundleError, "protected"):
+                PolicyBundle.load(root, digest)
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root, digest = make_bundle(Path(temp_dir))
+            (root / "requirements.toml").chmod(0o622)
+            with self.assertRaisesRegex(PolicyBundleError, "protected"):
+                PolicyBundle.load(root, digest)
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root, _ = make_bundle(Path(temp_dir))
+            with self.assertRaisesRegex(PolicyBundleError, "does not match"):
+                PolicyBundle.load(root, "0" * 64)
+
+    def test_repository_artifact_has_correct_manifest_digest(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "config" / "runner-codex-policy"
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        bundle = PolicyBundle.load(root, manifest["policy_digest"])
+        self.assertEqual("gpt-5.6-sol", (root / "config.toml").read_text().splitlines()[0].split(" = ")[1].strip('"'))
+        self.assertEqual("0.147.0", manifest["codex_version"])
+        self.assertEqual(6, len(manifest["files"]))
+        bundle.validate()
+
+
+if __name__ == "__main__":
+    unittest.main()

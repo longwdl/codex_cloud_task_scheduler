@@ -1,11 +1,39 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 
-from codex_dispatcher.prompt_builder import build_prompt_snapshot, build_turn_prompt_snapshot
+from codex_dispatcher.prompt_builder import (
+    ApprovedContextItem,
+    build_canonical_input_snapshot,
+    build_generation_delta_prompt_snapshot,
+    build_generation_full_prompt_snapshot,
+    build_prompt_snapshot,
+    build_turn_prompt_snapshot,
+)
 from codex_dispatcher.task_spec import parse_task_spec
 from codex_dispatcher.trackers.base import TrackerComment
 from tests.test_task_spec import BODY
+
+
+WORK_ITEM_ID = "wi_" + "a" * 24
+GENERATION_ID = "sg_" + "b" * 32
+POLICY_DIGEST = "c" * 64
+HEAD_SHA = "d" * 40
+
+
+def generation_arguments() -> dict[str, object]:
+    return {
+        "work_item_id": WORK_ITEM_ID,
+        "session_generation_id": GENERATION_ID,
+        "session_generation": 2,
+        "agent_policy_digest": POLICY_DIGEST,
+        "turn_number": 3,
+        "issue_revision": "2026-08-22T01:02:03Z",
+        "repository": "owner/repo",
+        "branch": "codex/issue-42-aaaaaaaaaaaa",
+        "input_head_sha": HEAD_SHA,
+    }
 
 
 class PromptBuilderTests(unittest.TestCase):
@@ -84,6 +112,173 @@ class PromptBuilderTests(unittest.TestCase):
             maintainers=("alice",),
         )
         self.assertEqual(("IC_fixture",), snapshot.included_comment_ids)
+
+    def test_canonical_inputs_are_ordered_and_revision_independent(self) -> None:
+        spec = parse_task_spec(BODY)
+        comments = (
+            {"id": "IC_20", "author": "alice", "body": "/codex-context second"},
+            {"id": "IC_10", "author": "alice", "body": "/codex-context first"},
+            {"id": "IC_00", "author": "mallory", "body": "/codex-context ignored"},
+        )
+        first = build_canonical_input_snapshot(
+            issue_title="Implement parser",
+            task_spec=spec,
+            comments=comments,
+            maintainers=("alice",),
+        )
+        reordered = build_canonical_input_snapshot(
+            issue_title="Implement parser",
+            task_spec=spec,
+            comments=tuple(reversed(comments)),
+            maintainers=("alice",),
+        )
+
+        self.assertEqual(first, reordered)
+        self.assertEqual(("IC_10", "IC_20"), first.approved_comment_ids)
+        self.assertEqual(
+            ("/codex-context first", "/codex-context second"),
+            tuple(item.body for item in first.approved_items),
+        )
+        # Issue revision and labels are deliberately not inputs to this pure snapshot.
+        self.assertFalse(hasattr(first, "issue_revision"))
+        self.assertFalse(hasattr(first, "labels"))
+
+    def test_canonical_digests_detect_semantic_input_edits(self) -> None:
+        spec = parse_task_spec(BODY)
+        comment = {"id": "IC_1", "author": "alice", "body": "/codex-context original"}
+        baseline = build_canonical_input_snapshot(
+            issue_title="Implement parser",
+            task_spec=spec,
+            comments=(comment,),
+            maintainers=("alice",),
+        )
+        title_edit = build_canonical_input_snapshot(
+            issue_title="Implement safer parser",
+            task_spec=spec,
+            comments=(comment,),
+            maintainers=("alice",),
+        )
+        spec_edit = build_canonical_input_snapshot(
+            issue_title="Implement parser",
+            task_spec=replace(spec, objective=spec.objective + " now"),
+            comments=(comment,),
+            maintainers=("alice",),
+        )
+        comment_edit = build_canonical_input_snapshot(
+            issue_title="Implement parser",
+            task_spec=spec,
+            comments=(replace_comment_body(comment, "/codex-context edited"),),
+            maintainers=("alice",),
+        )
+
+        self.assertEqual(baseline.task_spec_sha256, title_edit.task_spec_sha256)
+        self.assertNotEqual(baseline.issue_content_sha256, title_edit.issue_content_sha256)
+        self.assertNotEqual(baseline.task_spec_sha256, spec_edit.task_spec_sha256)
+        self.assertNotEqual(baseline.issue_content_sha256, spec_edit.issue_content_sha256)
+        self.assertEqual(
+            baseline.issue_content_sha256,
+            comment_edit.issue_content_sha256,
+        )
+        self.assertNotEqual(
+            baseline.approved_context_sha256,
+            comment_edit.approved_context_sha256,
+        )
+
+    def test_generation_full_prompt_contains_complete_canonical_context(self) -> None:
+        inputs = build_canonical_input_snapshot(
+            issue_title="Implement parser",
+            task_spec=parse_task_spec(BODY),
+            comments=(
+                {"id": "IC_2", "author": "alice", "body": "/codex-context second"},
+                {"id": "IC_1", "author": "alice", "body": "/codex-context first"},
+                {"id": "IC_3", "author": "mallory", "body": "/codex-context ignored"},
+            ),
+            maintainers=("alice",),
+        )
+        prompt = build_generation_full_prompt_snapshot(
+            **generation_arguments(),
+            inputs=inputs,
+        )
+
+        self.assertEqual(("IC_1", "IC_2"), prompt.included_comment_ids)
+        self.assertIn(f"Session Generation ID: {GENERATION_ID}", prompt.content)
+        self.assertIn("Session Generation: 2", prompt.content)
+        self.assertIn(f"Agent policy digest: {POLICY_DIGEST}", prompt.content)
+        self.assertIn("## Issue title\nImplement parser", prompt.content)
+        self.assertIn("## Task snapshot\n### 目标", prompt.content)
+        self.assertIn("/codex-context first", prompt.content)
+        self.assertIn("/codex-context second", prompt.content)
+        self.assertNotIn("ignored", prompt.content)
+        self.assertIn(inputs.issue_content_sha256, prompt.content)
+        self.assertIn("Do not push, merge, deploy", prompt.content)
+
+    def test_generation_delta_contains_only_explicit_new_context(self) -> None:
+        inputs = build_canonical_input_snapshot(
+            issue_title="Full title must not repeat",
+            task_spec=parse_task_spec(BODY),
+            comments=(
+                {"id": "IC_old", "author": "alice", "body": "/codex-context old body"},
+                {"id": "IC_new", "author": "alice", "body": "/codex-context new body"},
+            ),
+            maintainers=("alice",),
+        )
+        new_item = next(
+            item for item in inputs.approved_items if item.comment_id == "IC_new"
+        )
+        prompt = build_generation_delta_prompt_snapshot(
+            **generation_arguments(),
+            inputs=inputs,
+            prior_status="needs_input",
+            prior_summary="Waiting for the parser format decision",
+            new_approved_items=(new_item,),
+        )
+
+        self.assertEqual(("IC_new",), prompt.included_comment_ids)
+        self.assertIn("Status: needs_input", prompt.content)
+        self.assertIn("Waiting for the parser format decision", prompt.content)
+        self.assertIn("/codex-context new body", prompt.content)
+        self.assertNotIn("/codex-context old body", prompt.content)
+        self.assertNotIn("Full title must not repeat", prompt.content)
+        self.assertNotIn("## Task snapshot", prompt.content)
+        self.assertNotIn("### 目标", prompt.content)
+        self.assertIn(inputs.task_spec_sha256, prompt.content)
+        self.assertIn(inputs.issue_content_sha256, prompt.content)
+        self.assertIn(inputs.approved_context_sha256, prompt.content)
+        self.assertIn("Do not push, merge, deploy", prompt.content)
+
+        with self.assertRaisesRegex(ValueError, "exact items"):
+            build_generation_delta_prompt_snapshot(
+                **generation_arguments(),
+                inputs=inputs,
+                prior_status="completed",
+                prior_summary="Done",
+                new_approved_items=(
+                    ApprovedContextItem("IC_new", "/codex-context altered"),
+                ),
+            )
+
+    def test_existing_v1_turn_prompt_remains_byte_for_byte_unchanged(self) -> None:
+        snapshot = build_turn_prompt_snapshot(
+            work_item_id=WORK_ITEM_ID,
+            turn_number=2,
+            issue_revision="revision-2",
+            repository="owner/repo",
+            branch="codex/issue-42-aaaaaaaaaaaa",
+            input_head_sha="b" * 40,
+            issue_title="Continue the same task",
+            task_spec=parse_task_spec(BODY),
+            comments=(),
+            maintainers=("alice",),
+        )
+
+        self.assertEqual(
+            "164f0da2552b89f2222c5193191397e52542059f309225852aaa15d7d2055102",
+            snapshot.sha256,
+        )
+
+
+def replace_comment_body(comment: dict[str, object], body: str) -> dict[str, object]:
+    return {**comment, "body": body}
 
 
 if __name__ == "__main__":

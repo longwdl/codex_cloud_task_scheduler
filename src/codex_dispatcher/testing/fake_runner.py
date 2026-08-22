@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 
 from codex_dispatcher.publisher import VerifiedBundle
+from codex_dispatcher.codex_jsonl import CodexTurnUsage
 from codex_dispatcher.runner_protocol import (
     AgentResult,
+    NEXT_PROTOCOL_VERSION,
     RunnerOperation,
     RunnerRequest,
     agent_result_to_json,
@@ -38,6 +40,10 @@ class FakeRunnerCall:
     turn_id: str | None
     stdin_sha256: str | None
     stdin_size: int
+    version: int = 1
+    session_generation_id: str | None = None
+    session_generation: int | None = None
+    agent_policy_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +52,15 @@ class FakeTurnFixture:
     head_sha: str
     result: AgentResult
     artifact: bytes | None = None
+    usage: CodexTurnUsage = CodexTurnUsage(0, 0, 0, 0, 0)
+
+
+@dataclass(slots=True)
+class _RunnerGeneration:
+    session_generation_id: str
+    generation_number: int
+    policy_digest: str
+    session_id: str
 
 
 @dataclass(slots=True)
@@ -56,6 +71,7 @@ class _RunnerWorkItem:
     base_sha: str
     head_sha: str
     session_id: str | None = None
+    generations: dict[int, _RunnerGeneration] = field(default_factory=dict)
 
 
 class FakeSshRunnerTransport:
@@ -105,6 +121,10 @@ class FakeSshRunnerTransport:
                 request.turn_id,
                 prompt_digest,
                 len(stdin),
+                request.version,
+                request.session_generation_id,
+                request.session_generation,
+                request.agent_policy_digest,
             )
         )
 
@@ -165,27 +185,71 @@ class FakeSshRunnerTransport:
         if not fixtures:
             raise RunnerTransportRejected("fake Runner has no configured Turn result")
         fixture = fixtures.popleft()
-        if request.operation is RunnerOperation.START:
-            if current.session_id is not None or request.session_id is not None:
-                raise RunnerTransportRejected("fake Runner cannot start a replacement session")
-            current.session_id = fixture.session_id
+        if request.version == NEXT_PROTOCOL_VERSION:
+            assert request.session_generation_id is not None
+            assert request.session_generation is not None
+            assert request.agent_policy_digest is not None
+            highest = max(current.generations, default=0)
+            if request.operation is RunnerOperation.START:
+                if request.session_id is not None or request.session_generation <= highest:
+                    raise RunnerTransportRejected(
+                        "fake Runner cannot start an old or existing generation"
+                    )
+                generation = _RunnerGeneration(
+                    request.session_generation_id,
+                    request.session_generation,
+                    request.agent_policy_digest,
+                    fixture.session_id,
+                )
+                current.generations[request.session_generation] = generation
+            else:
+                generation = current.generations.get(request.session_generation)
+                if (
+                    generation is None
+                    or request.session_generation != highest
+                    or generation.session_generation_id
+                    != request.session_generation_id
+                    or generation.policy_digest != request.agent_policy_digest
+                    or request.session_id != generation.session_id
+                    or fixture.session_id != generation.session_id
+                ):
+                    raise RunnerTransportRejected(
+                        "fake Runner resume generation conflict"
+                    )
+            session_id = generation.session_id
         else:
-            if (
+            if request.operation is RunnerOperation.START:
+                if current.session_id is not None or request.session_id is not None:
+                    raise RunnerTransportRejected(
+                        "fake Runner cannot start a replacement session"
+                    )
+                current.session_id = fixture.session_id
+            elif (
                 current.session_id is None
                 or request.session_id != current.session_id
                 or fixture.session_id != current.session_id
             ):
                 raise RunnerTransportRejected("fake Runner resume session conflict")
+            session_id = current.session_id
         result_json = agent_result_to_json(fixture.result)
         reply = RunnerTurnReply(
             operation=request.operation,
             work_item_id=request.work_item_id,
             turn_id=request.turn_id,
             state=RunnerTurnRemoteState.FINISHED,
-            session_id=current.session_id,
+            session_id=session_id,
             head_sha=fixture.head_sha,
             output_sha256=sha256(result_json.encode("utf-8")).hexdigest(),
             result=fixture.result,
+            version=request.version,
+            session_generation_id=request.session_generation_id,
+            session_generation=request.session_generation,
+            agent_policy_digest=request.agent_policy_digest,
+            usage=(
+                fixture.usage
+                if request.version == NEXT_PROTOCOL_VERSION
+                else None
+            ),
         )
         current.head_sha = fixture.head_sha
         self._turn_replies[(request.work_item_id, request.turn_id)] = reply
@@ -215,6 +279,23 @@ class FakeSshRunnerTransport:
                 output_sha256=reply.output_sha256,
                 result=reply.result,
                 error_code=reply.error_code,
+                version=reply.version,
+                session_generation_id=reply.session_generation_id,
+                session_generation=reply.session_generation,
+                agent_policy_digest=reply.agent_policy_digest,
+                usage=reply.usage,
+            )
+        if reply is None and request.version == NEXT_PROTOCOL_VERSION:
+            observed = RunnerTurnReply(
+                operation=RunnerOperation.STATUS,
+                work_item_id=request.work_item_id,
+                turn_id=request.turn_id,
+                state=RunnerTurnRemoteState.UNKNOWN,
+                error_code="turn_not_found",
+                version=request.version,
+                session_generation_id=request.session_generation_id,
+                session_generation=request.session_generation,
+                agent_policy_digest=request.agent_policy_digest,
             )
         return RunnerWireOutput(observed.to_json().encode("utf-8"))
 

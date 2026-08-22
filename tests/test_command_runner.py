@@ -138,6 +138,77 @@ class CommandRunnerTests(unittest.TestCase):
         self.assertEqual(0, result.returncode)
         self.assertFalse(result.timed_out)
 
+    def test_stdout_line_hook_observes_complete_lines_in_order(self) -> None:
+        observed = []
+        result = run_binary_command(
+            [
+                sys.executable,
+                "-c",
+                "import os,time; "
+                "parts=(b'fir',b'st\\n\\nsec',b'ond\\nfin',b'al'); "
+                "[(os.write(1, part), time.sleep(0.01)) for part in parts]",
+            ],
+            stdout_line_hook=observed.append,
+        )
+
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(b"first\n\nsecond\nfinal", result.stdout)
+        self.assertEqual([b"first", b"second", b"final"], observed)
+        self.assertIsNone(result.error)
+
+    def test_stdout_line_hook_failure_does_not_stop_drain_or_process(self) -> None:
+        observed = []
+
+        def fail_once(line: bytes) -> None:
+            observed.append(line)
+            raise RuntimeError("must not escape or be reported")
+
+        result = run_binary_command(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write(b'one\\ntwo\\nthree')",
+            ],
+            stdout_line_hook=fail_once,
+        )
+
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(b"one\ntwo\nthree", result.stdout)
+        self.assertEqual([b"one"], observed)
+        self.assertFalse(result.timed_out)
+        self.assertEqual("command stdout hook failed", result.error)
+
+    def test_stdout_line_hook_unterminated_line_is_bounded(self) -> None:
+        observed = []
+        result = run_binary_command(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write(b'x' * 100000)",
+            ],
+            max_output_bytes=17,
+            stdout_line_hook=observed.append,
+        )
+
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(b"x" * 17, result.stdout)
+        self.assertTrue(result.stdout_truncated)
+        self.assertEqual([b"x" * 17], observed)
+
+    def test_stdout_line_hook_timeout_error_takes_precedence(self) -> None:
+        result = run_binary_command(
+            [
+                sys.executable,
+                "-c",
+                "import sys,time; print('one', flush=True); time.sleep(30)",
+            ],
+            timeout_seconds=0.05,
+            stdout_line_hook=lambda line: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        self.assertTrue(result.timed_out)
+        self.assertEqual("command timed out", result.error)
+
 
 if __name__ == "__main__":
     unittest.main()

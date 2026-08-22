@@ -9,6 +9,7 @@ from hashlib import sha256
 from typing import Any, Protocol
 
 from codex_dispatcher.runner_protocol import (
+    NEXT_PROTOCOL_VERSION,
     PROTOCOL_VERSION,
     AgentResult,
     RunnerOperation,
@@ -18,9 +19,11 @@ from codex_dispatcher.runner_protocol import (
     agent_result_to_mapping,
     parse_agent_result,
 )
+from codex_dispatcher.codex_jsonl import CodexTurnUsage
 from codex_dispatcher.work_items import (
     validate_git_sha,
     validate_session_id,
+    validate_session_generation_id,
     validate_sha256,
     validate_turn_id,
     validate_work_item_id,
@@ -133,6 +136,10 @@ class RunnerTurnReply:
     output_sha256: str | None = None
     result: AgentResult | None = None
     error_code: str | None = None
+    session_generation_id: str | None = None
+    session_generation: int | None = None
+    agent_policy_digest: str | None = None
+    usage: CodexTurnUsage | None = None
     version: int = PROTOCOL_VERSION
 
     def __post_init__(self) -> None:
@@ -142,7 +149,10 @@ class RunnerTurnReply:
             RunnerOperation.STATUS,
         }:
             raise RunnerProtocolError("operation does not return a Turn reply")
-        if type(self.version) is not int or self.version != PROTOCOL_VERSION:
+        if type(self.version) is not int or self.version not in {
+            PROTOCOL_VERSION,
+            NEXT_PROTOCOL_VERSION,
+        }:
             raise RunnerProtocolError("unsupported Runner response version")
         validate_work_item_id(self.work_item_id)
         validate_turn_id(self.turn_id)
@@ -161,6 +171,31 @@ class RunnerTurnReply:
             or any(ord(character) < 32 or ord(character) == 127 for character in self.error_code)
         ):
             raise RunnerProtocolError("Runner error_code is invalid")
+        if self.version == NEXT_PROTOCOL_VERSION:
+            if self.session_generation_id is None:
+                raise RunnerProtocolError("v2 Runner Turn requires session_generation_id")
+            try:
+                validate_session_generation_id(self.session_generation_id)
+            except ValueError as exc:
+                raise RunnerProtocolError(str(exc)) from exc
+            if type(self.session_generation) is not int or self.session_generation <= 0:
+                raise RunnerProtocolError("v2 Runner Turn requires a positive session_generation")
+            if self.agent_policy_digest is None:
+                raise RunnerProtocolError("v2 Runner Turn requires agent_policy_digest")
+            try:
+                validate_sha256(self.agent_policy_digest, "agent_policy_digest")
+            except ValueError as exc:
+                raise RunnerProtocolError(str(exc)) from exc
+        elif any(
+            value is not None
+            for value in (
+                self.session_generation_id,
+                self.session_generation,
+                self.agent_policy_digest,
+                self.usage,
+            )
+        ):
+            raise RunnerProtocolError("v1 Runner Turn cannot contain v2 fields")
 
         final_fields = (self.head_sha, self.output_sha256, self.result)
         if self.state is RunnerTurnRemoteState.FINISHED:
@@ -172,14 +207,22 @@ class RunnerTurnReply:
             canonical = agent_result_to_json(self.result)
             if sha256(canonical.encode("utf-8")).hexdigest() != self.output_sha256:
                 raise RunnerProtocolError("Runner result hash does not match its canonical JSON")
+            if self.version == NEXT_PROTOCOL_VERSION:
+                _validate_usage(self.usage)
+            elif self.usage is not None:
+                raise RunnerProtocolError("v1 finished Runner Turn cannot contain usage")
         elif self.state is RunnerTurnRemoteState.RUNNING:
             if self.session_id is None or any(value is not None for value in final_fields):
                 raise RunnerProtocolError("running Runner Turn fields are invalid")
             if self.error_code is not None:
                 raise RunnerProtocolError("running Runner Turn cannot contain error_code")
+            if self.usage is not None:
+                raise RunnerProtocolError("running Runner Turn cannot contain usage")
         else:
             if any(value is not None for value in final_fields) or self.error_code is None:
                 raise RunnerProtocolError("failed or unknown Runner Turn fields are invalid")
+            if self.usage is not None:
+                raise RunnerProtocolError("failed or unknown Runner Turn cannot contain usage")
 
     def to_json(self) -> str:
         payload: dict[str, object] = {
@@ -198,6 +241,10 @@ class RunnerTurnReply:
                 agent_result_to_mapping(self.result) if self.result is not None else None,
             ),
             ("error_code", self.error_code),
+            ("session_generation_id", self.session_generation_id),
+            ("session_generation", self.session_generation),
+            ("agent_policy_digest", self.agent_policy_digest),
+            ("usage", _usage_to_mapping(self.usage) if self.usage is not None else None),
         )
         payload.update((name, value) for name, value in optional if value is not None)
         return _dump(payload)
@@ -205,6 +252,12 @@ class RunnerTurnReply:
 
 def parse_runner_turn_reply(value: str | bytes) -> RunnerTurnReply:
     payload = _load(value)
+    version = payload.get("version")
+    if type(version) is not int or version not in {
+        PROTOCOL_VERSION,
+        NEXT_PROTOCOL_VERSION,
+    }:
+        raise RunnerProtocolError("unsupported Runner response version")
     base = {"version", "op", "work_item_id", "turn_id", "state"}
     try:
         state = RunnerTurnRemoteState(payload.get("state"))
@@ -221,6 +274,14 @@ def parse_runner_turn_reply(value: str | bytes) -> RunnerTurnReply:
         "session_id" in payload
     ):
         expected = expected | {"session_id"}
+    if version == NEXT_PROTOCOL_VERSION:
+        expected = expected | {
+            "session_generation_id",
+            "session_generation",
+            "agent_policy_digest",
+        }
+        if state is RunnerTurnRemoteState.FINISHED:
+            expected = expected | {"usage"}
     if set(payload) != expected:
         raise RunnerProtocolError("Runner Turn response fields are invalid")
     result: AgentResult | None = None
@@ -237,10 +298,59 @@ def parse_runner_turn_reply(value: str | bytes) -> RunnerTurnReply:
             output_sha256=payload.get("output_sha256"),
             result=result,
             error_code=payload.get("error_code"),
-            version=payload["version"],
+            session_generation_id=payload.get("session_generation_id"),
+            session_generation=payload.get("session_generation"),
+            agent_policy_digest=payload.get("agent_policy_digest"),
+            usage=_usage_from_mapping(payload.get("usage")) if "usage" in payload else None,
+            version=version,
         )
     except (TypeError, ValueError) as exc:
         raise RunnerProtocolError(str(exc)) from exc
+
+
+def _usage_to_mapping(usage: CodexTurnUsage) -> dict[str, int]:
+    _validate_usage(usage)
+    return {
+        "input_tokens": usage.input_tokens,
+        "cached_input_tokens": usage.cached_input_tokens,
+        "cache_write_input_tokens": usage.cache_write_input_tokens,
+        "output_tokens": usage.output_tokens,
+        "reasoning_output_tokens": usage.reasoning_output_tokens,
+    }
+
+
+def _usage_from_mapping(value: object) -> CodexTurnUsage:
+    if not isinstance(value, dict):
+        raise RunnerProtocolError("Runner Turn usage is invalid")
+    expected = {
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+    }
+    if set(value) != expected:
+        raise RunnerProtocolError("Runner Turn usage is invalid")
+    try:
+        usage = CodexTurnUsage(**value)
+    except TypeError as exc:
+        raise RunnerProtocolError("Runner Turn usage is invalid") from exc
+    _validate_usage(usage)
+    return usage
+
+
+def _validate_usage(usage: CodexTurnUsage | None) -> None:
+    if not isinstance(usage, CodexTurnUsage):
+        raise RunnerProtocolError("finished v2 Runner Turn requires usage")
+    for value in (
+        usage.input_tokens,
+        usage.cached_input_tokens,
+        usage.cache_write_input_tokens,
+        usage.output_tokens,
+        usage.reasoning_output_tokens,
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise RunnerProtocolError("Runner Turn usage is invalid")
 
 
 @dataclass(frozen=True, slots=True)

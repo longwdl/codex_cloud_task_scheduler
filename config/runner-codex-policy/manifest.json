@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "codex_version": "0.147.0",
+  "policy_digest": "aee28c32453302778b4bcc35d11515841e293a82aa33fe3becd4d6d0e2070bb5",
+  "files": {
+    "agents/luna-worker.toml": "2342e6a895420068d72b7782fba90f1e675ec186526cb131a7f8490be6dd5625",
+    "agents/sol-specialist.toml": "72aedaa68227e28ff56c5edee771da5deeeda85cc3d76605db850f95e5b888af",
+    "agents/spark-worker.toml": "41e12e65059872ce112973975f4de0b655eae3449cf45c1ad4b93dca3911ff9e",
+    "agents/terra-worker.toml": "a79a6818ff118bf2ba7703a63ab7b30b56f70e38a9b183f54155f66cda0b352b",
+    "config.toml": "b79fc9e80f50c0bc9adfec85325a06d3dac0861798c280ad90ca9c255c57f134",
+    "requirements.toml": "e5c03e5d09b2481a64c2a5cc72dabe47ca48bfa5f3d5bfc2debc24d2ddedac67"
+  }
+}

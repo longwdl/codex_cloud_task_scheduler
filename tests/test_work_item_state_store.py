@@ -9,6 +9,9 @@ from pathlib import Path
 
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.work_items import (
+    PromptKind,
+    SessionGenerationRole,
+    SessionGenerationState,
     TaskBranchSource,
     TurnState,
     WorkItem,
@@ -66,7 +69,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
                 legacy_runs = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
-                self.assertEqual([(1,), (2,), (3,), (4,), (5,), (6,)], versions)
+                self.assertEqual([(1,), (2,), (3,), (4,), (5,), (6,), (7,)], versions)
             self.assertEqual(0, legacy_runs)
 
     def test_additive_migration_persists_one_issue_identity_and_bindings(self) -> None:
@@ -132,7 +135,555 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 versions = connection.execute(
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
-                self.assertEqual([(1,), (2,), (3,), (4,), (5,), (6,)], versions)
+                self.assertEqual([(1,), (2,), (3,), (4,), (5,), (6,), (7,)], versions)
+
+    def test_session_generation_ledger_is_atomic_and_turn_binding_is_immutable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                item = make_ready(store, make_item(11))
+                generation = store.plan_session_generation(
+                    item.work_item_id,
+                    role=SessionGenerationRole.IMPLEMENTATION,
+                    policy_sha256="c" * 64,
+                )
+                self.assertEqual(1, generation.generation_number)
+                self.assertEqual(SessionGenerationState.PLANNED, generation.state)
+                self.assertEqual(generation, store.get_live_session_generation(item.work_item_id))
+                with self.assertRaises(sqlite3.IntegrityError):
+                    store.plan_session_generation(
+                        item.work_item_id,
+                        role=SessionGenerationRole.AUDIT,
+                        policy_sha256="d" * 64,
+                    )
+                with self.assertRaisesRegex(ValueError, "requires a baseline"):
+                    store.transition_session_generation(
+                        generation.session_generation_id, SessionGenerationState.STARTING
+                    )
+                baseline = store.record_session_generation_baseline(
+                    generation.session_generation_id,
+                    issue_revision="issue-revision-1",
+                    issue_content_sha256="d" * 64,
+                    task_spec_sha256="e" * 64,
+                    prompt_sha256="f" * 64,
+                    approved_comment_ids=("IC_baseline_1",),
+                    approved_context_sha256="1" * 64,
+                )
+                self.assertEqual("d" * 64, baseline.baseline_issue_content_sha256)
+                self.assertEqual(("IC_baseline_1",), baseline.baseline_approved_comment_ids)
+                self.assertEqual(
+                    baseline,
+                    store.record_session_generation_baseline(
+                        generation.session_generation_id,
+                        issue_revision="issue-revision-1",
+                        issue_content_sha256="d" * 64,
+                        task_spec_sha256="e" * 64,
+                        prompt_sha256="f" * 64,
+                        approved_comment_ids=("IC_baseline_1",),
+                        approved_context_sha256="1" * 64,
+                    ),
+                )
+                with self.assertRaisesRegex(ValueError, "different baseline"):
+                    store.record_session_generation_baseline(
+                        generation.session_generation_id,
+                        issue_revision="issue-revision-1",
+                        issue_content_sha256="2" * 64,
+                        task_spec_sha256="e" * 64,
+                        prompt_sha256="f" * 64,
+                        approved_comment_ids=("IC_baseline_1",),
+                        approved_context_sha256="1" * 64,
+                    )
+                starting = store.transition_session_generation(
+                    generation.session_generation_id, SessionGenerationState.STARTING
+                )
+                self.assertIsNotNone(starting.started_at)
+                with self.assertRaisesRegex(ValueError, "requires a Codex session"):
+                    store.transition_session_generation(
+                        generation.session_generation_id, SessionGenerationState.ACTIVE
+                    )
+                bound = store.bind_session_generation_codex_session(
+                    starting.session_generation_id, SESSION
+                )
+                self.assertEqual(
+                    bound,
+                    store.transition_session_generation(
+                        generation.session_generation_id, SessionGenerationState.STARTING
+                    ),
+                )
+                active = store.transition_session_generation(
+                    generation.session_generation_id, SessionGenerationState.ACTIVE
+                )
+                self.assertEqual(SESSION, active.codex_session_id)
+                self.assertEqual(
+                    active,
+                    store.bind_session_generation_codex_session(
+                        active.session_generation_id, SESSION
+                    ),
+                )
+                with self.assertRaisesRegex(ValueError, "different Codex session"):
+                    store.bind_session_generation_codex_session(
+                        active.session_generation_id, "123e4567-e89b-12d3-a456-426614174001"
+                    )
+                published = store.record_session_generation_published_sha(
+                    active.session_generation_id,
+                    previous_sha="a" * 40,
+                    head_sha="b" * 40,
+                )
+                self.assertEqual("b" * 40, published.last_published_sha)
+                self.assertEqual(
+                    published,
+                    store.record_session_generation_published_sha(
+                        active.session_generation_id,
+                        previous_sha="a" * 40,
+                        head_sha="b" * 40,
+                    ),
+                )
+                with self.assertRaisesRegex(ValueError, "publication anchor"):
+                    store.record_session_generation_published_sha(
+                        active.session_generation_id,
+                        previous_sha="a" * 40,
+                        head_sha="c" * 40,
+                    )
+                retiring = store.transition_session_generation(
+                    active.session_generation_id, SessionGenerationState.RETIRING
+                )
+                retired = store.transition_session_generation(
+                    retiring.session_generation_id, SessionGenerationState.RETIRED
+                )
+                self.assertIsNotNone(retired.retired_at)
+                second = store.plan_session_generation(
+                    item.work_item_id,
+                    role=SessionGenerationRole.AUDIT,
+                    policy_sha256="d" * 64,
+                )
+                self.assertEqual(2, second.generation_number)
+                turn = store.plan_turn(
+                    item.work_item_id,
+                    turn_id="turn_" + "a" * 32,
+                    issue_revision="generation-binding",
+                    prompt_sha256="b" * 64,
+                    input_head_sha="a" * 40,
+                )
+                with self.assertRaisesRegex(ValueError, "terminal session generation"):
+                    store.bind_turn_session_generation(turn.turn_id, retired.session_generation_id)
+                self.assertEqual(
+                    second,
+                    store.bind_turn_session_generation(
+                        turn.turn_id, second.session_generation_id
+                    ),
+                )
+                self.assertEqual(second, store.get_turn_session_generation(turn.turn_id))
+                with self.assertRaisesRegex(ValueError, "different session generation"):
+                    store.bind_turn_session_generation(turn.turn_id, retired.session_generation_id)
+
+    def test_session_generation_transitions_and_usage_are_strict_and_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                item = make_ready(store, make_item(12))
+                generation = store.plan_session_generation(
+                    item.work_item_id,
+                    role=SessionGenerationRole.IMPLEMENTATION,
+                    policy_sha256="c" * 64,
+                )
+                with self.assertRaisesRegex(Exception, "cannot transition"):
+                    store.transition_session_generation(
+                        generation.session_generation_id, SessionGenerationState.ACTIVE
+                    )
+                failed = store.transition_session_generation(
+                    generation.session_generation_id, SessionGenerationState.FAILED
+                )
+                self.assertIsNone(failed.started_at)
+                self.assertIsNotNone(failed.retired_at)
+                with self.assertRaisesRegex(ValueError, "starting or active"):
+                    store.bind_session_generation_codex_session(
+                        failed.session_generation_id, SESSION
+                    )
+                turn = store.plan_turn(
+                    item.work_item_id,
+                    turn_id="turn_" + "b" * 32,
+                    issue_revision="usage",
+                    prompt_sha256="b" * 64,
+                    input_head_sha="a" * 40,
+                )
+                with self.assertRaisesRegex(ValueError, "terminal session generation"):
+                    store.bind_turn_session_generation(turn.turn_id, failed.session_generation_id)
+                usage = store.record_turn_usage(
+                    turn.turn_id,
+                    input_tokens=100,
+                    cached_input_tokens=10,
+                    cache_write_input_tokens=5,
+                    output_tokens=20,
+                    reasoning_output_tokens=7,
+                )
+                self.assertEqual(usage, store.get_turn_usage(turn.turn_id))
+                self.assertEqual(
+                    usage,
+                    store.record_turn_usage(
+                        turn.turn_id,
+                        input_tokens=100,
+                        cached_input_tokens=10,
+                        cache_write_input_tokens=5,
+                        output_tokens=20,
+                        reasoning_output_tokens=7,
+                    ),
+                )
+                with self.assertRaisesRegex(ValueError, "different recorded usage"):
+                    store.record_turn_usage(
+                        turn.turn_id,
+                        input_tokens=101,
+                        cached_input_tokens=10,
+                        cache_write_input_tokens=5,
+                        output_tokens=20,
+                        reasoning_output_tokens=7,
+                    )
+                with self.assertRaisesRegex(ValueError, "non-negative"):
+                    store.record_turn_usage(
+                        turn.turn_id,
+                        input_tokens=-1,
+                        cached_input_tokens=0,
+                        cache_write_input_tokens=0,
+                        output_tokens=0,
+                        reasoning_output_tokens=0,
+                    )
+
+    def test_begin_generation_turn_is_atomic_and_persists_prompt_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                item = make_ready(store, make_item(15))
+                generation = store.plan_session_generation(
+                    item.work_item_id,
+                    role=SessionGenerationRole.IMPLEMENTATION,
+                    policy_sha256="c" * 64,
+                )
+                with self.assertRaisesRegex(ValueError, "non-empty"):
+                    store.begin_session_generation_turn(
+                        item.work_item_id,
+                        session_generation_id=generation.session_generation_id,
+                        generation_number=1,
+                        policy_sha256="c" * 64,
+                        prompt_kind=PromptKind.FULL,
+                        issue_revision="revision",
+                        issue_content_sha256="d" * 64,
+                        task_spec_sha256="e" * 64,
+                        prompt_sha256="f" * 64,
+                        approved_comment_ids=("IC_fixture",),
+                        approved_context_sha256="1" * 64,
+                        issue_allowed_paths=(),
+                        input_head_sha="a" * 40,
+                    )
+                self.assertEqual((), store.list_turns(item.work_item_id))
+                self.assertEqual(SessionGenerationState.PLANNED, store.get_session_generation(
+                    generation.session_generation_id
+                ).state)
+                running, starting, turn, prompt_input = store.begin_session_generation_turn(
+                    item.work_item_id,
+                    session_generation_id=generation.session_generation_id,
+                    generation_number=1,
+                    policy_sha256="c" * 64,
+                    prompt_kind=PromptKind.FULL,
+                    issue_revision="revision",
+                    issue_content_sha256="d" * 64,
+                    task_spec_sha256="e" * 64,
+                    prompt_sha256="f" * 64,
+                    approved_comment_ids=("IC_fixture",),
+                    approved_context_sha256="1" * 64,
+                    issue_allowed_paths=("src",),
+                    input_head_sha="a" * 40,
+                )
+                self.assertEqual(WorkItemState.RUNNING, running.state)
+                self.assertEqual(SessionGenerationState.STARTING, starting.state)
+                self.assertEqual(TurnState.STARTING, turn.state)
+                self.assertEqual(PromptKind.FULL, prompt_input.prompt_kind)
+                self.assertEqual(prompt_input, store.get_turn_prompt_input(turn.turn_id))
+                self.assertEqual(
+                    (turn,),
+                    store.list_session_generation_turns(generation.session_generation_id),
+                )
+
+    def test_rotate_session_generation_is_atomic_and_requires_idle_ready_work_item(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                item = make_ready(store, make_item(16))
+                current = store.plan_session_generation(
+                    item.work_item_id,
+                    role=SessionGenerationRole.IMPLEMENTATION,
+                    policy_sha256="c" * 64,
+                )
+                store.record_session_generation_baseline(
+                    current.session_generation_id,
+                    issue_revision="revision",
+                    issue_content_sha256="d" * 64,
+                    task_spec_sha256="e" * 64,
+                    prompt_sha256="f" * 64,
+                    approved_comment_ids=("IC_fixture",),
+                    approved_context_sha256="1" * 64,
+                )
+                store.transition_session_generation(
+                    current.session_generation_id, SessionGenerationState.STARTING
+                )
+                store.bind_session_generation_codex_session(current.session_generation_id, SESSION)
+                active = store.transition_session_generation(
+                    current.session_generation_id, SessionGenerationState.ACTIVE
+                )
+                with self.assertRaisesRegex(ValueError, "identity"):
+                    store.rotate_session_generation(
+                        item.work_item_id,
+                        current_session_generation_id=active.session_generation_id,
+                        current_generation_number=2,
+                        expected_current_policy_sha256="c" * 64,
+                        new_policy_sha256="c" * 64,
+                        rotation_reason="identity-conflict",
+                    )
+                self.assertEqual(
+                    SessionGenerationState.ACTIVE,
+                    store.get_session_generation(active.session_generation_id).state,
+                )
+                retired, replacement = store.rotate_session_generation(
+                    item.work_item_id,
+                    current_session_generation_id=active.session_generation_id,
+                    current_generation_number=1,
+                    expected_current_policy_sha256="c" * 64,
+                    new_policy_sha256="d" * 64,
+                    rotation_reason="approved-context-changed",
+                    new_role=SessionGenerationRole.AUDIT,
+                )
+                self.assertEqual(SessionGenerationState.RETIRED, retired.state)
+                self.assertEqual(SessionGenerationState.PLANNED, replacement.state)
+                self.assertEqual(2, replacement.generation_number)
+                self.assertEqual("a" * 40, replacement.start_head_sha)
+                self.assertEqual("d" * 64, replacement.policy_sha256)
+                self.assertEqual(replacement, store.get_live_session_generation(item.work_item_id))
+                with self.assertRaisesRegex(ValueError, "only an active"):
+                    store.rotate_session_generation(
+                        item.work_item_id,
+                        current_session_generation_id=active.session_generation_id,
+                        current_generation_number=1,
+                        expected_current_policy_sha256="c" * 64,
+                        new_policy_sha256="d" * 64,
+                        rotation_reason="cannot-reuse-retired",
+                    )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                item = make_ready(store, make_item(18))
+                legacy_id = "sg_" + "8" * 32
+                store._connection.execute(
+                    "INSERT INTO session_generations (session_generation_id, work_item_id, "
+                    "generation_number, state, role, codex_session_id, start_head_sha, "
+                    "policy_sha256, rotation_reason, created_at, started_at, updated_at) "
+                    "VALUES (?, ?, 1, 'active', 'implementation', ?, ?, NULL, "
+                    "'legacy_migration', ?, ?, ?)",
+                    (
+                        legacy_id,
+                        item.work_item_id,
+                        SESSION,
+                        "a" * 40,
+                        item.created_at,
+                        item.created_at,
+                        item.updated_at,
+                    ),
+                )
+                store._connection.commit()
+                retired, replacement = store.rotate_session_generation(
+                    item.work_item_id,
+                    current_session_generation_id=legacy_id,
+                    current_generation_number=1,
+                    expected_current_policy_sha256=None,
+                    new_policy_sha256="d" * 64,
+                    rotation_reason="legacy-policy-upgrade",
+                )
+                self.assertEqual(SessionGenerationState.RETIRED, retired.state)
+                self.assertEqual("d" * 64, replacement.policy_sha256)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                item = make_ready(store, make_item(17))
+                current = store.plan_session_generation(
+                    item.work_item_id,
+                    role=SessionGenerationRole.IMPLEMENTATION,
+                    policy_sha256="c" * 64,
+                )
+                store.record_session_generation_baseline(
+                    current.session_generation_id,
+                    issue_revision="revision",
+                    issue_content_sha256="d" * 64,
+                    task_spec_sha256="e" * 64,
+                    prompt_sha256="f" * 64,
+                    approved_comment_ids=("IC_fixture",),
+                    approved_context_sha256="1" * 64,
+                )
+                store.transition_session_generation(
+                    current.session_generation_id, SessionGenerationState.STARTING
+                )
+                store.bind_session_generation_codex_session(current.session_generation_id, SESSION)
+                active = store.transition_session_generation(
+                    current.session_generation_id, SessionGenerationState.ACTIVE
+                )
+                store.plan_turn(
+                    item.work_item_id,
+                    turn_id="turn_" + "9" * 32,
+                    issue_revision="active-turn",
+                    prompt_sha256="b" * 64,
+                    input_head_sha="a" * 40,
+                )
+                with self.assertRaisesRegex(ValueError, "active Turn"):
+                    store.rotate_session_generation(
+                        item.work_item_id,
+                        current_session_generation_id=active.session_generation_id,
+                        current_generation_number=1,
+                        expected_current_policy_sha256="c" * 64,
+                        new_policy_sha256="c" * 64,
+                        rotation_reason="blocked-by-turn",
+                    )
+                self.assertEqual(
+                    SessionGenerationState.ACTIVE,
+                    store.get_session_generation(active.session_generation_id).state,
+                )
+
+    def test_migration_imports_legacy_session_and_turns_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "legacy.db"
+            item = make_item(13)
+            with closing(sqlite3.connect(path)) as connection:
+                for version in range(1, 7):
+                    migration = files("codex_dispatcher.migrations").joinpath(
+                        f"{version:03d}_" + {
+                            1: "initial", 2: "work_items", 3: "task_branch_source",
+                            4: "turn_context", 5: "turn_allowed_paths", 6: "slack_outbox",
+                        }[version] + ".sql"
+                    ).read_text(encoding="utf-8")
+                    connection.executescript(migration)
+                connection.execute(
+                    "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+                )
+                connection.executemany(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, 'legacy')",
+                    [(version,) for version in range(1, 7)],
+                )
+                connection.execute(
+                    "INSERT INTO work_items (work_item_id, repository, issue_number, issue_node_id, "
+                    "state, base_branch, task_branch, runner_directory, codex_session_id, base_sha, "
+                    "last_published_sha, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (item.work_item_id, item.repository, item.issue_number, item.issue_node_id,
+                     item.state.value, item.base_branch, item.task_branch, item.runner_directory, SESSION,
+                     item.base_sha, "b" * 40, item.created_at, item.updated_at),
+                )
+                connection.execute(
+                    "INSERT INTO turns (turn_id, work_item_id, turn_number, state, issue_revision, "
+                    "prompt_sha256, input_head_sha, created_at, updated_at) VALUES (?, ?, 1, 'finished', ?, ?, ?, ?, ?)",
+                    ("turn_" + "c" * 32, item.work_item_id, "legacy", "d" * 64,
+                     "a" * 40, item.created_at, item.updated_at),
+                )
+                connection.commit()
+            with StateStore(path) as store:
+                store.migrate()
+                imported = store.get_live_session_generation(item.work_item_id)
+                self.assertIsNotNone(imported)
+                assert imported is not None
+                self.assertEqual("sg_" + item.work_item_id[3:], imported.session_generation_id)
+                self.assertEqual(SESSION, imported.codex_session_id)
+                self.assertEqual("b" * 40, imported.last_published_sha)
+                self.assertIsNone(imported.policy_sha256)
+                self.assertEqual(imported, store.get_turn_session_generation("turn_" + "c" * 32))
+
+    def test_session_generation_database_checks_reject_bypassed_invalid_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                item = make_item(14)
+                store.create_work_item(item)
+
+                def insert_generation(
+                    generation_id: str,
+                    *,
+                    state: str,
+                    codex_session_id: str | None = None,
+                    policy_sha256: str | None = "c" * 64,
+                    rotation_reason: str | None = None,
+                    started_at: str | None = None,
+                    baseline_issue_revision: str | None = None,
+                    baseline_issue_content_sha256: str | None = None,
+                    baseline_task_spec_sha256: str | None = None,
+                    baseline_prompt_sha256: str | None = None,
+                    baseline_approved_comment_ids_json: str | None = None,
+                    baseline_approved_context_sha256: str | None = None,
+                ) -> None:
+                    store._connection.execute(
+                        "INSERT INTO session_generations ("
+                        "session_generation_id, work_item_id, generation_number, state, role, "
+                        "codex_session_id, start_head_sha, policy_sha256, rotation_reason, "
+                        "baseline_issue_revision, baseline_issue_content_sha256, "
+                        "baseline_task_spec_sha256, baseline_prompt_sha256, "
+                        "baseline_approved_comment_ids_json, "
+                        "baseline_approved_context_sha256, created_at, started_at, updated_at"
+                        ") VALUES (?, ?, 1, ?, 'implementation', ?, ?, ?, ?, ?, ?, ?, ?, "
+                        "?, ?, ?, ?, ?)",
+                        (
+                            generation_id,
+                            item.work_item_id,
+                            state,
+                            codex_session_id,
+                            "a" * 40,
+                            policy_sha256,
+                            rotation_reason,
+                            baseline_issue_revision,
+                            baseline_issue_content_sha256,
+                            baseline_task_spec_sha256,
+                            baseline_prompt_sha256,
+                            baseline_approved_comment_ids_json,
+                            baseline_approved_context_sha256,
+                            item.created_at,
+                            started_at,
+                            item.updated_at,
+                        ),
+                    )
+
+                with self.assertRaises(sqlite3.IntegrityError):
+                    insert_generation(
+                        "sg_" + "1" * 32,
+                        state="planned",
+                        baseline_issue_revision="partial",
+                    )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    insert_generation(
+                        "sg_" + "2" * 32,
+                        state="active",
+                        policy_sha256=None,
+                        rotation_reason="legacy_migration",
+                        started_at=item.created_at,
+                    )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    insert_generation(
+                        "sg_" + "3" * 32,
+                        state="starting",
+                        baseline_issue_revision="revision",
+                        baseline_issue_content_sha256="d" * 64,
+                        baseline_task_spec_sha256="e" * 64,
+                        baseline_prompt_sha256="f" * 64,
+                        baseline_approved_comment_ids_json='["IC_baseline"]',
+                        baseline_approved_context_sha256="1" * 64,
+                    )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    insert_generation(
+                        "sg_" + "4" * 32,
+                        state="active",
+                        codex_session_id=SESSION,
+                        started_at=item.created_at,
+                    )
+                insert_generation(
+                    "sg_" + "5" * 32,
+                    state="active",
+                    codex_session_id=SESSION,
+                    policy_sha256=None,
+                    rotation_reason="legacy_migration",
+                    started_at=item.created_at,
+                )
+                self.assertIsNotNone(store.get_session_generation("sg_" + "5" * 32))
 
     def test_persists_a_verified_migrated_task_branch_binding(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
