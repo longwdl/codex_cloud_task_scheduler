@@ -161,6 +161,106 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
             [call.operation for call in self.transport.calls],
         )
 
+    def test_v2_pre_session_rejection_reuses_an_orphan_planned_generation(self) -> None:
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(),
+        )
+        service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+        item = service.resolve_and_prepare(
+            claimed_task(), base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        self.transport.reject_next(RunnerOperation.START)
+
+        rejected = service.run_claimed_turn(
+            claimed_task(), turn_id="turn_" + "a" * 32
+        )
+
+        self.assertEqual(TurnState.BLOCKED, rejected.turn.state)
+        first_generation = self.store.list_session_generations(item.work_item_id)[0]
+        self.assertEqual("failed", first_generation.state.value)
+        self.assertIsNone(first_generation.codex_session_id)
+        service.resolve_and_prepare(claimed_task(), base_sha=BASE_SHA)
+        orphan = self.store.plan_session_generation(
+            item.work_item_id,
+            role=first_generation.role,
+            policy_sha256=POLICY_DIGEST,
+        )
+        self.assertEqual(2, orphan.generation_number)
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION_2, BASE_SHA, blocked_result()),
+        )
+
+        retried = service.run_claimed_turn(
+            replace(claimed_task(), updated_at="2026-08-13T03:00:00Z"),
+            turn_id="turn_" + "b" * 32,
+        )
+
+        generations = self.store.list_session_generations(item.work_item_id)
+        self.assertEqual(TurnState.BLOCKED, retried.turn.state)
+        self.assertEqual("active", generations[1].state.value)
+        self.assertEqual(SESSION_2, generations[1].codex_session_id)
+        self.assertIsNone(
+            self.store.get_session_handoff_for_generation(
+                generations[1].session_generation_id
+            )
+        )
+        self.assertEqual(
+            ["full", "full"],
+            [
+                prompt.prompt_kind.value
+                for prompt in self.store.list_session_generation_turn_prompt_inputs(
+                    first_generation.session_generation_id
+                )
+                + self.store.list_session_generation_turn_prompt_inputs(
+                    generations[1].session_generation_id
+                )
+            ],
+        )
+        self.assertEqual(
+            [RunnerOperation.PREPARE, RunnerOperation.START, RunnerOperation.START],
+            [call.operation for call in self.transport.calls],
+        )
+
+    def test_v2_non_rejection_failed_generation_requires_explicit_recovery(self) -> None:
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(),
+        )
+        service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+        item = service.resolve_and_prepare(
+            claimed_task(), base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        self.transport.reject_next(RunnerOperation.START)
+        rejected = service.run_claimed_turn(
+            claimed_task(), turn_id="turn_" + "c" * 32
+        )
+        self.store._connection.execute(
+            "UPDATE turns SET error_code = 'runner_unexpected_artifact' WHERE turn_id = ?",
+            (rejected.turn.turn_id,),
+        )
+        self.store._connection.commit()
+        service.resolve_and_prepare(claimed_task(), base_sha=BASE_SHA)
+
+        with self.assertRaisesRegex(
+            SshDispatchPlanningError, "requires explicit recovery"
+        ):
+            service.run_claimed_turn(
+                replace(claimed_task(), updated_at="2026-08-13T03:00:00Z"),
+                turn_id="turn_" + "d" * 32,
+            )
+
+        self.assertEqual(1, len(self.store.list_session_generations(item.work_item_id)))
+
     def test_turn_runs_from_frozen_plan_and_reactivation_reuses_session(self) -> None:
         item = self.service.resolve_and_prepare(
             claimed_task(), base_sha=BASE_SHA, source_bundle=source_bundle()

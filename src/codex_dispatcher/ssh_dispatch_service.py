@@ -39,10 +39,12 @@ from codex_dispatcher.turn_orchestration import (
     TurnProgress,
 )
 from codex_dispatcher.work_items import (
+    PRE_SESSION_RETRY_ROTATION_REASON,
     SessionGeneration,
     SessionGenerationRole,
     SessionGenerationState,
     Turn,
+    TurnState,
     WorkItem,
     WorkItemState,
 )
@@ -178,11 +180,26 @@ class OfflineSshDispatchService:
                 work_item.work_item_id
             )
             if generation is None:
+                retryable_pre_session_history = bool(generations) and (
+                    self._pre_session_rejection_history_is_retryable(
+                        work_item, generations
+                    )
+                )
+                if generations and not retryable_pre_session_history:
+                    raise SshDispatchPlanningError(
+                        "WorkItem without a live generation requires explicit recovery"
+                    )
                 generation = self._store.plan_session_generation(
                     work_item.work_item_id,
                     role=SessionGenerationRole.IMPLEMENTATION,
                     policy_sha256=session_runtime.agent_policy_digest,
+                    rotation_reason=(
+                        PRE_SESSION_RETRY_ROTATION_REASON
+                        if retryable_pre_session_history
+                        else None
+                    ),
                 )
+                generations = (*generations, generation)
             generation_turns = self._store.list_session_generation_turns(
                 generation.session_generation_id
             )
@@ -194,6 +211,7 @@ class OfflineSshDispatchService:
             prior_status: str | None = None
             prior_summary: str | None = None
             handoff = None
+            pre_session_retry_without_handoff = False
             if generation.state is SessionGenerationState.PLANNED:
                 if generation_turns or prompt_inputs:
                     raise SshDispatchPlanningError(
@@ -208,9 +226,23 @@ class OfflineSshDispatchService:
                         generation.session_generation_id
                     )
                     if handoff is None:
-                        raise SshDispatchPlanningError(
-                            "replacement session generation has no durable handoff"
+                        previous_generations = tuple(
+                            item
+                            for item in generations
+                            if item.generation_number < generation.generation_number
                         )
+                        pre_session_retry = (
+                            generation.rotation_reason
+                            in {None, PRE_SESSION_RETRY_ROTATION_REASON}
+                            and self._pre_session_rejection_history_is_retryable(
+                                work_item, previous_generations
+                            )
+                        )
+                        if not pre_session_retry:
+                            raise SshDispatchPlanningError(
+                                "replacement session generation has no durable handoff"
+                            )
+                        pre_session_retry_without_handoff = True
             elif generation.state is SessionGenerationState.ACTIVE:
                 is_legacy = generation.policy_sha256 is None
                 if is_legacy:
@@ -355,6 +387,9 @@ class OfflineSshDispatchService:
                 prior_status=prior_status,
                 prior_summary=prior_summary,
                 handoff=handoff,
+                pre_session_retry_without_handoff=(
+                    pre_session_retry_without_handoff
+                ),
             )
             return self._orchestrator.run_generation_turn(
                 work_item.work_item_id,
@@ -368,6 +403,9 @@ class OfflineSshDispatchService:
                     generation_plan.handoff.handoff_id
                     if generation_plan.handoff is not None
                     else None
+                ),
+                pre_session_retry_without_handoff=(
+                    pre_session_retry_without_handoff
                 ),
                 expected_turn_number=generation_plan.turn_number,
                 turn_id=turn_id,
@@ -387,6 +425,49 @@ class OfflineSshDispatchService:
             expected_turn_number=plan.turn_number,
             turn_id=turn_id,
         )
+
+    def _pre_session_rejection_history_is_retryable(
+        self,
+        work_item: WorkItem,
+        generations: tuple[SessionGeneration, ...],
+    ) -> bool:
+        """Prove every earlier generation ended before Codex created a session."""
+        if (
+            not generations
+            or work_item.last_published_sha is not None
+            or self._store.list_work_item_publication_checkpoints(work_item.work_item_id)
+        ):
+            return False
+        for generation in generations:
+            if (
+                generation.state is not SessionGenerationState.FAILED
+                or generation.role is not SessionGenerationRole.IMPLEMENTATION
+                or generation.codex_session_id is not None
+                or generation.last_published_sha is not None
+                or generation.start_head_sha != work_item.base_sha
+                or generation.rotation_reason
+                not in {None, PRE_SESSION_RETRY_ROTATION_REASON}
+            ):
+                return False
+            turns = self._store.list_session_generation_turns(
+                generation.session_generation_id
+            )
+            if len(turns) != 1:
+                return False
+            turn = turns[0]
+            if (
+                turn.state is not TurnState.BLOCKED
+                or turn.error_code != "runner_request_rejected"
+                or turn.input_head_sha != work_item.base_sha
+                or turn.output_sha256 is not None
+                or turn.output_head_sha is not None
+                or turn.result_status is not None
+                or turn.result_summary is not None
+                or self._store.get_turn_agent_result(turn.turn_id) is not None
+                or self._store.get_turn_usage(turn.turn_id) is not None
+            ):
+                return False
+        return True
 
     def _rotation_reason(
         self,

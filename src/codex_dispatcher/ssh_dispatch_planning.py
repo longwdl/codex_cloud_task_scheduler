@@ -222,6 +222,7 @@ def build_ssh_generation_turn_plan(
     prior_status: str | None = None,
     prior_summary: str | None = None,
     handoff: SessionHandoffSnapshot | None = None,
+    pre_session_retry_without_handoff: bool = False,
 ) -> SshGenerationTurnPlan:
     """Freeze a fail-closed full or incremental protocol-v2 Turn."""
     task_spec, issue_revision = _validate_claimed_task(task, repository)
@@ -244,6 +245,8 @@ def build_ssh_generation_turn_plan(
         )
     if type(turn_number) is not int or turn_number <= 0:
         raise SshDispatchPlanningError("turn_number must be a positive integer")
+    if type(pre_session_retry_without_handoff) is not bool:
+        raise TypeError("pre_session_retry_without_handoff must be a bool")
     input_head_sha = work_item.last_published_sha or work_item.base_sha
     generation_head_sha = (
         session_generation.last_published_sha or session_generation.start_head_sha
@@ -285,22 +288,30 @@ def build_ssh_generation_turn_plan(
             )
         prompt_kind = PromptKind.FULL
         if session_generation.generation_number == 1:
-            if handoff is not None:
+            if handoff is not None or pre_session_retry_without_handoff:
                 raise SshDispatchPlanningError(
                     "the first session generation cannot contain a handoff"
                 )
-        elif handoff is None:
+        elif handoff is None and not pre_session_retry_without_handoff:
             raise SshDispatchPlanningError(
                 "a replacement session generation requires a durable handoff"
             )
+        elif handoff is not None and pre_session_retry_without_handoff:
+            raise SshDispatchPlanningError(
+                "a replacement generation cannot combine a handoff with a pre-session retry"
+            )
         try:
             prompt = build_generation_full_prompt_snapshot(
-                **prompt_arguments, handoff=handoff
+                **prompt_arguments,
+                handoff=handoff,
+                pre_session_retry_without_handoff=(
+                    pre_session_retry_without_handoff
+                ),
             )
         except (TypeError, ValueError) as exc:
             raise SshDispatchPlanningError(str(exc)) from exc
     elif session_generation.state is SessionGenerationState.ACTIVE:
-        if handoff is not None:
+        if handoff is not None or pre_session_retry_without_handoff:
             raise SshDispatchPlanningError(
                 "an active session generation cannot replay a handoff"
             )

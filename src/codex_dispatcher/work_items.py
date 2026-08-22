@@ -86,6 +86,8 @@ ACTIVE_TURN_STATES: Final[frozenset[TurnState]] = frozenset(
     }
 )
 
+PRE_SESSION_RETRY_ROTATION_REASON: Final = "retry_after_pre_session_rejection"
+
 _WORK_ITEM_TRANSITIONS: Final[dict[WorkItemState, frozenset[WorkItemState]]] = {
     WorkItemState.DISCOVERED: frozenset(
         {WorkItemState.PREPARING, WorkItemState.BLOCKED, WorkItemState.PAUSED}

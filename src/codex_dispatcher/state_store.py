@@ -33,6 +33,7 @@ from codex_dispatcher.slack_reporting import (
 )
 from codex_dispatcher.work_items import (
     ACTIVE_TURN_STATES,
+    PRE_SESSION_RETRY_ROTATION_REASON,
     PromptKind,
     SessionGeneration,
     SessionGenerationRole,
@@ -735,6 +736,7 @@ class StateStore:
         issue_allowed_paths: tuple[str, ...],
         input_head_sha: str,
         handoff_id: str | None = None,
+        pre_session_retry_without_handoff: bool = False,
         expected_turn_number: int | None = None,
         turn_id: str | None = None,
         created_at: str | None = None,
@@ -744,6 +746,8 @@ class StateStore:
             raise ValueError("prompt_kind must be a PromptKind")
         if not issue_allowed_paths:
             raise ValueError("issue_allowed_paths must be non-empty for a generation Turn")
+        if not isinstance(pre_session_retry_without_handoff, bool):
+            raise ValueError("pre_session_retry_without_handoff must be a bool")
         validate_sha256(policy_sha256, "policy_sha256")
         validate_git_sha(input_head_sha, "input_head_sha")
         now = created_at or utc_now_iso()
@@ -771,33 +775,70 @@ class StateStore:
                 if prompt_kind is not PromptKind.FULL:
                     raise ValueError("a planned SessionGeneration requires a full prompt")
                 if generation.generation_number == 1:
+                    if pre_session_retry_without_handoff:
+                        raise ValueError(
+                            "the first SessionGeneration cannot be a pre-session retry"
+                        )
                     if handoff_id is not None:
                         raise ValueError("the first SessionGeneration cannot bind a handoff")
                 else:
                     if handoff_id is None:
-                        raise ValueError("a replacement SessionGeneration requires a handoff")
-                    validate_handoff_id(handoff_id)
-                    row = connection.execute(
-                        "SELECT * FROM session_handoffs WHERE handoff_id = ? "
-                        "AND to_session_generation_id = ?",
-                        (handoff_id, generation.session_generation_id),
-                    ).fetchone()
-                    if row is None:
-                        raise ValueError("replacement SessionGeneration handoff is missing")
-                    handoff = self._row_to_session_handoff(row)
-                    if (
-                        handoff.work_item_id != work_item_id
-                        or handoff.to_generation_number != generation.generation_number
-                        or handoff.current_head_sha != input_head_sha
-                        or handoff.issue_revision != issue_revision
-                        or handoff.issue_content_sha256 != issue_content_sha256
-                        or handoff.task_spec_sha256 != task_spec_sha256
-                        or handoff.approved_context_sha256 != approved_context_sha256
-                        or handoff.to_agent_policy_sha256 != policy_sha256
-                    ):
-                        raise ValueError(
-                            "replacement SessionGeneration handoff conflicts with Turn inputs"
+                        if not pre_session_retry_without_handoff:
+                            raise ValueError(
+                                "a replacement SessionGeneration requires a handoff"
+                            )
+                        self._require_pre_session_rejection_retry(
+                            connection,
+                            work_item=work_item,
+                            generation=generation,
                         )
+                        if generation.rotation_reason is None:
+                            cursor = connection.execute(
+                                "UPDATE session_generations SET rotation_reason = ?, "
+                                "updated_at = ? WHERE session_generation_id = ? "
+                                "AND state = 'planned' AND rotation_reason IS NULL",
+                                (
+                                    PRE_SESSION_RETRY_ROTATION_REASON,
+                                    now,
+                                    generation.session_generation_id,
+                                ),
+                            )
+                            if cursor.rowcount != 1:
+                                raise RuntimeError(
+                                    "concurrent pre-session retry normalization detected"
+                                )
+                            generation = replace(
+                                generation,
+                                rotation_reason=PRE_SESSION_RETRY_ROTATION_REASON,
+                                updated_at=now,
+                            )
+                    else:
+                        if pre_session_retry_without_handoff:
+                            raise ValueError(
+                                "a handoff cannot also be a pre-session retry"
+                            )
+                        validate_handoff_id(handoff_id)
+                        row = connection.execute(
+                            "SELECT * FROM session_handoffs WHERE handoff_id = ? "
+                            "AND to_session_generation_id = ?",
+                            (handoff_id, generation.session_generation_id),
+                        ).fetchone()
+                        if row is None:
+                            raise ValueError("replacement SessionGeneration handoff is missing")
+                        handoff = self._row_to_session_handoff(row)
+                        if (
+                            handoff.work_item_id != work_item_id
+                            or handoff.to_generation_number != generation.generation_number
+                            or handoff.current_head_sha != input_head_sha
+                            or handoff.issue_revision != issue_revision
+                            or handoff.issue_content_sha256 != issue_content_sha256
+                            or handoff.task_spec_sha256 != task_spec_sha256
+                            or handoff.approved_context_sha256 != approved_context_sha256
+                            or handoff.to_agent_policy_sha256 != policy_sha256
+                        ):
+                            raise ValueError(
+                                "replacement SessionGeneration handoff conflicts with Turn inputs"
+                            )
                 baseline_was_recorded = generation.baseline_issue_revision is not None
                 generation = generation.record_baseline(
                     issue_revision=issue_revision,
@@ -865,6 +906,10 @@ class StateStore:
                         "concurrent session generation baseline/start update detected"
                     )
             elif generation.state is SessionGenerationState.ACTIVE:
+                if pre_session_retry_without_handoff:
+                    raise ValueError(
+                        "an active SessionGeneration cannot be a pre-session retry"
+                    )
                 if handoff_id is not None:
                     raise ValueError("an active SessionGeneration cannot replay a handoff")
                 if prompt_kind is not PromptKind.DELTA:
@@ -934,6 +979,9 @@ class StateStore:
                 {
                     "generation_number": generation.generation_number,
                     "handoff_id": handoff_id,
+                    "pre_session_retry_without_handoff": (
+                        pre_session_retry_without_handoff
+                    ),
                     "prompt_kind": prompt_kind.value,
                     "session_generation_id": session_generation_id,
                     "turn_number": turn.turn_number,
@@ -941,6 +989,94 @@ class StateStore:
                 now,
             )
         return work_item.transition_to(WorkItemState.RUNNING, at=now), generation, turn, prompt_input
+
+    def _require_pre_session_rejection_retry(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        work_item: WorkItem,
+        generation: SessionGeneration,
+    ) -> None:
+        """Re-prove a handoff-free retry at the persistence boundary."""
+        if (
+            generation.generation_number <= 1
+            or generation.state is not SessionGenerationState.PLANNED
+            or generation.role is not SessionGenerationRole.IMPLEMENTATION
+            or generation.codex_session_id is not None
+            or generation.last_published_sha is not None
+            or generation.start_head_sha != work_item.base_sha
+            or generation.rotation_reason
+            not in {None, PRE_SESSION_RETRY_ROTATION_REASON}
+            or work_item.last_published_sha is not None
+        ):
+            raise ValueError("pre-session retry generation is not mechanically safe")
+        publication_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM publication_checkpoints "
+                "JOIN turns USING(turn_id) WHERE turns.work_item_id = ?",
+                (work_item.work_item_id,),
+            ).fetchone()[0]
+        )
+        handoff_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM session_handoffs WHERE work_item_id = ?",
+                (work_item.work_item_id,),
+            ).fetchone()[0]
+        )
+        if publication_count != 0 or handoff_count != 0:
+            raise ValueError("pre-session retry history contains durable work output")
+        prior_rows = connection.execute(
+            "SELECT * FROM session_generations WHERE work_item_id = ? "
+            "AND generation_number < ? ORDER BY generation_number",
+            (work_item.work_item_id, generation.generation_number),
+        ).fetchall()
+        prior_generations = tuple(
+            self._row_to_session_generation(row) for row in prior_rows
+        )
+        if tuple(item.generation_number for item in prior_generations) != tuple(
+            range(1, generation.generation_number)
+        ):
+            raise ValueError("pre-session retry generation history is incomplete")
+        for prior in prior_generations:
+            if (
+                prior.state is not SessionGenerationState.FAILED
+                or prior.role is not SessionGenerationRole.IMPLEMENTATION
+                or prior.codex_session_id is not None
+                or prior.last_published_sha is not None
+                or prior.start_head_sha != work_item.base_sha
+                or prior.rotation_reason
+                not in {None, PRE_SESSION_RETRY_ROTATION_REASON}
+            ):
+                raise ValueError("pre-session retry has a non-rejection generation")
+            turn_rows = connection.execute(
+                "SELECT turns.* FROM turns "
+                "JOIN turn_session_generations USING(turn_id) "
+                "WHERE session_generation_id = ? ORDER BY turns.turn_number",
+                (prior.session_generation_id,),
+            ).fetchall()
+            if len(turn_rows) != 1:
+                raise ValueError("pre-session retry generation must have exactly one Turn")
+            turn = self._row_to_turn(turn_rows[0])
+            if (
+                turn.state is not TurnState.BLOCKED
+                or turn.error_code != "runner_request_rejected"
+                or turn.input_head_sha != work_item.base_sha
+                or turn.output_sha256 is not None
+                or turn.output_head_sha is not None
+                or turn.result_status is not None
+                or turn.result_summary is not None
+            ):
+                raise ValueError("pre-session retry Turn is not a definitive START rejection")
+            receipt_count = int(
+                connection.execute(
+                    "SELECT "
+                    "(SELECT COUNT(*) FROM turn_agent_results WHERE turn_id = ?) + "
+                    "(SELECT COUNT(*) FROM turn_usage WHERE turn_id = ?)",
+                    (turn.turn_id, turn.turn_id),
+                ).fetchone()[0]
+            )
+            if receipt_count != 0:
+                raise ValueError("pre-session retry Turn has Codex output receipts")
 
     def get_turn_prompt_input(self, turn_id: str) -> TurnPromptInput | None:
         row = self._connection.execute(

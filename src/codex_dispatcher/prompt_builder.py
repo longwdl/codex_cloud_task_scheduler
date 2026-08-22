@@ -168,6 +168,7 @@ def build_generation_full_prompt_snapshot(
     input_head_sha: str,
     inputs: CanonicalInputSnapshot,
     handoff: SessionHandoffSnapshot | None = None,
+    pre_session_retry_without_handoff: bool = False,
 ) -> PromptSnapshot:
     """Build the complete first prompt for one replaceable session generation."""
     _validate_generation_prompt_identity(
@@ -183,13 +184,20 @@ def build_generation_full_prompt_snapshot(
     )
     if not isinstance(inputs, CanonicalInputSnapshot):
         raise TypeError("inputs must be a CanonicalInputSnapshot")
+    if type(pre_session_retry_without_handoff) is not bool:
+        raise TypeError("pre_session_retry_without_handoff must be a bool")
     if session_generation == 1:
-        if handoff is not None:
+        if handoff is not None or pre_session_retry_without_handoff:
             raise ValueError("the first SessionGeneration cannot contain a handoff")
     else:
-        if not isinstance(handoff, SessionHandoffSnapshot):
+        if pre_session_retry_without_handoff:
+            if handoff is not None:
+                raise ValueError(
+                    "a pre-session retry cannot contain a handoff"
+                )
+        elif not isinstance(handoff, SessionHandoffSnapshot):
             raise ValueError("a replacement SessionGeneration requires a handoff")
-        if (
+        if handoff is not None and (
             handoff.work_item_id != work_item_id
             or handoff.to_session_generation_id != session_generation_id
             or handoff.to_generation_number != session_generation
@@ -218,6 +226,14 @@ def build_generation_full_prompt_snapshot(
         "",
         *_canonical_digest_lines(inputs),
     ]
+    if pre_session_retry_without_handoff:
+        sections.extend(
+            [
+                "",
+                "Pre-session retry: every earlier START was definitively rejected before ",
+                "a Codex session or checkpoint existed; this is a complete initial prompt.",
+            ]
+        )
     if handoff is not None:
         sections.extend(
             [

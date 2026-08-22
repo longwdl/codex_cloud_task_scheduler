@@ -473,6 +473,72 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     store.list_session_generation_turns(generation.session_generation_id),
                 )
 
+    def test_pre_session_retry_proof_is_rechecked_inside_state_store(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                item = make_ready(store, make_item(16))
+                first = store.plan_session_generation(
+                    item.work_item_id,
+                    role=SessionGenerationRole.IMPLEMENTATION,
+                    policy_sha256="c" * 64,
+                )
+                _, _, turn, _ = store.begin_session_generation_turn(
+                    item.work_item_id,
+                    session_generation_id=first.session_generation_id,
+                    generation_number=1,
+                    policy_sha256="c" * 64,
+                    prompt_kind=PromptKind.FULL,
+                    issue_revision="revision",
+                    issue_content_sha256="d" * 64,
+                    task_spec_sha256="e" * 64,
+                    prompt_sha256="f" * 64,
+                    approved_comment_ids=(),
+                    approved_context_sha256="1" * 64,
+                    issue_allowed_paths=("src",),
+                    input_head_sha="a" * 40,
+                )
+                store.record_generation_turn_failed(
+                    turn.turn_id,
+                    session_generation_id=first.session_generation_id,
+                    generation_number=1,
+                    policy_sha256="c" * 64,
+                    error_code="runner_unexpected_artifact",
+                )
+                store.update_work_item_state(item.work_item_id, WorkItemState.READY)
+                second = store.plan_session_generation(
+                    item.work_item_id,
+                    role=SessionGenerationRole.IMPLEMENTATION,
+                    policy_sha256="c" * 64,
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError, "not a definitive START rejection"
+                ):
+                    store.begin_session_generation_turn(
+                        item.work_item_id,
+                        session_generation_id=second.session_generation_id,
+                        generation_number=2,
+                        policy_sha256="c" * 64,
+                        prompt_kind=PromptKind.FULL,
+                        issue_revision="revision",
+                        issue_content_sha256="d" * 64,
+                        task_spec_sha256="e" * 64,
+                        prompt_sha256="f" * 64,
+                        approved_comment_ids=(),
+                        approved_context_sha256="1" * 64,
+                        issue_allowed_paths=("src",),
+                        input_head_sha="a" * 40,
+                        pre_session_retry_without_handoff=True,
+                    )
+
+                self.assertEqual(WorkItemState.READY, store.get_work_item(item.work_item_id).state)
+                self.assertEqual(
+                    SessionGenerationState.PLANNED,
+                    store.get_session_generation(second.session_generation_id).state,
+                )
+                self.assertEqual(1, len(store.list_turns(item.work_item_id)))
+
     def test_rotate_session_generation_is_atomic_and_requires_idle_ready_work_item(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             with StateStore(Path(temp_dir) / "state.db") as store:

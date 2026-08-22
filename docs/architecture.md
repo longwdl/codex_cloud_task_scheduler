@@ -286,6 +286,12 @@ reactivation of the blocked or paused WorkItem rebuilds an exact bundle from the
 before claim, moves the WorkItem back to `preparing`, and retries idempotent PREPARE. It cannot send
 START until a new acknowledgement is durable. A blocked WorkItem that already has the acknowledgement
 provenance follows the normal Turn reactivation path and is never re-prepared.
+If the earlier START was also definitively rejected before any Codex session or output receipt
+existed, retry may create one new implementation generation without a Handoff. This exception is
+fail-closed: the planner and the StateStore transaction independently require a complete sequence of
+failed generations whose only Turn is `runner_request_rejected`, no session ID, no usage or Agent
+result, no publication checkpoint, no handoff, and the unchanged persisted Base SHA. Any durable or
+ambiguous execution evidence requires explicit recovery instead.
 
 The Issue allowlist used in step 6 is stored with the Turn before Codex starts. Publication recovery
 never reparses a later Issue body to widen that frozen policy. An ambiguous push remains

@@ -292,6 +292,42 @@ class SshDispatchPlanningTests(unittest.TestCase):
         self.assertEqual(("C1",), plan.prompt.included_comment_ids)
         self.assertIn("Prompt kind: full", plan.prompt.content)
 
+    def test_pre_session_retry_requires_an_explicit_planner_proof(self) -> None:
+        item = ready_work_item()
+        generation = SessionGeneration.new(
+            work_item_id=item.work_item_id,
+            generation_number=2,
+            role=SessionGenerationRole.IMPLEMENTATION,
+            start_head_sha=BASE_SHA,
+            policy_sha256=POLICY_DIGEST,
+            session_generation_id="sg_" + "2" * 32,
+            rotation_reason="retry_after_pre_session_rejection",
+        )
+        with self.assertRaisesRegex(
+            SshDispatchPlanningError, "requires a durable handoff"
+        ):
+            build_ssh_generation_turn_plan(
+                task=claimed_task(),
+                repository=self.repository,
+                work_item=item,
+                session_generation=generation,
+                turn_number=2,
+                agent_policy_digest=POLICY_DIGEST,
+            )
+
+        plan = build_ssh_generation_turn_plan(
+            task=claimed_task(),
+            repository=self.repository,
+            work_item=item,
+            session_generation=generation,
+            turn_number=2,
+            agent_policy_digest=POLICY_DIGEST,
+            pre_session_retry_without_handoff=True,
+        )
+
+        self.assertEqual(PromptKind.FULL, plan.prompt_kind)
+        self.assertIsNone(plan.handoff)
+
     def test_generation_resume_is_delta_and_rejects_context_drift(self) -> None:
         item = ready_work_item()
         initial = (

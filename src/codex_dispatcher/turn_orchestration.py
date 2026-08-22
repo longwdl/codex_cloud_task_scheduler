@@ -213,6 +213,7 @@ class OfflineTurnOrchestrator:
         inputs: CanonicalInputSnapshot,
         issue_allowed_paths: tuple[str, ...],
         handoff_id: str | None = None,
+        pre_session_retry_without_handoff: bool = False,
         expected_turn_number: int | None = None,
         turn_id: str | None = None,
     ) -> TurnProgress:
@@ -226,6 +227,8 @@ class OfflineTurnOrchestrator:
             raise TypeError("inputs must be a CanonicalInputSnapshot")
         if not issue_allowed_paths:
             raise ValueError("issue_allowed_paths must be frozen before starting a Turn")
+        if not isinstance(pre_session_retry_without_handoff, bool):
+            raise TypeError("pre_session_retry_without_handoff must be a bool")
         if session_generation.work_item_id != work_item_id:
             raise TurnOrchestrationError(
                 "session generation does not belong to the requested WorkItem"
@@ -252,6 +255,9 @@ class OfflineTurnOrchestrator:
                 issue_allowed_paths=issue_allowed_paths,
                 input_head_sha=input_head_sha,
                 handoff_id=handoff_id,
+                pre_session_retry_without_handoff=(
+                    pre_session_retry_without_handoff
+                ),
                 expected_turn_number=expected_turn_number,
                 turn_id=turn_id,
             )
