@@ -803,10 +803,16 @@ Codex tools、wrapper、Schema、配置和 SSH 授权由 root 管理；协议账
 - 单个 WorkItem 默认磁盘预算 20 GiB；大型项目显式提高。
 - `completed_retention_seconds` 显式配置后，completed WorkItem 默认保留 7 天再归档；缺省不启用
   自动清理。
+- maintainer 的 `agent:discard` timeline event 会形成不可逆 disposition：无 PR 为 `abandoned`，
+  精确且未 merge 的 PR 为 `superseded`；记录 disposition 与终结 generation 必须是同一事务。
 - 每个 WorkItem 的 `repo/`、`runner-state/`、generation home 和独立 auth copy 同生共灭；Runner
   registry、永久 archive tombstone、共享 auth seed/policy/tools 及 Control SQLite 不随单个
   WorkItem 清理。
-- 不自动删除 `blocked` 或 `needs_input` WorkItem。
+- 不自动删除 `blocked` 或 `needs_input` WorkItem；只有上述审计过的 disposition 才能使其可归档。
+- 混合 legacy directory/image 由 Runner storage classifier fail-closed；全缺失状态保持 blocked。
+  schema 13 仅预留独立 absence reconciliation ledger，待 Runner 生成 request-bound evidence
+  后再开放，不接受本地 JSON 断言，也不伪造 Runner archive receipt。
+- 用 `runner-capacity --json` 分别观察 Turn admission 与新 image provision admission/shortfall。
 - Control Host 每日 SQLite online backup，并保留 GitHub/Slack 映射。
 
 ## 12. 可测试验收标准

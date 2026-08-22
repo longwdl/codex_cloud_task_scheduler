@@ -94,18 +94,27 @@ remove `[session_runtime]` after a v2 WorkItem has started: the legacy
 rollback could start an unrelated v1 session. Generation directories are audit
 state and must not be deleted during rollback.
 
-Releases through schema migration 012 add Handoff, Agent-result, verified
-publication, delegation, completion-gate, context-failure, and completed-WorkItem archive ledgers. Older
+Releases through schema migration 013 add Handoff, Agent-result, verified
+publication, delegation, completion-gate, context-failure, archive, disposition, and explicit
+absence-reconciliation ledgers. Older
 binaries intentionally reject a newer schema. Rolling back such a release
 therefore requires the matching pre-migration SQLite Online Backup; changing
 only the `current` release symlink is unsafe.
 
-## Completed WorkItem archive boundary
+## Terminal WorkItem archive boundary
 
 Control-side automatic reclamation is disabled unless
 `ssh_runtime.completed_retention_seconds` is present. The reviewed normal value is `604800` (seven
 days). Before sending `ARCHIVE`, Control revalidates the completed Issue and exact merged bound PR,
 and persists the immutable request in schema 12.
+
+An operator may instead apply `agent:discard`. Control accepts it only from the repository
+maintainer allowlist and persists the exact GitHub timeline event. A WorkItem with no PR becomes
+`abandoned`; one with an exact non-merged PR becomes `superseded`. The dispatcher does not close the
+PR or delete its branch. Before each disposed archive/STATUS call, Control re-reads the branch PR;
+a newly appeared or merged PR blocks before Runner contact. The disposition is permanent and makes
+later Turn/generation creation fail. GitHub and Runner are not one transaction, so operators must
+not merge a PR after its discard disposition is recorded.
 
 The Runner exposes `ARCHIVE` and `ARCHIVE_STATUS` only in protocol v2 and requires the exact
 published HEAD. Under the global lock it validates the permanent registry identity, clean task
@@ -116,6 +125,25 @@ entry: they are recovery evidence. Per-item deletion never includes the policy b
 shared auth seed, Control database, or another WorkItem. A lost receipt must be reconciled with
 `ARCHIVE_STATUS`; a generic rejected response also remains ambiguous because it carries no
 pre-effect/post-effect phase proof. Do not retry deletion with shell commands.
+
+Use the read-only capacity view before admitting or reconstructing an image:
+
+```bash
+codex-dispatcher runner-capacity --config /srv/codex-runner/etc/config.json --json
+```
+
+It reports capacity, available bytes, fixed reserve, image size, Turn admission, image-provision
+admission, and the exact shortfall without reading credentials or WorkItem contents.
+
+Legacy directories are eligible only when the exact registry/workspace exists and the disk
+classifier proves final, provisioning-staging, archive-staging, and mount state contain no image.
+The v2 tombstone binds `bounded_image` or `legacy_directory`; retries may not switch kind.
+
+If old state was already manually removed, ordinary `ARCHIVE` must continue to fail closed. Schema
+13 reserves a separate absence-reconciliation ledger, but this release deliberately exposes no
+operator command for it: a local JSON assertion is not live Runner evidence and can be stale or
+refer to the wrong host. Such WorkItems remain blocked until a Runner-generated, request-bound
+absence receipt is implemented; no Runner archive receipt may be fabricated.
 
 ## SSH contract
 

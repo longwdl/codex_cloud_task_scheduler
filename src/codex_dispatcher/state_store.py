@@ -62,8 +62,11 @@ from codex_dispatcher.work_items import (
     validate_sha256,
 )
 from codex_dispatcher.work_item_lifecycle import (
+    WorkItemAbsenceReconciliation,
     WorkItemArchive,
     WorkItemArchiveStatus,
+    WorkItemDisposition,
+    WorkItemDispositionKind,
     validate_archive_error_code,
 )
 
@@ -132,9 +135,14 @@ class StateStore:
             for version, migration_sql in sorted(migrations):
                 if version in applied:
                     continue
-                for statement in migration_sql.split(";"):
-                    if statement.strip():
+                statement = ""
+                for line in migration_sql.splitlines(keepends=True):
+                    statement += line
+                    if sqlite3.complete_statement(statement):
                         connection.execute(statement)
+                        statement = ""
+                if statement.strip():
+                    raise RuntimeError(f"SQLite migration {version:03d} is incomplete")
                 connection.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (version, utc_now_iso()),
@@ -483,6 +491,282 @@ class StateStore:
         ).fetchone()
         return self._row_to_work_item_archive(row) if row is not None else None
 
+    def get_work_item_disposition(
+        self, work_item_id: str
+    ) -> WorkItemDisposition | None:
+        row = self._connection.execute(
+            "SELECT * FROM work_item_dispositions WHERE work_item_id = ?",
+            (work_item_id,),
+        ).fetchone()
+        return self._row_to_work_item_disposition(row) if row is not None else None
+
+    def list_work_item_dispositions(self) -> tuple[WorkItemDisposition, ...]:
+        return tuple(
+            self._row_to_work_item_disposition(row)
+            for row in self._connection.execute(
+                "SELECT * FROM work_item_dispositions ORDER BY created_at, work_item_id"
+            )
+        )
+
+    def get_work_item_absence_reconciliation(
+        self, work_item_id: str
+    ) -> WorkItemAbsenceReconciliation | None:
+        row = self._connection.execute(
+            "SELECT * FROM work_item_absence_reconciliations WHERE work_item_id = ?",
+            (work_item_id,),
+        ).fetchone()
+        return (
+            self._row_to_work_item_absence_reconciliation(row)
+            if row is not None
+            else None
+        )
+
+    def record_work_item_absence_reconciliation(
+        self,
+        work_item_id: str,
+        *,
+        expected_head_sha: str,
+        evidence_sha256: str,
+        observed_by: str,
+        observed_at: str,
+        created_at: str | None = None,
+    ) -> WorkItemAbsenceReconciliation:
+        now = created_at or utc_now_iso()
+        candidate = WorkItemAbsenceReconciliation(
+            work_item_id,
+            expected_head_sha,
+            evidence_sha256,
+            observed_by,
+            observed_at,
+            now,
+        )
+        with self._transaction() as connection:
+            archive_row = connection.execute(
+                "SELECT * FROM work_item_archives WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone()
+            if archive_row is None:
+                raise ValueError(
+                    "absence reconciliation requires a durable archive request"
+                )
+            archive = self._row_to_work_item_archive(archive_row)
+            if archive.expected_head_sha != expected_head_sha:
+                raise ValueError("absence reconciliation archive identity conflicts")
+            if archive.status is WorkItemArchiveStatus.ARCHIVED:
+                raise ValueError("archived WorkItem does not require absence reconciliation")
+            work_item = self._require_work_item(connection, work_item_id)
+            disposition = connection.execute(
+                "SELECT expected_head_sha FROM work_item_dispositions "
+                "WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone()
+            terminal = (
+                work_item.state is WorkItemState.COMPLETED
+                and work_item.last_published_sha == expected_head_sha
+            ) or (
+                disposition is not None
+                and disposition["expected_head_sha"] == expected_head_sha
+            )
+            if not terminal:
+                raise ValueError("absence reconciliation requires a terminal WorkItem")
+            if connection.execute(
+                "SELECT 1 FROM turns WHERE work_item_id = ? AND state IN "
+                "('planned', 'starting', 'running', 'reconciling', "
+                "'checkpointing', 'published') LIMIT 1",
+                (work_item_id,),
+            ).fetchone() is not None:
+                raise ValueError("absence reconciliation cannot hide an active Turn")
+            if connection.execute(
+                "SELECT 1 FROM session_generations WHERE work_item_id = ? "
+                "AND state IN ('planned', 'starting', 'active', 'retiring') LIMIT 1",
+                (work_item_id,),
+            ).fetchone() is not None:
+                raise ValueError(
+                    "absence reconciliation cannot hide a live session generation"
+                )
+            existing_row = connection.execute(
+                "SELECT * FROM work_item_absence_reconciliations "
+                "WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone()
+            if existing_row is not None:
+                existing = self._row_to_work_item_absence_reconciliation(existing_row)
+                if (
+                    existing.expected_head_sha != expected_head_sha
+                    or existing.evidence_sha256 != evidence_sha256
+                    or existing.observed_by != observed_by
+                    or existing.observed_at != observed_at
+                ):
+                    raise ValueError(
+                        "absence reconciliation conflicts with durable evidence"
+                    )
+                return existing
+            connection.execute(
+                "INSERT INTO work_item_absence_reconciliations "
+                "(work_item_id, expected_head_sha, evidence_sha256, observed_by, "
+                "observed_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    work_item_id,
+                    expected_head_sha,
+                    evidence_sha256,
+                    observed_by,
+                    observed_at,
+                    now,
+                ),
+            )
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "work_item_absence_reconciled",
+                {
+                    "evidence_sha256": evidence_sha256,
+                    "expected_head_sha": expected_head_sha,
+                    "observed_at": observed_at,
+                    "observed_by": observed_by,
+                },
+                now,
+            )
+        reconciliation = self.get_work_item_absence_reconciliation(work_item_id)
+        assert reconciliation is not None
+        return reconciliation
+
+    def record_work_item_disposition(
+        self,
+        work_item_id: str,
+        *,
+        kind: WorkItemDispositionKind,
+        expected_head_sha: str,
+        pr_number: int | None,
+        requested_by: str,
+        request_event_id: str,
+        requested_at: str,
+        reason_code: str,
+        updated_at: str | None = None,
+    ) -> WorkItemDisposition:
+        now = updated_at or utc_now_iso()
+        disposition_request_sha256 = sha256(
+            json.dumps(
+                {
+                    "expected_head_sha": expected_head_sha,
+                    "kind": kind.value,
+                    "pr_number": pr_number,
+                    "reason_code": reason_code,
+                    "request_event_id": request_event_id,
+                    "requested_at": requested_at,
+                    "requested_by": requested_by,
+                    "work_item_id": work_item_id,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        candidate = WorkItemDisposition(
+            work_item_id,
+            kind,
+            expected_head_sha,
+            pr_number,
+            requested_by,
+            request_event_id,
+            requested_at,
+            reason_code,
+            disposition_request_sha256,
+            now,
+            now,
+            now,
+        )
+        with self._transaction() as connection:
+            work_item = self._require_work_item(connection, work_item_id)
+            if work_item.state is WorkItemState.COMPLETED:
+                raise ValueError("completed WorkItems cannot receive a disposition")
+            if work_item.state is WorkItemState.RUNNING:
+                raise ValueError("running WorkItems cannot receive a disposition")
+            if (work_item.last_published_sha or work_item.base_sha) != expected_head_sha:
+                raise ValueError("disposition HEAD conflicts with the WorkItem checkpoint")
+            if kind is WorkItemDispositionKind.ABANDONED:
+                if pr_number is not None or work_item.pr_number is not None:
+                    raise ValueError("abandoned disposition conflicts with a Pull Request")
+            elif (
+                type(pr_number) is not int
+                or pr_number <= 0
+                or work_item.pr_number not in {None, pr_number}
+            ):
+                raise ValueError("superseded disposition Pull Request conflicts")
+            if connection.execute(
+                "SELECT 1 FROM turns WHERE work_item_id = ? AND state IN "
+                "('planned', 'starting', 'running', 'reconciling', "
+                "'checkpointing', 'published') LIMIT 1",
+                (work_item_id,),
+            ).fetchone() is not None:
+                raise ValueError("WorkItem disposition cannot begin during an active Turn")
+            existing_row = connection.execute(
+                "SELECT * FROM work_item_dispositions WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone()
+            if existing_row is not None:
+                existing = self._row_to_work_item_disposition(existing_row)
+                if existing != candidate and (
+                    existing.kind != kind
+                    or existing.expected_head_sha != expected_head_sha
+                    or existing.pr_number != pr_number
+                    or existing.requested_by != requested_by
+                    or existing.request_event_id != request_event_id
+                    or existing.requested_at != requested_at
+                    or existing.reason_code != reason_code
+                    or existing.request_sha256 != disposition_request_sha256
+                ):
+                    raise ValueError("disposition conflicts with durable operator intent")
+                return existing
+            self._terminalize_session_generations(
+                connection,
+                work_item_id,
+                work_item=work_item,
+                at=now,
+                reason="work_item_disposed",
+                allow_cancel_unstarted=True,
+            )
+            connection.execute(
+                "INSERT INTO work_item_dispositions "
+                "(work_item_id, kind, expected_head_sha, pr_number, requested_by, "
+                "request_event_id, requested_at, reason_code, request_sha256, eligible_at, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    work_item_id,
+                    kind.value,
+                    expected_head_sha,
+                    pr_number,
+                    requested_by,
+                    request_event_id,
+                    requested_at,
+                    reason_code,
+                    disposition_request_sha256,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "work_item_disposed",
+                {
+                    "expected_head_sha": expected_head_sha,
+                    "kind": kind.value,
+                    "pr_number": pr_number,
+                    "reason_code": reason_code,
+                    "request_event_id": request_event_id,
+                    "request_sha256": disposition_request_sha256,
+                    "requested_by": requested_by,
+                    "requested_at": requested_at,
+                },
+                now,
+            )
+        disposition = self.get_work_item_disposition(work_item_id)
+        assert disposition is not None
+        return disposition
+
     def prepare_work_item_archive(
         self,
         work_item_id: str,
@@ -509,17 +793,30 @@ class StateStore:
         )
         with self._transaction() as connection:
             work_item_row = connection.execute(
-                "SELECT state, last_published_sha FROM work_items WHERE work_item_id = ?",
+                "SELECT state, base_sha, last_published_sha FROM work_items "
+                "WHERE work_item_id = ?",
                 (work_item_id,),
             ).fetchone()
             if work_item_row is None:
                 raise KeyError(f"work item not found: {work_item_id}")
-            if (
-                WorkItemState(work_item_row["state"]) is not WorkItemState.COMPLETED
-                or work_item_row["last_published_sha"] != expected_head_sha
-            ):
+            disposition_row = connection.execute(
+                "SELECT expected_head_sha FROM work_item_dispositions "
+                "WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone()
+            completed_checkpoint = (
+                WorkItemState(work_item_row["state"]) is WorkItemState.COMPLETED
+                and work_item_row["last_published_sha"] == expected_head_sha
+            )
+            disposed_checkpoint = (
+                disposition_row is not None
+                and disposition_row["expected_head_sha"] == expected_head_sha
+                and (work_item_row["last_published_sha"] or work_item_row["base_sha"])
+                == expected_head_sha
+            )
+            if not completed_checkpoint and not disposed_checkpoint:
                 raise ValueError(
-                    "archive requires a completed WorkItem at its published checkpoint"
+                    "archive requires a terminal WorkItem at its exact checkpoint"
                 )
             placeholders = ", ".join("?" for _ in ACTIVE_TURN_STATES)
             if connection.execute(
@@ -527,6 +824,12 @@ class StateStore:
                 tuple(state.value for state in ACTIVE_TURN_STATES),
             ).fetchone() is not None:
                 raise ValueError("archive cannot begin while a Turn is active")
+            if connection.execute(
+                "SELECT 1 FROM session_generations WHERE work_item_id = ? "
+                "AND state IN ('planned', 'starting', 'active', 'retiring') LIMIT 1",
+                (work_item_id,),
+            ).fetchone() is not None:
+                raise ValueError("archive cannot begin while a session generation is live")
             existing_row = connection.execute(
                 "SELECT * FROM work_item_archives WHERE work_item_id = ?",
                 (work_item_id,),
@@ -771,6 +1074,11 @@ class StateStore:
     ) -> WorkItem:
         now = updated_at or utc_now_iso()
         with self._transaction() as connection:
+            if connection.execute(
+                "SELECT 1 FROM work_item_dispositions WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone() is not None:
+                raise ValueError("disposed WorkItem state is immutable")
             row = connection.execute(
                 "SELECT * FROM work_items WHERE work_item_id = ?", (work_item_id,)
             ).fetchone()
@@ -795,7 +1103,100 @@ class StateStore:
                 {"from": work_item.state.value, "to": state.value},
                 now,
             )
+            if state is WorkItemState.COMPLETED:
+                self._terminalize_session_generations(
+                    connection,
+                    work_item_id,
+                    work_item=work_item,
+                    at=now,
+                    reason="work_item_completed",
+                    allow_cancel_unstarted=False,
+                )
         return updated
+
+    def _terminalize_session_generations(
+        self,
+        connection: sqlite3.Connection,
+        work_item_id: str,
+        *,
+        work_item: WorkItem,
+        at: str,
+        reason: str,
+        allow_cancel_unstarted: bool,
+    ) -> None:
+        rows = connection.execute(
+            "SELECT * FROM session_generations WHERE work_item_id = ? "
+            "AND state IN ('planned', 'starting', 'active', 'retiring') "
+            "ORDER BY generation_number",
+            (work_item_id,),
+        ).fetchall()
+        for row in rows:
+            generation = self._row_to_session_generation(row)
+            work_item_anchor = work_item.last_published_sha or work_item.base_sha
+            generation_anchor = generation.last_published_sha or generation.start_head_sha
+            if generation_anchor != work_item_anchor:
+                raise ValueError(
+                    "session generation checkpoint conflicts with terminal WorkItem"
+                )
+            if generation.state is SessionGenerationState.ACTIVE:
+                updated = generation.transition_to(
+                    SessionGenerationState.RETIRING, at=at
+                ).transition_to(SessionGenerationState.RETIRED, at=at)
+            elif generation.state is SessionGenerationState.RETIRING:
+                updated = generation.transition_to(
+                    SessionGenerationState.RETIRED, at=at
+                )
+            else:
+                if not allow_cancel_unstarted:
+                    raise ValueError(
+                        "completed WorkItem has an unstarted session generation"
+                    )
+                if generation.state is SessionGenerationState.STARTING:
+                    raise ValueError(
+                        "starting session generation has an ambiguous remote identity"
+                    )
+                if (
+                    generation.codex_session_id is not None
+                    or generation.last_published_sha is not None
+                    or connection.execute(
+                        "SELECT 1 FROM turn_session_generations "
+                        "WHERE session_generation_id = ? LIMIT 1",
+                        (generation.session_generation_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    raise ValueError(
+                        "planned session generation cannot be safely cancelled"
+                    )
+                updated = generation.transition_to(
+                    SessionGenerationState.FAILED, at=at
+                )
+            cursor = connection.execute(
+                "UPDATE session_generations SET state = ?, retired_at = ?, updated_at = ? "
+                "WHERE session_generation_id = ? AND state = ?",
+                (
+                    updated.state.value,
+                    updated.retired_at,
+                    updated.updated_at,
+                    generation.session_generation_id,
+                    generation.state.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("concurrent session generation terminalization detected")
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "session_generation_state_changed",
+                {
+                    "from": generation.state.value,
+                    "reason": reason,
+                    "session_generation_id": generation.session_generation_id,
+                    "to": updated.state.value,
+                },
+                at,
+            )
 
     def bind_codex_session(
         self, work_item_id: str, session_id: str, *, updated_at: str | None = None
@@ -3818,6 +4219,18 @@ class StateStore:
         values = dict(row)
         values["status"] = WorkItemArchiveStatus(values["status"])
         return WorkItemArchive(**values)
+
+    @staticmethod
+    def _row_to_work_item_disposition(row: sqlite3.Row) -> WorkItemDisposition:
+        values = dict(row)
+        values["kind"] = WorkItemDispositionKind(values["kind"])
+        return WorkItemDisposition(**values)
+
+    @staticmethod
+    def _row_to_work_item_absence_reconciliation(
+        row: sqlite3.Row,
+    ) -> WorkItemAbsenceReconciliation:
+        return WorkItemAbsenceReconciliation(**dict(row))
 
     @staticmethod
     def _row_to_slack_delivery(row: sqlite3.Row) -> SlackDeliveryRecord:

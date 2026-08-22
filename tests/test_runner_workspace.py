@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ from codex_dispatcher.runner_transport import (
     parse_runner_export_reply,
 )
 from codex_dispatcher.runner_workspace import RunnerWorkspace, RunnerWorkspaceError
+from codex_dispatcher.runner_disk import RunnerDiskError
 from codex_dispatcher.source_bundle import GitSourceBundleBuilder
 
 
@@ -77,6 +79,226 @@ def prepare_request(artifact: bytes, base_sha: str) -> RunnerRequest:
 
 
 class RunnerWorkspaceTests(unittest.TestCase):
+    def test_bounded_image_archive_keeps_image_reclamation_path(self) -> None:
+        class ImageDisk:
+            def __init__(self) -> None:
+                self.archive_calls: list[tuple[str, Path]] = []
+
+            def final_image_exists(self, work_item_id: str) -> bool:
+                return True
+
+            def ensure_mounted(self, work_item_id: str, mountpoint: Path) -> None:
+                return None
+
+            def archive(self, work_item_id: str, mountpoint: Path) -> int:
+                self.archive_calls.append((work_item_id, mountpoint))
+                shutil.rmtree(mountpoint)
+                return 4096
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact, base_sha = fixture(root)
+            legacy = RunnerWorkspace(git_path=GIT, work_items_root=root / "runner")
+            legacy.prepare(prepare_request(artifact, base_sha), artifact)
+            disk = ImageDisk()
+            workspace = RunnerWorkspace(
+                git_path=GIT,
+                work_items_root=root / "runner",
+                work_item_disk=disk,  # type: ignore[arg-type]
+            )
+            request = RunnerRequest(
+                RunnerOperation.ARCHIVE,
+                WORK_ITEM,
+                version=NEXT_PROTOCOL_VERSION,
+                expected_head_sha=base_sha,
+            )
+            mountpoint = root / "runner" / "owner__repo" / "issue-42"
+            original_ismount = os.path.ismount
+
+            def is_mount(path: object) -> bool:
+                return Path(path) == mountpoint or original_ismount(path)
+
+            with patch("codex_dispatcher.runner_workspace.os.path.ismount", is_mount):
+                archived = workspace.archive(request)
+
+            self.assertEqual(4096, archived.reclaimed_bytes)
+            self.assertEqual([(WORK_ITEM, mountpoint)], disk.archive_calls)
+            record = json.loads(
+                (root / "runner" / ".archives" / f"{WORK_ITEM}.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual("bounded_image", record["storage_kind"])
+
+    def test_bounded_disk_archives_exact_legacy_directory_without_turn_fallback(self) -> None:
+        class MissingImageDisk:
+            def final_image_exists(self, work_item_id: str) -> bool:
+                self.work_item_id = work_item_id
+                return False
+
+            def ensure_mounted(self, work_item_id: str, mountpoint: Path) -> None:
+                raise RunnerDiskError("fixture image is absent")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact, base_sha = fixture(root)
+            legacy = RunnerWorkspace(git_path=GIT, work_items_root=root / "runner")
+            prepare = prepare_request(artifact, base_sha)
+            legacy.prepare(prepare, artifact)
+            disk = MissingImageDisk()
+            workspace = RunnerWorkspace(
+                git_path=GIT,
+                work_items_root=root / "runner",
+                work_item_disk=disk,  # type: ignore[arg-type]
+            )
+            request = RunnerRequest(
+                RunnerOperation.ARCHIVE,
+                WORK_ITEM,
+                version=NEXT_PROTOCOL_VERSION,
+                expected_head_sha=base_sha,
+            )
+            status = RunnerRequest(
+                RunnerOperation.ARCHIVE_STATUS,
+                WORK_ITEM,
+                version=NEXT_PROTOCOL_VERSION,
+                expected_head_sha=base_sha,
+            )
+
+            self.assertIs(RunnerArchiveState.ACTIVE, workspace.archive_status(status).state)
+            self.assertTrue(workspace.archive_requires_safety_preflight(request))
+            with self.assertRaisesRegex(RunnerWorkspaceError, "boundary"):
+                workspace.current_head(WORK_ITEM)
+
+            archived = workspace.archive(request)
+            self.assertIs(RunnerArchiveState.ARCHIVED, archived.state)
+            self.assertGreater(archived.reclaimed_bytes or 0, 0)
+            self.assertFalse((root / "runner" / "owner__repo" / "issue-42").exists())
+            self.assertTrue(
+                (root / "runner" / ".registry" / f"{WORK_ITEM}.json").is_file()
+            )
+            record = json.loads(
+                (root / "runner" / ".archives" / f"{WORK_ITEM}.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(2, record["version"])
+            self.assertEqual("legacy_directory", record["storage_kind"])
+            self.assertIs(RunnerArchiveState.ARCHIVED, workspace.archive_status(status).state)
+
+    def test_archive_rejects_missing_or_mixed_storage_before_first_tombstone(self) -> None:
+        class Disk:
+            def __init__(self) -> None:
+                self.image_exists = False
+
+            def final_image_exists(self, work_item_id: str) -> bool:
+                return self.image_exists
+
+            def ensure_mounted(self, work_item_id: str, mountpoint: Path) -> None:
+                raise AssertionError("legacy archive must not mount an absent image")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact, base_sha = fixture(root)
+            legacy = RunnerWorkspace(git_path=GIT, work_items_root=root / "runner")
+            legacy.prepare(prepare_request(artifact, base_sha), artifact)
+            disk = Disk()
+            workspace = RunnerWorkspace(
+                git_path=GIT,
+                work_items_root=root / "runner",
+                work_item_disk=disk,  # type: ignore[arg-type]
+            )
+            request = RunnerRequest(
+                RunnerOperation.ARCHIVE,
+                WORK_ITEM,
+                version=NEXT_PROTOCOL_VERSION,
+                expected_head_sha=base_sha,
+            )
+
+            disk.image_exists = True
+            with self.assertRaisesRegex(RunnerWorkspaceError, "both present"):
+                workspace.archive_requires_safety_preflight(request)
+            self.assertFalse((root / "runner" / ".archives" / f"{WORK_ITEM}.json").exists())
+
+            disk.image_exists = False
+            shutil.rmtree(root / "runner" / "owner__repo" / "issue-42")
+            with self.assertRaisesRegex(RunnerWorkspaceError, "unavailable"):
+                workspace.archive_requires_safety_preflight(request)
+
+    def test_archive_replay_rejects_storage_kind_switch(self) -> None:
+        class Disk:
+            def __init__(self) -> None:
+                self.image_exists = False
+
+            def final_image_exists(self, work_item_id: str) -> bool:
+                return self.image_exists
+
+            def ensure_mounted(self, work_item_id: str, mountpoint: Path) -> None:
+                raise AssertionError("legacy archive must not mount an absent image")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact, base_sha = fixture(root)
+            legacy = RunnerWorkspace(git_path=GIT, work_items_root=root / "runner")
+            legacy.prepare(prepare_request(artifact, base_sha), artifact)
+            disk = Disk()
+            workspace = RunnerWorkspace(
+                git_path=GIT,
+                work_items_root=root / "runner",
+                work_item_disk=disk,  # type: ignore[arg-type]
+            )
+            request = RunnerRequest(
+                RunnerOperation.ARCHIVE,
+                WORK_ITEM,
+                version=NEXT_PROTOCOL_VERSION,
+                expected_head_sha=base_sha,
+            )
+            with (
+                patch.object(
+                    workspace,
+                    "_archive_directory_tree",
+                    side_effect=RunnerWorkspaceError("fixture interruption"),
+                ),
+                self.assertRaisesRegex(RunnerWorkspaceError, "interruption"),
+            ):
+                workspace.archive(request)
+            disk.image_exists = True
+            with self.assertRaisesRegex(RunnerWorkspaceError, "conflicts"):
+                workspace.archive(request)
+
+    def test_archived_v1_tombstone_remains_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = RunnerWorkspace(git_path=GIT, work_items_root=root / "runner")
+            archive_dir = root / "runner" / ".archives"
+            archive_dir.mkdir(parents=True, mode=0o700)
+            archive_dir.joinpath(f"{WORK_ITEM}.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "work_item_id": WORK_ITEM,
+                        "expected_head_sha": "a" * 40,
+                        "metadata_sha256": "b" * 64,
+                        "state": "archived",
+                        "reclaimed_bytes": 123,
+                        "archived_at": "2026-08-23T00:00:00+00:00",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+
+            reply = workspace.archive_status(
+                RunnerRequest(
+                    RunnerOperation.ARCHIVE_STATUS,
+                    WORK_ITEM,
+                    version=NEXT_PROTOCOL_VERSION,
+                    expected_head_sha="a" * 40,
+                )
+            )
+            self.assertIs(RunnerArchiveState.ARCHIVED, reply.state)
+            self.assertEqual(123, reply.reclaimed_bytes)
+
     def test_archive_is_permanent_idempotent_and_head_bound(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

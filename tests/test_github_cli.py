@@ -68,6 +68,81 @@ def pull_request(
 
 
 class GitHubCliTrackerTests(unittest.TestCase):
+    def test_discard_state_requires_stable_label_event_identity(self) -> None:
+        discarded = issue(
+            labels=[label("agent:discard"), label("exec:ssh-cli")]
+        )
+        event = {
+            "id": 987,
+            "event": "labeled",
+            "created_at": "2026-08-23T01:00:00Z",
+            "label": {"name": "agent:discard"},
+            "actor": {"login": "alice"},
+        }
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            side_effect=[
+                result([discarded]),
+                json_lines_result(),
+                json_lines_result(event),
+                result(discarded),
+            ],
+        ):
+            tasks = GitHubCliTracker(gh_path=GH).list_open_tasks(
+                REPOSITORY, TaskState.DISCARD
+            )
+        self.assertEqual("alice", tasks[0].state_approved_by)
+        self.assertEqual("987", tasks[0].state_approval_event_id)
+        self.assertEqual("2026-08-23T01:00:00Z", tasks[0].state_approved_at)
+
+        conflicting = dict(event, id=988, actor={"login": "bob"})
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            side_effect=[
+                result([discarded]),
+                json_lines_result(),
+                json_lines_result(event, conflicting),
+                result(discarded),
+            ],
+        ):
+            ambiguous = GitHubCliTracker(gh_path=GH).list_open_tasks(
+                REPOSITORY, TaskState.DISCARD
+            )
+        self.assertIsNone(ambiguous[0].state_approved_by)
+        self.assertIsNone(ambiguous[0].state_approval_event_id)
+
+    def test_discard_snapshot_change_during_audit_fails_closed(self) -> None:
+        discarded = issue(
+            labels=[label("agent:discard"), label("exec:ssh-cli")]
+        )
+        revoked = dict(
+            discarded,
+            labels=[label("agent:blocked"), label("exec:ssh-cli")],
+            updatedAt="2026-08-23T01:01:00Z",
+        )
+        event = {
+            "id": 987,
+            "event": "labeled",
+            "created_at": "2026-08-23T01:00:00Z",
+            "label": {"name": "agent:discard"},
+            "actor": {"login": "alice"},
+        }
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            side_effect=[
+                result([discarded]),
+                json_lines_result(),
+                json_lines_result(event),
+                result(revoked),
+            ],
+        ):
+            with self.assertRaisesRegex(
+                GitHubCliTrackerError, "snapshot changed"
+            ):
+                GitHubCliTracker(gh_path=GH).list_open_tasks(
+                    REPOSITORY, TaskState.DISCARD
+                )
+
     def test_list_ready_tasks_reads_fixed_argv_and_audits_latest_label_actor(self) -> None:
         calls: list[tuple[str, ...]] = []
         keyword_arguments: list[dict[str, object]] = []

@@ -103,6 +103,13 @@ class OfflineSshDispatchService:
             work_item_id, eligible_at=eligible_at
         )
 
+    def archive_disposed_work_item(
+        self, work_item_id: str, *, eligible_at: str
+    ) -> WorkItemArchive:
+        return self._orchestrator.archive_disposed_work_item(
+            work_item_id, eligible_at=eligible_at
+        )
+
     def reconcile_work_item_archive(self, work_item_id: str) -> WorkItemArchive:
         return self._orchestrator.reconcile_work_item_archive(work_item_id)
 

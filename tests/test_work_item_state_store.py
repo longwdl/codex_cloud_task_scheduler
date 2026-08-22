@@ -38,6 +38,7 @@ from codex_dispatcher.work_items import (
     WorkItemState,
 )
 from codex_dispatcher.work_item_lifecycle import WorkItemArchiveStatus
+from codex_dispatcher.work_item_lifecycle import WorkItemDispositionKind
 
 
 SESSION = "123e4567-e89b-12d3-a456-426614174000"
@@ -92,7 +93,245 @@ def make_ready(store: StateStore, item: WorkItem) -> WorkItem:
     return store.update_work_item_state(item.work_item_id, WorkItemState.READY)
 
 
+def migrate_database_through(path: Path, last_version: int) -> None:
+    migrations = sorted(
+        (
+            int(migration.name.split("_", 1)[0]),
+            migration,
+        )
+        for migration in files("codex_dispatcher.migrations").iterdir()
+        if migration.name.endswith(".sql")
+    )
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            "CREATE TABLE schema_migrations "
+            "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        for version, migration in migrations:
+            if version > last_version:
+                break
+            connection.executescript(migration.read_text(encoding="utf-8"))
+            connection.execute(
+                "INSERT INTO schema_migrations(version, applied_at) "
+                "VALUES (?, 'legacy')",
+                (version,),
+            )
+        connection.commit()
+
+
 class WorkItemStateStoreTests(unittest.TestCase):
+    def test_migration_13_retires_completed_generation_at_durable_event_time(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "schema-12.db"
+            migrate_database_through(path, 12)
+            item = make_item(20)
+            completion_time = "2026-02-20T00:00:00+00:00"
+            with StateStore(path) as store:
+                store.create_work_item(item)
+                store._connection.execute(
+                    "UPDATE work_items SET state = 'review' WHERE work_item_id = ?",
+                    (item.work_item_id,),
+                )
+                store._connection.execute(
+                    "INSERT INTO session_generations "
+                    "(session_generation_id, work_item_id, generation_number, state, role, "
+                    "codex_session_id, start_head_sha, last_published_sha, policy_sha256, "
+                    "rotation_reason, created_at, started_at, retired_at, updated_at) "
+                    "VALUES (?, ?, 1, 'active', 'implementation', ?, ?, NULL, NULL, "
+                    "'legacy_migration', ?, ?, NULL, ?)",
+                    (
+                        "sg_" + "8" * 32,
+                        item.work_item_id,
+                        SESSION,
+                        item.base_sha,
+                        item.created_at,
+                        item.created_at,
+                        item.updated_at,
+                    ),
+                )
+                store._connection.execute(
+                    "UPDATE work_items SET state = 'completed', updated_at = ? "
+                    "WHERE work_item_id = ?",
+                    (completion_time, item.work_item_id),
+                )
+                store._connection.execute(
+                    "INSERT INTO work_item_events "
+                    "(work_item_id, turn_id, event_type, event_time, payload_json) "
+                    "VALUES (?, NULL, 'work_item_state_changed', ?, ?)",
+                    (
+                        item.work_item_id,
+                        completion_time,
+                        '{"from":"review","to":"completed"}',
+                    ),
+                )
+                store._connection.commit()
+
+            with StateStore(path) as store:
+                store.migrate()
+                generation = store.get_session_generation("sg_" + "8" * 32)
+                assert generation is not None
+                self.assertIs(SessionGenerationState.RETIRED, generation.state)
+                self.assertEqual(completion_time, generation.retired_at)
+                self.assertEqual(completion_time, generation.updated_at)
+                self.assertEqual("ok", store.integrity_check())
+
+    def test_migration_13_guard_rolls_back_completed_active_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "schema-12-invalid.db"
+            migrate_database_through(path, 12)
+            item = make_item(19)
+            with StateStore(path) as store:
+                store.create_work_item(item)
+                store._connection.execute(
+                    "UPDATE work_items SET state = 'completed' WHERE work_item_id = ?",
+                    (item.work_item_id,),
+                )
+                store._connection.execute(
+                    "INSERT INTO turns "
+                    "(turn_id, work_item_id, turn_number, state, issue_revision, "
+                    "prompt_sha256, input_head_sha, created_at, updated_at) "
+                    "VALUES (?, ?, 1, 'planned', 'revision', ?, ?, ?, ?)",
+                    (
+                        "turn_" + "9" * 32,
+                        item.work_item_id,
+                        "b" * 64,
+                        item.base_sha,
+                        item.created_at,
+                        item.updated_at,
+                    ),
+                )
+                store._connection.commit()
+
+            with StateStore(path) as store:
+                with self.assertRaises(sqlite3.IntegrityError):
+                    store.migrate()
+                versions = store._connection.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                ).fetchall()
+                disposition_table = store._connection.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'work_item_dispositions'"
+                ).fetchone()
+            self.assertEqual(
+                tuple(range(1, 13)), tuple(row["version"] for row in versions)
+            )
+            self.assertIsNone(disposition_table)
+
+    def test_completion_and_disposition_terminalize_session_generations_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                completed = make_item(21)
+                store.create_work_item(completed)
+                for state in (
+                    WorkItemState.PREPARING,
+                    WorkItemState.READY,
+                    WorkItemState.RUNNING,
+                    WorkItemState.REVIEW,
+                ):
+                    store.update_work_item_state(completed.work_item_id, state)
+                store._connection.execute(
+                    "INSERT INTO session_generations "
+                    "(session_generation_id, work_item_id, generation_number, state, role, "
+                    "codex_session_id, start_head_sha, last_published_sha, policy_sha256, "
+                    "rotation_reason, created_at, started_at, retired_at, updated_at) "
+                    "VALUES (?, ?, 1, 'active', 'implementation', ?, ?, NULL, NULL, "
+                    "'legacy_migration', ?, ?, NULL, ?)",
+                    (
+                        "sg_" + "2" * 32,
+                        completed.work_item_id,
+                        "223e4567-e89b-12d3-a456-426614174000",
+                        completed.base_sha,
+                        completed.created_at,
+                        completed.created_at,
+                        completed.updated_at,
+                    ),
+                )
+                store._connection.commit()
+                store.update_work_item_state(
+                    completed.work_item_id,
+                    WorkItemState.COMPLETED,
+                    updated_at="2026-02-21T00:00:00+00:00",
+                )
+                self.assertIs(
+                    SessionGenerationState.RETIRED,
+                    store.list_session_generations(completed.work_item_id)[0].state,
+                )
+
+                disposed = make_item(22)
+                store.create_work_item(disposed)
+                store.update_work_item_state(
+                    disposed.work_item_id, WorkItemState.PREPARING
+                )
+                store.update_work_item_state(
+                    disposed.work_item_id, WorkItemState.BLOCKED
+                )
+                disposition = store.record_work_item_disposition(
+                    disposed.work_item_id,
+                    kind=WorkItemDispositionKind.ABANDONED,
+                    expected_head_sha=disposed.base_sha,
+                    pr_number=None,
+                    requested_by="alice",
+                    request_event_id="12345",
+                    requested_at="2026-02-22T00:00:00+00:00",
+                    reason_code="operator_agent_discard",
+                    updated_at="2026-02-22T00:01:00+00:00",
+                )
+                self.assertEqual("12345", disposition.request_event_id)
+                self.assertEqual(disposition, store.get_work_item_disposition(disposed.work_item_id))
+                with self.assertRaisesRegex(ValueError, "immutable"):
+                    store.update_work_item_state(
+                        disposed.work_item_id, WorkItemState.PREPARING
+                    )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    store._connection.execute(
+                        "INSERT INTO turns "
+                        "(turn_id, work_item_id, turn_number, state, issue_revision, "
+                        "prompt_sha256, input_head_sha, created_at, updated_at) "
+                        "VALUES (?, ?, 1, 'planned', 'r', ?, ?, ?, ?)",
+                        (
+                            "turn_" + "3" * 32,
+                            disposed.work_item_id,
+                            "4" * 64,
+                            disposed.base_sha,
+                            disposed.created_at,
+                            disposed.updated_at,
+                        ),
+                    )
+                store._connection.rollback()
+                archive_request = RunnerRequest(
+                    RunnerOperation.ARCHIVE,
+                    disposed.work_item_id,
+                    version=NEXT_PROTOCOL_VERSION,
+                    expected_head_sha=disposed.base_sha,
+                )
+                store.prepare_work_item_archive(
+                    disposed.work_item_id,
+                    expected_head_sha=disposed.base_sha,
+                    eligible_at=disposition.eligible_at,
+                    request_sha256=sha256(
+                        archive_request.to_json().encode("utf-8")
+                    ).hexdigest(),
+                )
+                absence = store.record_work_item_absence_reconciliation(
+                    disposed.work_item_id,
+                    expected_head_sha=disposed.base_sha,
+                    evidence_sha256="5" * 64,
+                    observed_by="operator",
+                    observed_at="2026-02-22T00:02:00+00:00",
+                )
+                self.assertEqual(
+                    absence,
+                    store.get_work_item_absence_reconciliation(
+                        disposed.work_item_id
+                    ),
+                )
+                self.assertIs(
+                    WorkItemArchiveStatus.PREPARED,
+                    store.get_work_item_archive(disposed.work_item_id).status,  # type: ignore[union-attr]
+                )
+
     def test_completed_work_item_archive_ledger_is_durable_and_strict(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             with StateStore(Path(temp_dir) / "state.db") as store:
@@ -227,7 +466,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 ).fetchall()
                 legacy_runs = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
                 self.assertEqual(
-            [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)],
+                    [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,), (13,)],
                     versions,
                 )
             self.assertEqual(0, legacy_runs)
@@ -296,7 +535,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
                 self.assertEqual(
-            [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)],
+                    [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,), (13,)],
                     versions,
                 )
 

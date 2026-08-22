@@ -115,10 +115,7 @@ class GitHubCliTracker:
             task = _parse_issue(issue, repository, f"issues[{index}]")
             if task.is_open and task.state is state:
                 tasks.append(
-                    _with_ready_approver(
-                        task,
-                        self._last_ready_label_actor(repository, task.issue_number),
-                    )
+                    self._with_state_approvers(repository, task)
                 )
         return tuple(tasks)
 
@@ -133,10 +130,7 @@ class GitHubCliTracker:
             )
         )
         task = _parse_issue(issue, repository, "issue")
-        return _with_ready_approver(
-            task,
-            self._last_ready_label_actor(repository, task.issue_number),
-        )
+        return self._with_state_approvers(repository, task)
 
     def list_comments(
         self, repository: str, task_id: str
@@ -357,7 +351,51 @@ class GitHubCliTracker:
             )
         )
 
-    def _last_ready_label_actor(self, repository: str, issue_number: int) -> str | None:
+    def _with_state_approvers(
+        self, repository: str, task: TrackerTask
+    ) -> TrackerTask:
+        ready_approval = self._last_state_label_approval(
+            repository, task.issue_number, TaskState.READY
+        )
+        ready_approver = ready_approval[0] if ready_approval is not None else None
+        state_approval = ready_approval if task.state is TaskState.READY else None
+        if task.state is TaskState.DISCARD:
+            state_approval = self._last_state_label_approval(
+                repository, task.issue_number, TaskState.DISCARD
+            )
+            current = self._read_issue_snapshot(repository, task.issue_number)
+            if current != task:
+                raise GitHubCliTrackerError(
+                    "discard issue snapshot changed during authorization audit"
+                )
+        return _with_state_approvers(task, ready_approver, state_approval)
+
+    def _read_issue_snapshot(
+        self, repository: str, issue_number: int
+    ) -> TrackerTask:
+        issue = self._json_command(
+            (
+                self._gh_path,
+                "issue",
+                "view",
+                str(issue_number),
+                "--repo",
+                repository,
+                "--json",
+                _ISSUE_FIELDS,
+            )
+        )
+        return _parse_issue(issue, repository, "issue authorization recheck")
+
+    def _last_state_label_approval(
+        self,
+        repository: str,
+        issue_number: int,
+        state: TaskState,
+    ) -> tuple[str, str | None, str] | None:
+        if state not in {TaskState.READY, TaskState.DISCARD}:
+            raise ValueError("only trusted operator state labels can be audited")
+        label_name = f"agent:{state.value}"
         events = self._json_lines_command(
             (
                 self._gh_path, "api", "--method", "GET", "--paginate",
@@ -366,26 +404,27 @@ class GitHubCliTracker:
                 "--jq",
                 (
                     '.[] | select(.event == "labeled" and '
-                    '.label.name == "agent:ready") | '
-                    "{event,created_at,actor:{login:.actor.login},"
+                    f'.label.name == "{label_name}") | '
+                    "{id,event,created_at,actor:{login:.actor.login},"
                     "label:{name:.label.name}}"
                 ),
             )
         )
-        latest: tuple[datetime, str] | None = None
+        latest: tuple[datetime, int, str, str] | None = None
         for event in events:
             if not isinstance(event, dict):
                 return None
             if event.get("event") != "labeled":
                 return None
             label = event.get("label")
-            if not isinstance(label, dict) or label.get("name") != "agent:ready":
+            if not isinstance(label, dict) or label.get("name") != label_name:
                 return None
             actor = event.get("actor")
             created_at = event.get("created_at")
             if not isinstance(actor, dict):
                 return None
             login = actor.get("login")
+            event_id = event.get("id")
             if not isinstance(login, str) or not login or not isinstance(created_at, str):
                 return None
             try:
@@ -394,9 +433,20 @@ class GitHubCliTracker:
                 return None
             if occurred_at.tzinfo is None:
                 return None
-            if latest is None or occurred_at > latest[0]:
-                latest = (occurred_at, login)
-        return None if latest is None else latest[1]
+            if state is TaskState.DISCARD:
+                if type(event_id) is not int or event_id <= 0:
+                    return None
+                numeric_event_id = event_id
+            else:
+                numeric_event_id = event_id if type(event_id) is int and event_id > 0 else 0
+            candidate = (occurred_at, numeric_event_id, login, created_at)
+            if latest is not None and occurred_at == latest[0] and login != latest[2]:
+                return None
+            if latest is None or candidate[:2] > latest[:2]:
+                latest = candidate
+        if latest is None:
+            return None
+        return latest[2], (str(latest[1]) if latest[1] else None), latest[3]
 
     def _json_lines_command(self, argv: tuple[str, ...]) -> tuple[Any, ...]:
         result = self._command(argv)
@@ -627,7 +677,11 @@ def _parse_issue(value: Any, repository: str, path: str) -> TrackerTask:
     )
 
 
-def _with_ready_approver(task: TrackerTask, approver: str | None) -> TrackerTask:
+def _with_state_approvers(
+    task: TrackerTask,
+    ready_approver: str | None,
+    state_approval: tuple[str, str | None, str] | None,
+) -> TrackerTask:
     return TrackerTask(
         repository=task.repository,
         task_id=task.task_id,
@@ -637,12 +691,17 @@ def _with_ready_approver(task: TrackerTask, approver: str | None) -> TrackerTask
         state=task.state,
         labels=task.labels,
         created_at=task.created_at,
-        ready_approved_by=approver,
+        ready_approved_by=ready_approver,
         is_open=task.is_open,
         has_unresolved_dependencies=task.has_unresolved_dependencies,
         branch_name=task.branch_name,
         issue_node_id=task.issue_node_id,
         updated_at=task.updated_at,
+        state_approved_by=(state_approval[0] if state_approval is not None else None),
+        state_approval_event_id=(
+            state_approval[1] if state_approval is not None else None
+        ),
+        state_approved_at=(state_approval[2] if state_approval is not None else None),
     )
 
 

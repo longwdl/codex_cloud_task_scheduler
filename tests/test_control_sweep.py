@@ -45,6 +45,7 @@ from codex_dispatcher.trackers.base import (
 )
 from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator
 from codex_dispatcher.work_items import TurnState, WorkItemState
+from codex_dispatcher.work_item_lifecycle import WorkItemDispositionKind
 from tests.test_scheduler import make_config
 from tests.test_ssh_dispatch_planning import BASE_SHA, claimed_task
 
@@ -719,6 +720,80 @@ class SshControlSweepTests(unittest.TestCase):
             [RunnerOperation.ARCHIVE, RunnerOperation.ARCHIVE_STATUS],
             [call.operation for call in self.transport.calls],
         )
+
+    def test_disposed_archive_rechecks_pr_immediately_before_runner_call(self) -> None:
+        class MergeRaceTracker(FakeTracker):
+            def __init__(self, before: PullRequest, after: PullRequest) -> None:
+                super().__init__()
+                self._before = before
+                self._after = after
+                self._reads = 0
+
+            def find_pr_by_branch(
+                self, repository: str, branch_name: str
+            ) -> PullRequest | None:
+                self._record("find_pr_by_branch", repository, branch_name)
+                self._reads += 1
+                return self._before if self._reads == 1 else self._after
+
+        source = _RecordingSource()
+        item = self.dispatch.resolve_and_prepare(
+            claimed_task(),
+            base_sha=BASE_SHA,
+            source_bundle=_bundle(),
+        )
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.RUNNING)
+        head_sha = "d" * 40
+        self.store.record_published_sha(
+            item.work_item_id,
+            previous_sha=BASE_SHA,
+            head_sha=head_sha,
+        )
+        item = self.store.update_work_item_state(
+            item.work_item_id, WorkItemState.REVIEW
+        )
+        item = self.store.bind_draft_pr(item.work_item_id, 7)
+        self.store.record_work_item_disposition(
+            item.work_item_id,
+            kind=WorkItemDispositionKind.SUPERSEDED,
+            expected_head_sha=head_sha,
+            pr_number=7,
+            requested_by="alice",
+            request_event_id="7001",
+            requested_at="2026-08-23T01:00:00Z",
+            reason_code="operator_agent_discard",
+        )
+        open_pr = PullRequest(
+            7,
+            "https://github.com/owner/repo/pull/7",
+            item.task_branch,
+            "Superseded fixture",
+            True,
+            item.base_branch,
+            PullRequestState.OPEN,
+            False,
+            head_sha,
+        )
+        tracker = MergeRaceTracker(
+            open_pr, replace(open_pr, state=PullRequestState.MERGED)
+        )
+        tracker.tasks[str(item.issue_number)] = replace(
+            claimed_task(),
+            state=TaskState.DISCARD,
+            labels=("agent:discard", "exec:ssh-cli", "priority:p1"),
+            state_approved_by="alice",
+            state_approval_event_id="7001",
+            state_approved_at="2026-08-23T01:00:00Z",
+        )
+        self.transport.calls.clear()
+
+        result = self._sweep(tracker, source).run_once()
+
+        self.assertEqual(ControlSweepStatus.BLOCKED, result.status)
+        self.assertEqual(
+            "disposed_pull_request_merged_after_authorization", result.reason
+        )
+        self.assertEqual([], self.transport.calls)
 
     def test_lost_completion_comment_receipt_retries_projection_only(self) -> None:
         tracker = _InterruptingDeliveryTracker(interrupt_comment_once=True)

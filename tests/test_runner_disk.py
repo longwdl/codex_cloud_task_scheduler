@@ -11,6 +11,7 @@ from codex_dispatcher.command_runner import CommandResult
 from codex_dispatcher.runner_disk import (
     FusedWorkItemDisk,
     RunnerDiskError,
+    WorkItemDiskArchiveState,
     WorkItemDiskRuntime,
     _MountRecord,
 )
@@ -58,6 +59,35 @@ def runtime(root: Path) -> tuple[WorkItemDiskRuntime, Path]:
 
 
 class RunnerDiskTests(unittest.TestCase):
+    def test_archive_classifier_distinguishes_final_staging_and_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            configured, work_items = runtime(root)
+            disk = FusedWorkItemDisk(configured, work_items_root=work_items)
+            mountpoint = work_items / "owner__repo" / "issue-1"
+            mountpoint.parent.mkdir(mode=0o700)
+            mountpoint.mkdir(mode=0o700)
+            image = configured.image_directory / f"{WORK_ITEM}.ext4"
+            allocate_dense(image)
+            with patch.object(disk, "_mount_record", return_value=None):
+                self.assertIs(
+                    WorkItemDiskArchiveState.FINAL,
+                    disk.classify_archive_storage(WORK_ITEM, mountpoint),
+                )
+                archived = configured.image_directory / ".archive" / image.name
+                os.replace(image, archived)
+                self.assertIs(
+                    WorkItemDiskArchiveState.ARCHIVING,
+                    disk.classify_archive_storage(WORK_ITEM, mountpoint),
+                )
+                with self.assertRaisesRegex(RunnerDiskError, "archive staging"):
+                    disk.final_image_exists(WORK_ITEM)
+                archived.unlink()
+                self.assertIs(
+                    WorkItemDiskArchiveState.ABSENT,
+                    disk.classify_archive_storage(WORK_ITEM, mountpoint),
+                )
+
     def test_turn_admission_requires_reserve_and_fifteen_percent_free(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -71,6 +101,12 @@ class RunnerDiskTests(unittest.TestCase):
             )
             with patch("codex_dispatcher.runner_disk.os.statvfs", return_value=accepted):
                 disk.assert_turn_admission()
+                snapshot = disk.capacity_snapshot()
+            self.assertTrue(snapshot.turn_admissible)
+            self.assertTrue(snapshot.provision_admissible)
+            self.assertEqual(0, snapshot.provision_shortfall_bytes)
+            self.assertFalse((configured.image_directory / ".staging").exists())
+            self.assertFalse((configured.image_directory / ".archive").exists())
             with (
                 patch("codex_dispatcher.runner_disk.os.statvfs", return_value=low),
                 self.assertRaisesRegex(RunnerDiskError, "admission"),

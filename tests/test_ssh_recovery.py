@@ -22,6 +22,7 @@ from codex_dispatcher.trackers.base import (
     TaskState,
 )
 from codex_dispatcher.work_items import TurnState, WorkItem, WorkItemState
+from codex_dispatcher.work_item_lifecycle import WorkItemDispositionKind
 from tests.test_scheduler import make_config
 from tests.test_ssh_dispatch_planning import BASE_SHA, claimed_task
 
@@ -81,6 +82,194 @@ def pull_request_for(
 
 
 class SshRecoveryTests(unittest.TestCase):
+    def test_trusted_discard_records_terminal_intent_then_archives(self) -> None:
+        work_item = item(20)
+        self.store.create_work_item(work_item)
+        self.store.update_work_item_state(
+            work_item.work_item_id, WorkItemState.PREPARING
+        )
+        work_item = self.store.update_work_item_state(
+            work_item.work_item_id, WorkItemState.BLOCKED
+        )
+        discarded = replace(
+            task_in(TaskState.DISCARD, 20),
+            state_approved_by="alice",
+            state_approval_event_id="2001",
+            state_approved_at="2026-08-23T01:00:00Z",
+        )
+        self.tracker.tasks["20"] = discarded
+
+        planned = plan_ssh_recovery(self.config, self.store, self.tracker)
+        self.assertIs(SshRecoveryAction.RECORD_WORK_ITEM_DISPOSITION, planned.action)
+        self.assertIs(WorkItemDispositionKind.ABANDONED, planned.disposition_kind)
+        self.assertIsNone(planned.disposition_pr_number)
+        self.store.record_work_item_disposition(
+            work_item.work_item_id,
+            kind=planned.disposition_kind or WorkItemDispositionKind.ABANDONED,
+            expected_head_sha=work_item.base_sha,
+            pr_number=planned.disposition_pr_number,
+            requested_by=planned.disposition_requested_by or "",
+            request_event_id=planned.disposition_request_event_id or "",
+            requested_at=planned.disposition_requested_at or "",
+            reason_code="operator_agent_discard",
+        )
+        archive = plan_ssh_recovery(self.config, self.store, self.tracker)
+        self.assertIs(SshRecoveryAction.ARCHIVE_DISPOSED_WORK_ITEM, archive.action)
+        self.assertIsNotNone(archive.archive_eligible_at)
+
+    def test_discard_recovers_exact_unbound_pr_before_classification(self) -> None:
+        work_item = replace(review_item(23), pr_number=None)
+        self.store.create_work_item(work_item)
+        self.tracker.tasks["23"] = replace(
+            task_in(TaskState.DISCARD, 23),
+            state_approved_by="alice",
+            state_approval_event_id="2301",
+            state_approved_at="2026-08-23T02:00:00Z",
+        )
+        pull_request = PullRequest(
+            17,
+            "https://github.com/owner/repo/pull/17",
+            work_item.task_branch,
+            "Superseded fixture",
+            True,
+            work_item.base_branch,
+            PullRequestState.OPEN,
+            False,
+            work_item.last_published_sha,
+        )
+        self.tracker.pull_requests[(work_item.repository, work_item.task_branch)] = (
+            pull_request
+        )
+        planned = plan_ssh_recovery(self.config, self.store, self.tracker)
+        self.assertIs(SshRecoveryAction.RECORD_WORK_ITEM_DISPOSITION, planned.action)
+        self.assertIs(WorkItemDispositionKind.SUPERSEDED, planned.disposition_kind)
+        self.assertEqual(17, planned.disposition_pr_number)
+
+    def test_disposition_revalidates_pr_state_before_archive(self) -> None:
+        abandoned = item(20).transition_to(WorkItemState.PREPARING)
+        self.store.create_work_item(abandoned)
+        self.store.record_work_item_disposition(
+            abandoned.work_item_id,
+            kind=WorkItemDispositionKind.ABANDONED,
+            expected_head_sha=abandoned.base_sha,
+            pr_number=None,
+            requested_by="alice",
+            request_event_id="2001",
+            requested_at="2026-08-23T01:00:00Z",
+            reason_code="operator_agent_discard",
+        )
+        self.tracker.tasks["20"] = replace(
+            task_in(TaskState.DISCARD, 20),
+            state_approved_by="alice",
+            state_approval_event_id="2001",
+            state_approved_at="2026-08-23T01:00:00Z",
+        )
+        self.tracker.pull_requests[
+            (abandoned.repository, abandoned.task_branch)
+        ] = PullRequest(
+            9,
+            "https://github.com/owner/repo/pull/9",
+            abandoned.task_branch,
+            "Late PR",
+            True,
+            abandoned.base_branch,
+            PullRequestState.OPEN,
+            False,
+            abandoned.base_sha,
+        )
+        appeared = plan_ssh_recovery(self.config, self.store, self.tracker)
+        self.assertEqual(SshRecoveryAction.BLOCK, appeared.action)
+        self.assertEqual(
+            "disposed_abandoned_pull_request_appeared", appeared.reason
+        )
+
+    def test_superseded_disposition_blocks_if_pr_is_later_merged(self) -> None:
+        work_item = review_item(23)
+        self.store.create_work_item(work_item)
+        self.store.record_work_item_disposition(
+            work_item.work_item_id,
+            kind=WorkItemDispositionKind.SUPERSEDED,
+            expected_head_sha=work_item.last_published_sha or "",
+            pr_number=work_item.pr_number,
+            requested_by="alice",
+            request_event_id="2301",
+            requested_at="2026-08-23T01:00:00Z",
+            reason_code="operator_agent_discard",
+        )
+        self.tracker.tasks["23"] = replace(
+            task_in(TaskState.DISCARD, 23),
+            state_approved_by="alice",
+            state_approval_event_id="2301",
+            state_approved_at="2026-08-23T01:00:00Z",
+        )
+        self.tracker.pull_requests[
+            (work_item.repository, work_item.task_branch)
+        ] = pull_request_for(work_item, PullRequestState.MERGED)
+        merged = plan_ssh_recovery(self.config, self.store, self.tracker)
+        self.assertEqual(SshRecoveryAction.BLOCK, merged.action)
+        self.assertEqual(
+            "disposed_pull_request_merged_after_authorization", merged.reason
+        )
+
+    def test_archived_or_absence_reconciled_dispositions_are_terminal_overlays(self) -> None:
+        for issue_number, work_item in (
+            (21, item(21).transition_to(WorkItemState.PREPARING).transition_to(WorkItemState.READY)),
+            (23, review_item(23)),
+        ):
+            with self.subTest(issue_number=issue_number):
+                self.store.create_work_item(work_item)
+                pr_number = work_item.pr_number
+                kind = (
+                    WorkItemDispositionKind.SUPERSEDED
+                    if pr_number is not None
+                    else WorkItemDispositionKind.ABANDONED
+                )
+                expected_head_sha = work_item.last_published_sha or work_item.base_sha
+                disposition = self.store.record_work_item_disposition(
+                    work_item.work_item_id,
+                    kind=kind,
+                    expected_head_sha=expected_head_sha,
+                    pr_number=pr_number,
+                    requested_by="alice",
+                    request_event_id=str(2000 + issue_number),
+                    requested_at="2026-08-23T01:00:00Z",
+                    reason_code="operator_agent_discard",
+                )
+                request = RunnerRequest(
+                    RunnerOperation.ARCHIVE,
+                    work_item.work_item_id,
+                    version=NEXT_PROTOCOL_VERSION,
+                    expected_head_sha=expected_head_sha,
+                )
+                self.store.prepare_work_item_archive(
+                    work_item.work_item_id,
+                    expected_head_sha=expected_head_sha,
+                    eligible_at=disposition.eligible_at,
+                    request_sha256=sha256(
+                        request.to_json().encode("utf-8")
+                    ).hexdigest(),
+                )
+                self.store.record_work_item_absence_reconciliation(
+                    work_item.work_item_id,
+                    expected_head_sha=expected_head_sha,
+                    evidence_sha256=str(issue_number % 10) * 64,
+                    observed_by="operator",
+                    observed_at="2026-08-23T01:01:00Z",
+                )
+                self.tracker.tasks[str(issue_number)] = replace(
+                    task_in(TaskState.DISCARD, issue_number),
+                    state_approved_by="alice",
+                    state_approval_event_id=str(2000 + issue_number),
+                    state_approved_at="2026-08-23T01:00:00Z",
+                )
+                if pr_number is not None:
+                    self.tracker.pull_requests[
+                        (work_item.repository, work_item.task_branch)
+                    ] = pull_request_for(work_item, PullRequestState.OPEN)
+
+        plan = plan_ssh_recovery(self.config, self.store, self.tracker)
+        self.assertEqual(SshRecoveryAction.IDLE, plan.action)
+
     def test_completed_retention_plans_one_archive_and_reconciles_ambiguity(self) -> None:
         work_item = review_item()
         self.store.create_work_item(work_item)

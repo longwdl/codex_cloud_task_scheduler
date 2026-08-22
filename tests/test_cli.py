@@ -28,6 +28,42 @@ from tests.test_scheduler import make_config
 
 
 class CliTests(unittest.TestCase):
+    def test_runner_capacity_reports_turn_and_provision_boundaries(self) -> None:
+        snapshot = SimpleNamespace(
+            capacity_bytes=1000,
+            available_bytes=200,
+            image_size_bytes=100,
+            host_reserve_bytes=150,
+            turn_admissible=True,
+            provision_admissible=False,
+            provision_shortfall_bytes=50,
+        )
+        configuration = SimpleNamespace(
+            work_item_disk=object(),
+            work_items_root=Path("/srv/codex-runner/work-items"),
+        )
+        disk = SimpleNamespace(capacity_snapshot=lambda: snapshot)
+        stdout = io.StringIO()
+        with (
+            patch(
+                "codex_dispatcher.runner_main.load_runner_configuration",
+                return_value=configuration,
+            ),
+            patch(
+                "codex_dispatcher.runner_disk.FusedWorkItemDisk",
+                return_value=disk,
+            ),
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = main(
+                ["runner-capacity", "--config", "/srv/codex-runner/etc/config.json", "--json"]
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(0, exit_code)
+        self.assertTrue(payload["turn_admissible"])
+        self.assertFalse(payload["provision_admissible"])
+        self.assertEqual(50, payload["provision_shortfall_bytes"])
+
     def test_doctor_json_is_read_only_and_machine_readable(self) -> None:
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):

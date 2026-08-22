@@ -149,22 +149,46 @@ class OfflineTurnOrchestrator:
         self, work_item_id: str, *, eligible_at: str
     ) -> WorkItemArchive:
         work_item = self._require_work_item(work_item_id)
-        if (
-            work_item.state is not WorkItemState.COMPLETED
-            or work_item.last_published_sha is None
-        ):
+        if work_item.state is not WorkItemState.COMPLETED:
             raise TurnOrchestrationError(
-                "Runner archive requires a completed published WorkItem"
+                "Runner completed archive requires a completed WorkItem"
+            )
+        return self._archive_terminal_work_item(work_item, eligible_at=eligible_at)
+
+    def archive_disposed_work_item(
+        self, work_item_id: str, *, eligible_at: str
+    ) -> WorkItemArchive:
+        work_item = self._require_work_item(work_item_id)
+        disposition = self._store.get_work_item_disposition(work_item_id)
+        if disposition is None:
+            raise TurnOrchestrationError(
+                "Runner disposed archive requires durable operator intent"
+            )
+        return self._archive_terminal_work_item(work_item, eligible_at=eligible_at)
+
+    def _archive_terminal_work_item(
+        self, work_item: WorkItem, *, eligible_at: str
+    ) -> WorkItemArchive:
+        disposition = self._store.get_work_item_disposition(work_item.work_item_id)
+        if work_item.state is WorkItemState.COMPLETED:
+            expected_head_sha = work_item.last_published_sha
+        elif disposition is not None:
+            expected_head_sha = disposition.expected_head_sha
+        else:
+            expected_head_sha = None
+        if expected_head_sha is None:
+            raise TurnOrchestrationError(
+                "Runner archive requires a terminal exact WorkItem checkpoint"
             )
         request = RunnerRequest(
             RunnerOperation.ARCHIVE,
-            work_item_id,
+            work_item.work_item_id,
             version=NEXT_PROTOCOL_VERSION,
-            expected_head_sha=work_item.last_published_sha,
+            expected_head_sha=expected_head_sha,
         )
         record = self._store.prepare_work_item_archive(
-            work_item_id,
-            expected_head_sha=work_item.last_published_sha,
+            work_item.work_item_id,
+            expected_head_sha=expected_head_sha,
             eligible_at=eligible_at,
             request_sha256=sha256(request.to_json().encode("utf-8")).hexdigest(),
         )
@@ -177,7 +201,7 @@ class OfflineTurnOrchestrator:
         # Commit the uncertain in-flight state before crossing the SSH boundary.
         # A crash before invoke is then reconciled as ACTIVE by ARCHIVE_STATUS;
         # a crash after acceptance is reconciled as ARCHIVING/ARCHIVED.
-        record = self._store.mark_work_item_archive_ambiguous(work_item_id)
+        record = self._store.mark_work_item_archive_ambiguous(work_item.work_item_id)
         try:
             output = self._transport.invoke(request)
         except RunnerTransportInterrupted:
@@ -194,12 +218,14 @@ class OfflineTurnOrchestrator:
             return record
         if (
             reply.operation is not RunnerOperation.ARCHIVE
-            or reply.work_item_id != work_item_id
-            or reply.expected_head_sha != work_item.last_published_sha
+            or reply.work_item_id != work_item.work_item_id
+            or reply.expected_head_sha != expected_head_sha
             or reply.state is not RunnerArchiveState.ARCHIVED
         ):
             return record
-        return self._store.complete_work_item_archive(work_item_id, reply=reply)
+        return self._store.complete_work_item_archive(
+            work_item.work_item_id, reply=reply
+        )
 
     def reconcile_work_item_archive(self, work_item_id: str) -> WorkItemArchive:
         record = self._store.get_work_item_archive(work_item_id)

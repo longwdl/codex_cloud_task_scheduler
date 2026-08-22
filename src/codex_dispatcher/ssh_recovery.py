@@ -24,7 +24,11 @@ from codex_dispatcher.trackers.base import (
 )
 from codex_dispatcher.work_items import Turn, TurnState, WorkItem, WorkItemState
 from codex_dispatcher.work_items import SessionGenerationRole
-from codex_dispatcher.work_item_lifecycle import WorkItemArchiveStatus
+from codex_dispatcher.work_item_lifecycle import (
+    WorkItemArchiveStatus,
+    WorkItemDisposition,
+    WorkItemDispositionKind,
+)
 
 
 class SshRecoveryAction(StrEnum):
@@ -37,6 +41,8 @@ class SshRecoveryAction(StrEnum):
     RECOVER_ORPHAN_CLAIM = "recover_orphan_claim"
     SYNC_TRACKER_STATE = "sync_tracker_state"
     COMPLETE_MERGED_WORK_ITEM = "complete_merged_work_item"
+    RECORD_WORK_ITEM_DISPOSITION = "record_work_item_disposition"
+    ARCHIVE_DISPOSED_WORK_ITEM = "archive_disposed_work_item"
     ARCHIVE_COMPLETED_WORK_ITEM = "archive_completed_work_item"
     RECONCILE_WORK_ITEM_ARCHIVE = "reconcile_work_item_archive"
     BLOCK = "block"
@@ -52,6 +58,11 @@ class SshRecoveryPlan:
     reason: str | None = None
     pull_request: PullRequest | None = None
     archive_eligible_at: str | None = None
+    disposition_kind: WorkItemDispositionKind | None = None
+    disposition_pr_number: int | None = None
+    disposition_requested_by: str | None = None
+    disposition_request_event_id: str | None = None
+    disposition_requested_at: str | None = None
 
 
 def plan_ssh_recovery(
@@ -99,6 +110,12 @@ def plan_ssh_recovery(
             active_turn,
         )
 
+    disposition = _plan_work_item_disposition(
+        config, store, tracker, configured
+    )
+    if disposition is not None:
+        return disposition
+
     final_audit = _plan_fresh_final_audit(config, store, tracker, configured)
     if final_audit is not None:
         return final_audit
@@ -113,6 +130,7 @@ def plan_ssh_recovery(
         item
         for item in store.list_work_items(include_completed=False)
         if item.state in pending_states
+        and store.get_work_item_disposition(item.work_item_id) is None
     )
     if len(pending) > 1:
         return _blocked("multiple_pending_work_items")
@@ -189,6 +207,235 @@ def plan_ssh_recovery(
     return SshRecoveryPlan(SshRecoveryAction.RECOVER_ORPHAN_CLAIM, task=task)
 
 
+def _plan_work_item_disposition(
+    config: Config,
+    store: StateStore,
+    tracker: Tracker,
+    configured: dict[str, object],
+) -> SshRecoveryPlan | None:
+    for disposition in store.list_work_item_dispositions():
+        work_item = store.get_work_item(disposition.work_item_id)
+        if work_item is None:
+            return _blocked("disposed_work_item_missing")
+        task = tracker.get_task(work_item.repository, str(work_item.issue_number))
+        error = _binding_error(task, work_item, configured)
+        if error is not None:
+            return _blocked(error, task=task, work_item=work_item)
+        assert task is not None
+        repository = configured[work_item.repository]
+        if (
+            task.state is not TaskState.DISCARD
+            or task.state_approved_by not in repository.maintainers
+            or task.state_approval_event_id is None
+            or task.state_approved_at is None
+        ):
+            return _blocked(
+                "disposed_work_item_tracker_state_conflict",
+                task=task,
+                work_item=work_item,
+            )
+        pull_request = tracker.find_pr_by_branch(
+            work_item.repository, work_item.task_branch
+        )
+        disposition_error = _disposed_pull_request_error(
+            disposition, work_item, pull_request
+        )
+        if disposition_error is not None:
+            return _blocked(
+                disposition_error,
+                task=task,
+                work_item=work_item,
+                pull_request=pull_request,
+            )
+        archive = _plan_disposed_archive(store, task, work_item, disposition)
+        if archive is not None:
+            return archive
+
+    undisposed = {
+        item.work_item_id: item
+        for item in store.list_work_items(include_completed=False)
+        if item.state is not WorkItemState.RUNNING
+        and store.get_work_item_disposition(item.work_item_id) is None
+    }
+    if not undisposed:
+        return None
+    for repository in config.repositories:
+        for task in tracker.list_open_tasks(repository.slug, TaskState.DISCARD):
+            executor_labels = tuple(
+                label for label in task.labels if label.startswith("exec:")
+            )
+            if executor_labels != (SSH_CLI_EXECUTOR_LABEL,):
+                continue
+            work_item = store.get_work_item_by_issue(
+                task.repository, task.issue_number
+            )
+            if work_item is None or work_item.work_item_id not in undisposed:
+                continue
+            error = _binding_error(task, work_item, configured)
+            if error is not None:
+                return _blocked(error, task=task, work_item=work_item)
+            if task.state_approved_by not in repository.maintainers:
+                return _blocked(
+                    "work_item_disposition_approval_untrusted",
+                    task=task,
+                    work_item=work_item,
+                )
+            if (
+                task.state_approval_event_id is None
+                or task.state_approved_at is None
+            ):
+                return _blocked(
+                    "work_item_disposition_evidence_incomplete",
+                    task=task,
+                    work_item=work_item,
+                )
+            if work_item.state in {WorkItemState.COMPLETED, WorkItemState.RUNNING}:
+                return _blocked(
+                    "work_item_disposition_state_conflict",
+                    task=task,
+                    work_item=work_item,
+                )
+            expected_head_sha = work_item.last_published_sha or work_item.base_sha
+            pull_request = tracker.find_pr_by_branch(
+                work_item.repository, work_item.task_branch
+            )
+            if pull_request is None:
+                if work_item.pr_number is not None:
+                    return _blocked(
+                        "work_item_disposition_pull_request_missing",
+                        task=task,
+                        work_item=work_item,
+                    )
+                kind = WorkItemDispositionKind.ABANDONED
+                pr_number = None
+            else:
+                if (
+                    (work_item.pr_number is not None
+                     and pull_request.number != work_item.pr_number)
+                    or pull_request.url
+                    != f"https://github.com/{work_item.repository}/pull/{pull_request.number}"
+                    or pull_request.branch_name != work_item.task_branch
+                    or pull_request.base_branch != work_item.base_branch
+                    or pull_request.is_cross_repository
+                    or pull_request.head_sha != expected_head_sha
+                ):
+                    return _blocked(
+                        "work_item_disposition_pull_request_conflict",
+                        task=task,
+                        work_item=work_item,
+                        pull_request=pull_request,
+                    )
+                if pull_request.state is PullRequestState.MERGED:
+                    return _blocked(
+                        "merged_pull_request_requires_completion",
+                        task=task,
+                        work_item=work_item,
+                        pull_request=pull_request,
+                    )
+                kind = WorkItemDispositionKind.SUPERSEDED
+                pr_number = pull_request.number
+            return SshRecoveryPlan(
+                SshRecoveryAction.RECORD_WORK_ITEM_DISPOSITION,
+                task=task,
+                work_item=work_item,
+                disposition_kind=kind,
+                disposition_pr_number=pr_number,
+                disposition_requested_by=task.state_approved_by,
+                disposition_request_event_id=task.state_approval_event_id,
+                disposition_requested_at=task.state_approved_at,
+                pull_request=pull_request,
+            )
+    return None
+
+
+def _disposed_pull_request_error(
+    disposition: WorkItemDisposition,
+    work_item: WorkItem,
+    pull_request: PullRequest | None,
+) -> str | None:
+    """Revalidate mutable GitHub PR state before irreversible Runner reclaim."""
+    if disposition.kind is WorkItemDispositionKind.ABANDONED:
+        return (
+            None
+            if pull_request is None
+            else "disposed_abandoned_pull_request_appeared"
+        )
+    if pull_request is None:
+        return "disposed_superseded_pull_request_missing"
+    if (
+        pull_request.number != disposition.pr_number
+        or pull_request.url
+        != f"https://github.com/{work_item.repository}/pull/{pull_request.number}"
+        or pull_request.branch_name != work_item.task_branch
+        or pull_request.base_branch != work_item.base_branch
+        or pull_request.is_cross_repository
+        or pull_request.head_sha != disposition.expected_head_sha
+    ):
+        return "disposed_superseded_pull_request_conflict"
+    if pull_request.state is PullRequestState.MERGED:
+        return "disposed_pull_request_merged_after_authorization"
+    return None
+
+
+def _plan_disposed_archive(
+    store: StateStore,
+    task: TrackerTask,
+    work_item: WorkItem,
+    disposition: WorkItemDisposition,
+) -> SshRecoveryPlan | None:
+    expected_head_sha = disposition.expected_head_sha
+    request = RunnerRequest(
+        RunnerOperation.ARCHIVE,
+        work_item.work_item_id,
+        version=NEXT_PROTOCOL_VERSION,
+        expected_head_sha=expected_head_sha,
+    )
+    request_sha256 = sha256(request.to_json().encode("utf-8")).hexdigest()
+    absence = store.get_work_item_absence_reconciliation(work_item.work_item_id)
+    if absence is not None:
+        if absence.expected_head_sha != expected_head_sha:
+            return _blocked(
+                "work_item_absence_reconciliation_identity_conflict",
+                task=task,
+                work_item=work_item,
+            )
+        return None
+    record = store.get_work_item_archive(work_item.work_item_id)
+    if record is not None:
+        if (
+            record.expected_head_sha != expected_head_sha
+            or record.request_sha256 != request_sha256
+        ):
+            return _blocked(
+                "work_item_archive_identity_conflict",
+                task=task,
+                work_item=work_item,
+            )
+        if record.status is WorkItemArchiveStatus.ARCHIVED:
+            return None
+        if record.status is WorkItemArchiveStatus.BLOCKED:
+            return _blocked(
+                "work_item_archive_blocked", task=task, work_item=work_item
+            )
+        action = (
+            SshRecoveryAction.RECONCILE_WORK_ITEM_ARCHIVE
+            if record.status is WorkItemArchiveStatus.AMBIGUOUS
+            else SshRecoveryAction.ARCHIVE_DISPOSED_WORK_ITEM
+        )
+        return SshRecoveryPlan(
+            action,
+            task=task,
+            work_item=work_item,
+            archive_eligible_at=record.eligible_at,
+        )
+    return SshRecoveryPlan(
+        SshRecoveryAction.ARCHIVE_DISPOSED_WORK_ITEM,
+        task=task,
+        work_item=work_item,
+        archive_eligible_at=disposition.eligible_at,
+    )
+
+
 def _plan_fresh_final_audit(
     config: Config,
     store: StateStore,
@@ -199,6 +446,8 @@ def _plan_fresh_final_audit(
     if runtime is None or not runtime.rotate_before_final_audit:
         return None
     for work_item in store.list_work_items(include_completed=False):
+        if store.get_work_item_disposition(work_item.work_item_id) is not None:
+            continue
         if work_item.state not in {WorkItemState.REVIEW, WorkItemState.READY}:
             continue
         turns = store.list_turns(work_item.work_item_id)
@@ -246,6 +495,8 @@ def _plan_merged_completion(
     observed_at: datetime,
 ) -> SshRecoveryPlan | None:
     for work_item in store.list_work_items():
+        if store.get_work_item_disposition(work_item.work_item_id) is not None:
+            continue
         if work_item.state not in {WorkItemState.REVIEW, WorkItemState.COMPLETED}:
             continue
         task = tracker.get_task(work_item.repository, str(work_item.issue_number))
@@ -364,6 +615,16 @@ def _plan_completed_archive(
         expected_head_sha=work_item.last_published_sha,
     )
     request_sha256 = sha256(request.to_json().encode("utf-8")).hexdigest()
+    absence = store.get_work_item_absence_reconciliation(work_item.work_item_id)
+    if absence is not None:
+        if absence.expected_head_sha != work_item.last_published_sha:
+            return _blocked(
+                "work_item_absence_reconciliation_identity_conflict",
+                task=task,
+                work_item=work_item,
+                pull_request=pull_request,
+            )
+        return None
     record = store.get_work_item_archive(work_item.work_item_id)
     if record is not None:
         if (

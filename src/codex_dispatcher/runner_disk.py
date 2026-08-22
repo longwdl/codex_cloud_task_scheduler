@@ -8,6 +8,7 @@ import stat
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Iterator
 
@@ -23,6 +24,23 @@ _COMMAND_TIMEOUT_SECONDS = 30.0
 
 class RunnerDiskError(RuntimeError):
     """Raised when a bounded WorkItem filesystem cannot be proven safe."""
+
+
+class WorkItemDiskArchiveState(StrEnum):
+    ABSENT = "absent"
+    FINAL = "final"
+    ARCHIVING = "archiving"
+
+
+@dataclass(frozen=True, slots=True)
+class DiskCapacitySnapshot:
+    capacity_bytes: int
+    available_bytes: int
+    image_size_bytes: int
+    host_reserve_bytes: int
+    turn_admissible: bool
+    provision_admissible: bool
+    provision_shortfall_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +133,10 @@ class FusedWorkItemDisk:
         self._prepare_image_root()
         self._reject_staging_ambiguity(work_item_id)
         path = self._image_path(work_item_id)
+        archived_path = self._archive_directory() / path.name
+        if archived_path.exists() or archived_path.is_symlink():
+            self._validate_image(archived_path)
+            raise RunnerDiskError("WorkItem disk image is in archive staging")
         if not path.exists():
             if path.is_symlink():
                 raise RunnerDiskError("WorkItem disk image is a dangling symbolic link")
@@ -122,21 +144,67 @@ class FusedWorkItemDisk:
         self._validate_image(path)
         return True
 
+    def classify_archive_storage(
+        self, work_item_id: str, mountpoint: Path
+    ) -> WorkItemDiskArchiveState:
+        """Classify exact image state without hiding archive/provision ambiguity."""
+        work_item_id = validate_work_item_id(work_item_id)
+        self._prepare_image_root()
+        self._validate_mountpoint_path(mountpoint)
+        self._reject_staging_ambiguity(work_item_id)
+        image = self._image_path(work_item_id)
+        archived = self._archive_directory() / image.name
+        image_exists = image.exists() or image.is_symlink()
+        archived_exists = archived.exists() or archived.is_symlink()
+        if image_exists and archived_exists:
+            raise RunnerDiskError("WorkItem disk archive state is ambiguous")
+        if image_exists:
+            self._validate_image(image)
+        if archived_exists:
+            self._validate_image(archived)
+        mount = self._mount_record(mountpoint)
+        if mount is not None:
+            if not image_exists or archived_exists:
+                raise RunnerDiskError("WorkItem disk archive mount state is ambiguous")
+            self._validate_mount_record(mount, image=image, mountpoint=mountpoint)
+        if image_exists:
+            return WorkItemDiskArchiveState.FINAL
+        if archived_exists:
+            return WorkItemDiskArchiveState.ARCHIVING
+        return WorkItemDiskArchiveState.ABSENT
+
     def assert_turn_admission(self) -> None:
         """Reject a new Turn below the fixed host reserve or 15% free space."""
-        self._prepare_image_root()
+        snapshot = self.capacity_snapshot()
+        if not snapshot.turn_admissible:
+            raise RunnerDiskError("host free space is below the Turn admission boundary")
+
+    def capacity_snapshot(self) -> DiskCapacitySnapshot:
+        """Return bounded, read-only capacity evidence for operators."""
+        self._protected_directory(
+            self._runtime.image_directory, "disk image directory"
+        )
         try:
             filesystem = os.statvfs(self._runtime.image_directory)
         except OSError as exc:
             raise RunnerDiskError("host free space is unavailable") from exc
         capacity = filesystem.f_blocks * filesystem.f_frsize
         available = filesystem.f_bavail * filesystem.f_frsize
-        if (
-            capacity <= 0
-            or available < self._runtime.host_reserve_bytes
-            or available * 100 < capacity * 15
-        ):
-            raise RunnerDiskError("host free space is below the Turn admission boundary")
+        if capacity <= 0 or available < 0 or available > capacity:
+            raise RunnerDiskError("host free space is outside the supported boundary")
+        required = self._runtime.image_size_bytes + self._runtime.host_reserve_bytes
+        return DiskCapacitySnapshot(
+            capacity_bytes=capacity,
+            available_bytes=available,
+            image_size_bytes=self._runtime.image_size_bytes,
+            host_reserve_bytes=self._runtime.host_reserve_bytes,
+            turn_admissible=(
+                available >= self._runtime.host_reserve_bytes
+                and available * 100 >= capacity * 15
+            ),
+            provision_admissible=available >= required,
+            provision_shortfall_bytes=max(0, required - available),
+        )
 
     def ensure_mounted(self, work_item_id: str, mountpoint: Path) -> None:
         work_item_id = validate_work_item_id(work_item_id)

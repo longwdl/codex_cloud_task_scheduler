@@ -169,7 +169,7 @@ class RunnerTurnExecutor:
 
     def assert_archive_safe(self, work_item_id: str) -> None:
         """Prove every durable Turn is finished and no exact v2 container is live."""
-        paths = self._workspace.paths(work_item_id)
+        paths = self._workspace.archive_paths(work_item_id)
         directory = paths.state / "turns"
         if not directory.exists():
             if directory.is_symlink():

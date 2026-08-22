@@ -49,6 +49,9 @@ class TrackerTask:
     branch_name: str | None = None
     issue_node_id: str | None = None
     updated_at: str | None = None
+    state_approved_by: str | None = None
+    state_approval_event_id: str | None = None
+    state_approved_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

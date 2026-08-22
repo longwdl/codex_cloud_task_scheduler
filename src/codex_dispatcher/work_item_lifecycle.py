@@ -20,6 +20,68 @@ class WorkItemArchiveStatus(StrEnum):
     BLOCKED = "blocked"
 
 
+class WorkItemDispositionKind(StrEnum):
+    ABANDONED = "abandoned"
+    SUPERSEDED = "superseded"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkItemDisposition:
+    """Audited operator intent that permanently ends a non-completed WorkItem."""
+
+    work_item_id: str
+    kind: WorkItemDispositionKind
+    expected_head_sha: str
+    pr_number: int | None
+    requested_by: str
+    request_event_id: str
+    requested_at: str
+    reason_code: str
+    request_sha256: str
+    eligible_at: str
+    created_at: str
+    updated_at: str
+
+    def __post_init__(self) -> None:
+        validate_work_item_id(self.work_item_id)
+        validate_git_sha(self.expected_head_sha, "expected_head_sha")
+        if not isinstance(self.kind, WorkItemDispositionKind):
+            raise ValueError("disposition kind is invalid")
+        if self.kind is WorkItemDispositionKind.ABANDONED:
+            if self.pr_number is not None:
+                raise ValueError("abandoned disposition cannot bind a Pull Request")
+        elif type(self.pr_number) is not int or self.pr_number <= 0:
+            raise ValueError("superseded disposition requires a Pull Request")
+        _bounded_text(self.requested_by, "requested_by", maximum=128)
+        _bounded_text(self.request_event_id, "request_event_id", maximum=128)
+        _aware_datetime(self.requested_at, "requested_at")
+        _bounded_text(self.reason_code, "reason_code", maximum=128)
+        validate_sha256(self.request_sha256, "request_sha256")
+        _aware_datetime(self.eligible_at, "eligible_at")
+        _aware_datetime(self.created_at, "created_at")
+        _aware_datetime(self.updated_at, "updated_at")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkItemAbsenceReconciliation:
+    """Explicit operator proof for legacy Runner state already missing on disk."""
+
+    work_item_id: str
+    expected_head_sha: str
+    evidence_sha256: str
+    observed_by: str
+    observed_at: str
+    created_at: str
+
+    def __post_init__(self) -> None:
+        validate_work_item_id(self.work_item_id)
+        validate_git_sha(self.expected_head_sha, "expected_head_sha")
+        validate_sha256(self.evidence_sha256, "evidence_sha256")
+        _bounded_text(self.observed_by, "observed_by", maximum=128)
+        _aware_datetime(self.observed_at, "observed_at")
+        _aware_datetime(self.created_at, "created_at")
+
+
 @dataclass(frozen=True, slots=True)
 class WorkItemArchive:
     work_item_id: str
@@ -86,6 +148,17 @@ def _aware_datetime(value: object, field: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field} must be an aware ISO timestamp")
     return parsed
+
+
+def _bounded_text(value: object, field: str, *, maximum: int) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > maximum
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"{field} must be bounded text")
+    return value
 
 
 def validate_archive_error_code(value: object) -> str:

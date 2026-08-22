@@ -14,7 +14,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from codex_dispatcher.command_runner import CommandResult, run_command
-from codex_dispatcher.runner_disk import FusedWorkItemDisk, RunnerDiskError
+from codex_dispatcher.runner_disk import (
+    FusedWorkItemDisk,
+    RunnerDiskError,
+    WorkItemDiskArchiveState,
+)
 from codex_dispatcher.runner_protocol import (
     NEXT_PROTOCOL_VERSION,
     RunnerOperation,
@@ -38,7 +42,10 @@ from codex_dispatcher.work_items import (
 
 _METADATA_VERSION = 1
 _MAX_METADATA_BYTES = 16 * 1024
-_ARCHIVE_RECORD_VERSION = 1
+_ARCHIVE_RECORD_VERSION = 2
+_ARCHIVE_RECORD_V1 = 1
+_ARCHIVE_STORAGE_BOUNDED_IMAGE = "bounded_image"
+_ARCHIVE_STORAGE_LEGACY_DIRECTORY = "legacy_directory"
 
 
 class RunnerWorkspaceError(RuntimeError):
@@ -89,9 +96,10 @@ class _ArchiveRecord:
     state: str
     reclaimed_bytes: int
     archived_at: str | None
+    storage_kind: str | None
 
     def to_mapping(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "version": _ARCHIVE_RECORD_VERSION,
             "work_item_id": self.work_item_id,
             "expected_head_sha": self.expected_head_sha,
@@ -100,6 +108,9 @@ class _ArchiveRecord:
             "reclaimed_bytes": self.reclaimed_bytes,
             "archived_at": self.archived_at,
         }
+        if self.storage_kind is not None:
+            payload["storage_kind"] = self.storage_kind
+        return payload
 
 
 class RunnerWorkspace:
@@ -221,6 +232,21 @@ class RunnerWorkspace:
         self._ensure_bounded_mount(metadata.work_item_id, paths.root)
         self._validate_directory_identity(paths, metadata)
         return paths
+
+    def archive_paths(self, work_item_id: str) -> RunnerWorkspacePaths:
+        """Return exact state paths for the archive safety check only.
+
+        Normal Runner operations remain bounded-image-only.  This narrow archive
+        accessor also accepts a validated legacy directory if its exact image is
+        absent, so it may be retired without re-enabling unbounded Turns.
+        """
+        work_item_id = validate_work_item_id(work_item_id)
+        self._prepare_root()
+        self._require_not_archived(work_item_id)
+        metadata = self._read_registry(work_item_id, required=True)
+        assert metadata is not None
+        self._resolve_archive_storage(metadata)
+        return self._paths_for_metadata(metadata)
 
     def metadata(self, work_item_id: str) -> RunnerWorkspaceMetadata:
         work_item_id = validate_work_item_id(work_item_id)
@@ -346,7 +372,8 @@ class RunnerWorkspace:
         if record is None:
             metadata = self._read_registry(request.work_item_id, required=True)
             assert metadata is not None
-            head = self._current_head_for_archive(metadata)
+            storage_kind = self._resolve_archive_storage(metadata)
+            head = self._current_head_for_archive(metadata, storage_kind)
             if head != request.expected_head_sha:
                 raise RunnerWorkspaceError(
                     "WorkItem HEAD conflicts with the archive checkpoint"
@@ -381,6 +408,9 @@ class RunnerWorkspace:
         self._prepare_root()
         record = self._read_archive_record(request.work_item_id, required=False)
         if record is None:
+            metadata = self._read_registry(request.work_item_id, required=True)
+            assert metadata is not None
+            self._resolve_archive_storage(metadata)
             return True
         self._validate_archive_request(record, request)
         return False
@@ -392,17 +422,16 @@ class RunnerWorkspace:
         if record is None:
             metadata = self._read_registry(request.work_item_id, required=True)
             assert metadata is not None
-            head = self._current_head_for_archive(metadata)
+            storage_kind = self._resolve_archive_storage(metadata)
+            head = self._current_head_for_archive(metadata, storage_kind)
             if head != request.expected_head_sha:
                 raise RunnerWorkspaceError(
                     "WorkItem HEAD conflicts with the archive checkpoint"
                 )
             paths = self._paths_for_metadata(metadata)
-            if self._work_item_disk is None:
-                self._reject_nested_mounts(paths.root)
             reclaimed_bytes = (
                 0
-                if self._work_item_disk is not None
+                if storage_kind == _ARCHIVE_STORAGE_BOUNDED_IMAGE
                 else self._directory_size(paths.root)
             )
             record = _ArchiveRecord(
@@ -412,6 +441,7 @@ class RunnerWorkspace:
                 "prepared",
                 reclaimed_bytes,
                 None,
+                storage_kind,
             )
             self._write_archive_record(record)
         else:
@@ -434,6 +464,11 @@ class RunnerWorkspace:
                 "WorkItem registry identity conflicts with archive tombstone"
             )
         paths = self._paths_for_metadata(metadata)
+        if record.storage_kind is None:
+            raise RunnerWorkspaceError(
+                "legacy WorkItem archive tombstone cannot safely resume"
+            )
+        self._validate_archive_storage_replay(metadata, record.storage_kind)
         archiving = _ArchiveRecord(
             record.work_item_id,
             record.expected_head_sha,
@@ -441,16 +476,20 @@ class RunnerWorkspace:
             "archiving",
             record.reclaimed_bytes,
             None,
+            record.storage_kind,
         )
         self._write_archive_record(archiving)
         try:
-            if self._work_item_disk is not None:
+            if record.storage_kind == _ARCHIVE_STORAGE_BOUNDED_IMAGE:
+                assert self._work_item_disk is not None
                 reclaimed_bytes = self._work_item_disk.archive(
                     request.work_item_id, paths.root
                 )
-            else:
+            elif record.storage_kind == _ARCHIVE_STORAGE_LEGACY_DIRECTORY:
                 self._archive_directory_tree(paths.root, request.work_item_id)
                 reclaimed_bytes = record.reclaimed_bytes
+            else:
+                raise RunnerWorkspaceError("WorkItem archive storage kind is invalid")
         except RunnerDiskError as exc:
             raise RunnerWorkspaceError("WorkItem disk archive failed") from exc
         completed = _ArchiveRecord(
@@ -460,6 +499,7 @@ class RunnerWorkspace:
             "archived",
             reclaimed_bytes,
             datetime.now(timezone.utc).isoformat(),
+            record.storage_kind,
         )
         self._write_archive_record(completed)
         assert completed.archived_at is not None
@@ -766,7 +806,7 @@ class RunnerWorkspace:
             payload = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise RunnerWorkspaceError("WorkItem archive record is malformed") from exc
-        if not isinstance(payload, dict) or set(payload) != {
+        v1_fields = {
             "version",
             "work_item_id",
             "expected_head_sha",
@@ -774,7 +814,12 @@ class RunnerWorkspace:
             "state",
             "reclaimed_bytes",
             "archived_at",
-        }:
+        }
+        v2_fields = v1_fields | {"storage_kind"}
+        if (
+            not isinstance(payload, dict)
+            or (set(payload) != v1_fields and set(payload) != v2_fields)
+        ):
             raise RunnerWorkspaceError("WorkItem archive record fields are invalid")
         try:
             record_work_item_id = validate_work_item_id(payload["work_item_id"])
@@ -788,14 +833,26 @@ class RunnerWorkspace:
         state = payload["state"]
         reclaimed_bytes = payload["reclaimed_bytes"]
         archived_at = payload["archived_at"]
+        version = payload["version"]
+        storage_kind = payload.get("storage_kind")
         if (
-            payload["version"] != _ARCHIVE_RECORD_VERSION
+            version not in {_ARCHIVE_RECORD_V1, _ARCHIVE_RECORD_VERSION}
             or record_work_item_id != validate_work_item_id(work_item_id)
             or state not in {"prepared", "archiving", "archived"}
             or type(reclaimed_bytes) is not int
             or reclaimed_bytes < 0
             or (state == "archived") != isinstance(archived_at, str)
             or (archived_at is not None and not isinstance(archived_at, str))
+            or (version == _ARCHIVE_RECORD_V1 and set(payload) != v1_fields)
+            or (version == _ARCHIVE_RECORD_VERSION and set(payload) != v2_fields)
+            or (
+                version == _ARCHIVE_RECORD_VERSION
+                and storage_kind
+                not in {
+                    _ARCHIVE_STORAGE_BOUNDED_IMAGE,
+                    _ARCHIVE_STORAGE_LEGACY_DIRECTORY,
+                }
+            )
         ):
             raise RunnerWorkspaceError("WorkItem archive record values are invalid")
         if archived_at is not None:
@@ -812,6 +869,7 @@ class RunnerWorkspace:
             state,
             reclaimed_bytes,
             archived_at,
+            storage_kind if version == _ARCHIVE_RECORD_VERSION else None,
         )
 
     @staticmethod
@@ -837,11 +895,115 @@ class RunnerWorkspace:
                 f"request must be a protocol-v2 {operation.value.upper()} operation"
             )
 
-    def _current_head_for_archive(self, metadata: RunnerWorkspaceMetadata) -> str:
+    def _current_head_for_archive(
+        self, metadata: RunnerWorkspaceMetadata, storage_kind: str
+    ) -> str:
         paths = self._paths_for_metadata(metadata)
-        self._ensure_bounded_mount(metadata.work_item_id, paths.root)
+        if storage_kind == _ARCHIVE_STORAGE_BOUNDED_IMAGE:
+            self._ensure_bounded_mount(metadata.work_item_id, paths.root)
+        elif storage_kind == _ARCHIVE_STORAGE_LEGACY_DIRECTORY:
+            self._reject_nested_mounts(paths.root)
+        else:
+            raise RunnerWorkspaceError("WorkItem archive storage kind is invalid")
         self._validate_directory_identity(paths, metadata)
         return self._current_head_without_registry(paths, metadata)
+
+    def _resolve_archive_storage(self, metadata: RunnerWorkspaceMetadata) -> str:
+        """Select one exact storage implementation before its first tombstone.
+
+        This is intentionally unavailable to normal paths: the legacy fallback
+        only exists to retire pre-image WorkItems, never to run a new Turn.
+        """
+        paths = self._paths_for_metadata(metadata)
+        if self._work_item_disk is None:
+            self._reject_nested_mounts(paths.root)
+            self._validate_directory_identity(paths, metadata)
+            return _ARCHIVE_STORAGE_LEGACY_DIRECTORY
+        image_state = self._classify_disk_archive_storage(metadata, paths)
+        root_exists = paths.root.exists() or paths.root.is_symlink()
+        if image_state is WorkItemDiskArchiveState.ARCHIVING:
+            raise RunnerWorkspaceError("WorkItem disk archive state lacks a tombstone")
+        if image_state is WorkItemDiskArchiveState.FINAL:
+            if root_exists and not os.path.ismount(paths.root):
+                if paths.root.is_symlink() or not paths.root.is_dir():
+                    raise RunnerWorkspaceError("WorkItem archive storage is invalid")
+                try:
+                    has_entries = any(paths.root.iterdir())
+                except OSError as exc:
+                    raise RunnerWorkspaceError(
+                        "WorkItem archive storage is unavailable"
+                    ) from exc
+                if has_entries:
+                    raise RunnerWorkspaceError(
+                        "WorkItem bounded image and legacy directory are both present"
+                    )
+            self._ensure_bounded_mount(metadata.work_item_id, paths.root)
+            self._validate_directory_identity(paths, metadata)
+            return _ARCHIVE_STORAGE_BOUNDED_IMAGE
+        if not root_exists:
+            raise RunnerWorkspaceError("WorkItem archive storage is unavailable")
+        self._reject_nested_mounts(paths.root)
+        self._validate_directory_identity(paths, metadata)
+        return _ARCHIVE_STORAGE_LEGACY_DIRECTORY
+
+    def _validate_archive_storage_replay(
+        self, metadata: RunnerWorkspaceMetadata, storage_kind: str
+    ) -> None:
+        """Reject a tombstone replay if another storage kind has appeared."""
+        paths = self._paths_for_metadata(metadata)
+        if storage_kind == _ARCHIVE_STORAGE_BOUNDED_IMAGE:
+            if self._work_item_disk is None:
+                raise RunnerWorkspaceError("WorkItem archive storage kind is unavailable")
+            image_state = self._classify_disk_archive_storage(metadata, paths)
+            if (
+                image_state is WorkItemDiskArchiveState.ABSENT
+                and self._legacy_directory_is_present(paths, metadata)
+            ):
+                raise RunnerWorkspaceError(
+                    "WorkItem archive storage conflicts with its tombstone"
+                )
+            return
+        if storage_kind == _ARCHIVE_STORAGE_LEGACY_DIRECTORY:
+            if self._work_item_disk is not None:
+                if self._classify_disk_archive_storage(
+                    metadata, paths
+                ) is not WorkItemDiskArchiveState.ABSENT:
+                    raise RunnerWorkspaceError(
+                        "WorkItem archive storage conflicts with its tombstone"
+                    )
+            if paths.root.exists() or paths.root.is_symlink():
+                self._reject_nested_mounts(paths.root)
+                self._validate_directory_identity(paths, metadata)
+            return
+        raise RunnerWorkspaceError("WorkItem archive storage kind is invalid")
+
+    def _classify_disk_archive_storage(
+        self,
+        metadata: RunnerWorkspaceMetadata,
+        paths: RunnerWorkspacePaths,
+    ) -> WorkItemDiskArchiveState:
+        assert self._work_item_disk is not None
+        try:
+            if isinstance(self._work_item_disk, FusedWorkItemDisk):
+                return self._work_item_disk.classify_archive_storage(
+                    metadata.work_item_id, paths.root
+                )
+            return (
+                WorkItemDiskArchiveState.FINAL
+                if self._work_item_disk.final_image_exists(metadata.work_item_id)
+                else WorkItemDiskArchiveState.ABSENT
+            )
+        except RunnerDiskError as exc:
+            raise RunnerWorkspaceError("WorkItem disk state is ambiguous") from exc
+
+    def _legacy_directory_is_present(
+        self, paths: RunnerWorkspacePaths, metadata: RunnerWorkspaceMetadata
+    ) -> bool:
+        if not (paths.root.exists() or paths.root.is_symlink()):
+            return False
+        self._reject_nested_mounts(paths.root)
+        self._validate_directory_identity(paths, metadata)
+        return True
 
     @staticmethod
     def _metadata_sha256(metadata: RunnerWorkspaceMetadata) -> str:

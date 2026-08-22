@@ -43,6 +43,14 @@ def _build_parser() -> argparse.ArgumentParser:
     status.add_argument("--database", required=True, type=Path)
     status.add_argument("--json", action="store_true", help="Emit machine-readable output.")
 
+    runner_capacity = subparsers.add_parser(
+        "runner-capacity", help="Inspect protected Runner disk admission capacity."
+    )
+    runner_capacity.add_argument("--config", required=True, type=Path)
+    runner_capacity.add_argument(
+        "--json", action="store_true", help="Emit machine-readable output."
+    )
+
     state_backup = subparsers.add_parser(
         "state-backup", help="Create one protected SQLite Online Backup."
     )
@@ -253,6 +261,33 @@ def _state_backup(config_path: Path) -> tuple[int, dict[str, object]]:
         "path": str(result.path),
         "size_bytes": result.size_bytes,
         "integrity": result.integrity,
+    }
+
+
+def _runner_capacity(config_path: Path) -> tuple[int, dict[str, object]]:
+    try:
+        from codex_dispatcher.runner_disk import FusedWorkItemDisk
+        from codex_dispatcher.runner_main import load_runner_configuration
+
+        configuration = load_runner_configuration(config_path)
+        if configuration.work_item_disk is None:
+            raise ValueError("Runner WorkItem disk is not configured")
+        snapshot = FusedWorkItemDisk(
+            configuration.work_item_disk,
+            work_items_root=configuration.work_items_root,
+        ).capacity_snapshot()
+    except (OSError, ValueError, RuntimeError) as exc:
+        return 1, {"ok": False, "error": str(exc)}
+    return 0, {
+        "ok": True,
+        "runner_capacity": True,
+        "capacity_bytes": snapshot.capacity_bytes,
+        "available_bytes": snapshot.available_bytes,
+        "image_size_bytes": snapshot.image_size_bytes,
+        "host_reserve_bytes": snapshot.host_reserve_bytes,
+        "turn_admissible": snapshot.turn_admissible,
+        "provision_admissible": snapshot.provision_admissible,
+        "provision_shortfall_bytes": snapshot.provision_shortfall_bytes,
     }
 
 
@@ -540,8 +575,12 @@ def _emit(payload: dict[str, object], as_json: bool) -> None:
         print(f"path: {payload.get('path')}")
         print(f"size_bytes: {payload.get('size_bytes')}")
         print(f"integrity: {payload.get('integrity')}")
-
-
+    if payload.get("runner_capacity") is True:
+        print(f"capacity_bytes: {payload.get('capacity_bytes')}")
+        print(f"available_bytes: {payload.get('available_bytes')}")
+        print(f"turn_admissible: {str(payload.get('turn_admissible')).lower()}")
+        print(f"provision_admissible: {str(payload.get('provision_admissible')).lower()}")
+        print(f"provision_shortfall_bytes: {payload.get('provision_shortfall_bytes')}")
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "doctor":
@@ -550,6 +589,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return code
     if args.command == "status":
         code, payload = _status(args.database)
+        _emit(payload, args.json)
+        return code
+    if args.command == "runner-capacity":
+        code, payload = _runner_capacity(args.config)
         _emit(payload, args.json)
         return code
     if args.command == "state-backup":

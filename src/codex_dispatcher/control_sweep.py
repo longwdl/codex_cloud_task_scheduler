@@ -73,6 +73,7 @@ class ControlSweepStatus(StrEnum):
     COMPLETED = "completed"
     AWAITING_ARCHIVE = "awaiting_archive"
     ARCHIVED = "archived"
+    DISPOSITION_RECORDED = "disposition_recorded"
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +238,30 @@ class SshControlSweep:
                 updated,
                 work_item=work_item,
             )
+        if recovery.action is SshRecoveryAction.RECORD_WORK_ITEM_DISPOSITION:
+            assert recovery.task is not None
+            assert recovery.work_item is not None
+            assert recovery.disposition_kind is not None
+            assert recovery.disposition_requested_by is not None
+            assert recovery.disposition_request_event_id is not None
+            assert recovery.disposition_requested_at is not None
+            expected_head_sha = (
+                recovery.work_item.last_published_sha or recovery.work_item.base_sha
+            )
+            self._store.record_work_item_disposition(
+                recovery.work_item.work_item_id,
+                kind=recovery.disposition_kind,
+                expected_head_sha=expected_head_sha,
+                pr_number=recovery.disposition_pr_number,
+                requested_by=recovery.disposition_requested_by,
+                request_event_id=recovery.disposition_request_event_id,
+                requested_at=recovery.disposition_requested_at,
+                reason_code="operator_agent_discard",
+            )
+            return _plan_result(
+                ControlSweepStatus.DISPOSITION_RECORDED,
+                recovery,
+            )
         if recovery.action is SshRecoveryAction.ARCHIVE_COMPLETED_WORK_ITEM:
             assert recovery.work_item is not None
             assert recovery.archive_eligible_at is not None
@@ -256,8 +281,63 @@ class SshControlSweep:
                 recovery,
                 reason=archive.error_code,
             )
+        if recovery.action is SshRecoveryAction.ARCHIVE_DISPOSED_WORK_ITEM:
+            assert recovery.work_item is not None
+            assert recovery.archive_eligible_at is not None
+            rechecked = plan_ssh_recovery(
+                self._config, self._store, self._tracker
+            )
+            if (
+                rechecked.action is not recovery.action
+                or rechecked.work_item is None
+                or rechecked.work_item.work_item_id
+                != recovery.work_item.work_item_id
+            ):
+                return _plan_result(
+                    ControlSweepStatus.BLOCKED,
+                    rechecked,
+                    reason=(
+                        rechecked.reason
+                        or "disposed_archive_candidate_changed"
+                    ),
+                )
+            archive = self._dispatch.archive_disposed_work_item(
+                recovery.work_item.work_item_id,
+                eligible_at=recovery.archive_eligible_at,
+            )
+            status = (
+                ControlSweepStatus.ARCHIVED
+                if archive.status is WorkItemArchiveStatus.ARCHIVED
+                else ControlSweepStatus.BLOCKED
+                if archive.status is WorkItemArchiveStatus.BLOCKED
+                else ControlSweepStatus.AWAITING_ARCHIVE
+            )
+            return _plan_result(status, recovery, reason=archive.error_code)
         if recovery.action is SshRecoveryAction.RECONCILE_WORK_ITEM_ARCHIVE:
             assert recovery.work_item is not None
+            if (
+                self._store.get_work_item_disposition(
+                    recovery.work_item.work_item_id
+                )
+                is not None
+            ):
+                rechecked = plan_ssh_recovery(
+                    self._config, self._store, self._tracker
+                )
+                if (
+                    rechecked.action is not recovery.action
+                    or rechecked.work_item is None
+                    or rechecked.work_item.work_item_id
+                    != recovery.work_item.work_item_id
+                ):
+                    return _plan_result(
+                        ControlSweepStatus.BLOCKED,
+                        rechecked,
+                        reason=(
+                            rechecked.reason
+                            or "disposed_archive_candidate_changed"
+                        ),
+                    )
             archive = self._dispatch.reconcile_work_item_archive(
                 recovery.work_item.work_item_id
             )
