@@ -19,6 +19,7 @@ dist/
 .env.*
 !.env.example
 config.toml
+!config/runner-codex-policy/config.toml
 credentials/
 run-artifacts/
 error.log
