@@ -68,6 +68,57 @@ The #12 workspace deletion is intentionally irreversible: restoring either SQLit
 restore the reclaimed image. Control rollback remains possible for database or binary faults, and
 Issue #20 was fully restored before timer activation, but there is no retained #12 workspace backup.
 
+## Disposition, legacy archive, and completed backlog reclamation — 2026-08-23
+
+The owner explicitly authorized review and merge of Fixture PRs #29, #31, #33, #36, and #37. Each
+exact head had a successful GitHub Actions run, was Ready and mergeable-clean, and changed only one
+README marker line. The operator-created fast-forward batch preserved every PR head as a merge
+parent and advanced Fixture `main` from `7ee18770d9faec6845f1dc4e32082dcc595c2832` to
+`54499f25f2be7892ec8379f98d7b431df07e42f2`; GitHub reports all five PRs merged. This was an
+explicitly authorized fixture operation, not an automatic dispatcher merge.
+
+Code release `3616b71794351e4e8164d15050189e87cbf7691d` added schema 13, audited
+`abandoned`/`superseded` dispositions, completed-generation retirement, legacy-directory archive,
+strict image/archive-staging classification, and read-only capacity evidence. Its exact Git archive
+SHA-256 was `6fb064e3ef64143825346e1f636f2bbd4dad9989af63ffb20b35bef130fb885a`.
+All 517 local tests, `compileall`, and `git diff --check` passed. Runner Python 3.12 also passed the
+25 focused disk/workspace tests. A non-protected v1 tombstone test fixture initially exposed the
+remote shell's permissive umask; test-only commit `3616b717` made its mode explicitly `0600` before
+the release links moved.
+
+The Dispatcher timer was stopped and the active oneshot was allowed to finish. Online Backup
+`state-20260822T185953.695987Z.db` was mode `0600`. The exact backup copy migrated under the new
+release before live mutation: schema 13, `integrity_check=ok`, zero foreign-key errors, zero active
+Turns, zero completed live generations, and empty disposition/absence ledgers. Runner prechecks
+found zero containers, zero image/workspace staging entries, and zero incomplete v1 tombstones.
+Runner moved first, then Control. The live migration produced the same integrity result and retired
+all historical completed generations at their durable completion event times.
+
+The owner separately authorized Fixture Issue #20 as abandoned. GitHub event `29855076664`, actor
+`longwdl`, changed its exact single state to `agent:discard`; no task-branch PR existed. One normal
+sweep recorded the immutable `abandoned` disposition and a second normal sweep archived its clean
+bounded image at HEAD `f5037925502905fd3d22a807df7291ba1004bab9`, reclaiming
+8,589,934,592 bytes. The backward-compatible WorkItem state remains `blocked`, while the disposition
+terminal overlay prevents any later Turn or generation.
+
+After Issues #28, #30, #32, #34, and #35 were projected to `agent:completed`, every reclamation
+target was re-read as an exact merged PR at the persisted head. Under the Control process lock, an
+explicit bounded operator batch archived only Issues #14, #18, #28, #30, #32, #34, and #35. #14
+and #18 used v2 `legacy_directory` tombstones and reclaimed 144,260 and 145,445 bytes. The other
+five used v2 `bounded_image` tombstones and each reclaimed 8,589,934,592 bytes. The batch did not
+enable global completed retention and did not select any other WorkItem.
+
+Issues #24 and #26 are known historical manually-missing Runner states. They consume no Runner
+space and deliberately remain `completed` with no archive or absence-ledger row; this release does
+not expose a local-JSON absence reconciliation command. Post-checks found schema 13 integrity `ok`,
+zero foreign-key errors, zero active Turns, zero live completed generations, zero absence rows,
+zero remaining images, zero staging entries, and zero containers. Runner available space increased
+from 22,524,895,232 to 74,064,961,536 bytes; Turn and new-image admission both passed with zero
+shortfall. A normal post-deploy sweep returned strict `idle`, and both Dispatcher and backup timers
+were restored active. Binary rollback remains the previous `aef09f5` links, but schema rollback also
+requires the validated pre-migration backup because schema 13 is additive and old code is unaware
+of the new terminal overlay.
+
 ## Completed WorkItem lifecycle and disk reclamation release — 2026-08-23
 
 Commit `aef09f5ea9d4c78a9b8d86dedb972a2423274382` added the explicitly enabled completed-WorkItem
