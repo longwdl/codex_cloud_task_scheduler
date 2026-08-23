@@ -3,6 +3,44 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Durable release-v2 plan, receipt, and rollback canary — 2026-08-23
+
+Commit `a630b9976350cab01bd2cbe911b2e2dbff6917f5` introduced the stable-name release tool's
+schema-v2 transaction behavior. Its candidate tool first returned a read-only plan with
+`authorizes_apply=false`, `state_writes=0`, no active service, and the exact prior `9d88507` links.
+The installed v1 tool then bootstrapped that commit: both real service accounts passed 565 tests,
+compilation, shell syntax, and unit verification before the Runner-first switch. The first manual
+sweep was `idle` with four GitHub reads and zero writes; backup, schema-1-through-16 restore drill,
+health, and timer reactivation all succeeded.
+
+The deployed v2 tool next planned and applied commit
+`8654269d19b9e7e8f597dcd876f30ab1711f7311`. Its root-only receipt directory and file were mode
+`0700` and `0600`; status proved both candidates created and activated, both prior links, the exact
+archive digest, and `committed/handoff_required`, while all four Control timers remained stopped.
+An immediate automatic rollback was correctly refused because the recorded Dispatcher
+`InvocationID` had changed. Bounded journal evidence showed why: an already-scheduled `idle` sweep
+started two seconds after apply began and finished with four reads and zero writes before quiescence.
+The tool had sampled InvocationID before stopping timers, creating a safe false-positive drift.
+
+Commit `257fa8694e2c9440d3494444eedc7380da50b6b3` moved the rollback identity sample after bounded
+natural service quiescence and both nonblocking host-lock probes. Local and both-host validation
+again passed all 565 tests. With timers already stopped, its committed receipt matched the live
+InvocationID exactly; `--rollback --commit ... --apply` restored both `8654269` links and units and
+atomically changed the retained receipt to `rolled_back/rollback_observed` with operation
+`rollback`. No candidate was deleted and no timer or sweep was started by rollback.
+
+The final immutable runtime release on both Control and Runner is
+`cc200bf5ba7ef6b0a03b371c381b4216abd6865e`, archive SHA-256
+`e98684792878d1226605d49adfe82b02f7bcf60e80c56b0b7fef7db1cfc433db`. Its read-only plan and
+two-host 565-test apply succeeded; the schema-v2 receipt is committed with exact links and matching
+InvocationID. The observed handoff sweep was `idle` with four reads and zero writes. A fresh Online
+Backup and restore drill reported integrity `ok`, zero foreign-key violations, and migrations 1
+through 16. Final health reported zero alerts, no active turn or pending/blocked archive or branch
+cleanup, both Runner admissions true, approximately 74.1 GB available, and all four Control timers
+plus the Runner capacity timer active. The first sweep has closed automatic rollback for this final
+release; database or external-state rollback must use the preserved backup and recovery-first
+procedure.
+
 ## Transactional release, sweep budget, terminal retention, and capacity canary — 2026-08-23
 
 Commit `bce452a0a7be79de0fbf6e03da0dea0268b6af12` is deployed on both Control and Runner. Its exact
