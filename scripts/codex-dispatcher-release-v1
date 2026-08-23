@@ -403,12 +403,11 @@ if [ "$seen_config" -eq 1 ]; then
         printf '%s\n' 'candidate config SHA-256 mismatch' >&2
         exit 1
     }
-    /usr/bin/sudo -n /usr/bin/env -i HOME=/var/lib/codex-dispatcher \
-        LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/bin:/bin \
-        PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
-        "PYTHONPATH=$previous_control/src:$previous_control" \
-        /opt/codex-python/current/bin/python3 -P -s -c \
-        'from pathlib import Path; import sys; from codex_dispatcher.config import load_config; load_config(Path(sys.argv[1]))' \
+    # The active release cannot semantically validate forward-only configuration
+    # fields. Plan proves safe bytes and TOML syntax; apply performs strict
+    # validation with the extracted candidate before either live symlink moves.
+    /usr/bin/sudo -n /usr/bin/python3 -P -s -c \
+        'import pathlib, sys, tomllib; tomllib.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))' \
         "$candidate_config"
 fi
 

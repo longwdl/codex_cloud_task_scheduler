@@ -94,8 +94,13 @@ class ReleaseDeploymentTests(unittest.TestCase):
         text = SCRIPT.read_text(encoding="utf-8")
         self.assertIn("--config-sha256", text)
         self.assertIn('/var/tmp/codex-dispatcher-config-$commit.toml', text)
-        self.assertIn('"PYTHONPATH=$previous_control/src:$previous_control"', text)
+        self.assertNotIn('"PYTHONPATH=$previous_control/src:$previous_control"', text)
+        self.assertIn("tomllib.loads", text)
         self.assertIn('"PYTHONPATH=$control_release/src:$control_release"', text)
+        self.assertLess(
+            text.index("record_phase config_validate"),
+            text.index("record_phase runner_switch_intent"),
+        )
         self.assertIn("config-backups", text)
         self.assertIn("config.toml.next", text)
         self.assertIn("config.toml.rollback", text)
