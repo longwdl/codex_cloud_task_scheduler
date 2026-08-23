@@ -33,11 +33,33 @@ After explicit operator authorization, Draft PR
 merge commit `02d9eaff6605203be063c5e06c88937fcd191477`. The next Dispatcher sweep changed the durable
 WorkItem from `review` to `completed`, retired its Audit generation, and projected
 `agent:completed`; two following sweeps were idle. Issue `#44` remains open as the durable audit
-entry point, and its task branch remains subject to the configured 30-day retention. The exact
-8,589,934,592-byte WorkItem image remains under the configured 7-day completed retention rather
-than being manually removed. Post-completion Runner capacity reported 65,834,344,448 bytes
-available and both Turn and provision admission true. No Docker prune or manual lifecycle bypass
-was used.
+entry point. At that checkpoint its task branch was subject to the configured 30-day retention and
+its exact 8,589,934,592-byte image was subject to the configured seven-day completed retention;
+neither had been manually removed.
+
+Two later configuration-driven canaries replaced that pending state without bypassing lifecycle.
+First, a transactional release temporarily set `completed_retention_seconds=1`. One ordinary sweep
+archived only WorkItem `wi_5b34425042411a953a08f945`; schema-12 recorded expected HEAD
+`b0f3201f0ccc6d13cca179524a660fa58f109be3`, Runner response SHA-256
+`fcfd7578b87a83c8dcc7eb27c27c49a0fa649a818554f789d0a791794313eca2`, and
+`reclaimed_bytes=8589934592`. The image became absent while its registry and permanent archive
+tombstone remained. Available space increased from 65,817,686,016 to 74,407,575,552 bytes. The
+normal seven-day value was then restored with the exact pre-canary configuration SHA-256
+`dab6e3c1acb488521b30b009049f894b208d8f8cb451177b70a6995c2ade9edb`.
+
+Second, release `5a1e577408964d6cf53db08854927c51951a6bc9` added the inclusive
+`terminal_branch_retention_cutover_at` rollout boundary. The live candidate used one-second branch
+retention and cutover `2026-08-23T19:29:16.047801Z`, exactly the #44 terminal Runner-evidence time.
+One ordinary sweep performed 12 GitHub reads and one write, deleted only
+`codex/issue-44-5b3442504241`, and committed a completed cleanup receipt with outcome `deleted`,
+request SHA-256 `ebf36800e1f30f39c1945a8a0edcac149ebc385e69943a1f4922b707c9592256`, and the same exact HEAD.
+The 16 older present task branches and five older absent branch identities received no new cleanup
+record. A GitHub read then returned 404 for #44's ref. Release
+`a2f66949f4847d731b7c2ea1f23401884dc31d5c` restored the normal 30-day value and removed the
+temporary cutover; the handoff sweep was idle with four reads and zero writes. Both canary and
+restore releases passed all 604 tests on Control and Runner. Final health had zero alerts, no
+pending or blocked cleanup, all Control/Runner timers active, and 74,395,394,048 bytes available.
+No Docker prune, manual WorkItem deletion, direct Git ref deletion, or SQLite edit was used.
 
 ## Schema-18 full disaster-recovery drill and exact reclamation plan — 2026-08-23
 

@@ -804,14 +804,17 @@ Dispatcher 运行时也可创建一致快照。它先检查源库，再检查完
 Runner 的 SSH host key 固定在 Control Host。禁止 `StrictHostKeyChecking=no`、agent forwarding、
 port forwarding 和 X11 forwarding。
 
-`s3` Fixture 已迁移到锁定、无 sudo、无附加组的 `codex-runner` 协议账户。release、versioned
-Codex tools、wrapper、Schema、配置和 SSH 授权由 root 管理；协议账户只写 `app`、`run`、
-`work-items` 和独立 HOME。这仍不是进程隔离，也不能阻止直接运行的 Codex 破坏其他 WorkItem
-或共享认证状态；高价值仓库仍须等待后续 per-WorkItem 容器边界完成。
+Fixture Runner 已迁移到锁定、无 sudo、无附加组的 `codex-runner` 协议账户。release、versioned
+Codex tools、wrapper、Schema、配置和 SSH 授权由 root 管理。Codex 不再直接在 host 上执行：
+每个 WorkItem 使用 rootless Docker 容器、独立 ext4 image、repository/session home/auth copy、
+固定资源限制和 proxy-only egress；Docker socket、Runner-wide auth seed 和其他 WorkItem 均不挂载。
+该边界已完成 Fixture live 验收，但仍不等同于高价值仓库准入；剩余 attack/recovery gate 和
+repository-class admission matrix 未满足前，高价值仓库继续 fail closed。
 
 ### 11.4 资源和保留
 
-- 单个 WorkItem 默认磁盘预算 20 GiB；大型项目显式提高。
+- 当前受审配置为每个 WorkItem 8 GiB ext4 image，并额外保留 16 GiB host reserve；大型项目须以
+  独立、受审的配置和容量验收显式提高，不能在 Issue 中请求扩容。
 - `completed_retention_seconds` 显式配置后，completed WorkItem 默认保留 7 天再归档；缺省不启用
   自动清理。
 - maintainer 的 `agent:discard` timeline event 会形成不可逆 disposition：无 PR 为 `abandoned`，
