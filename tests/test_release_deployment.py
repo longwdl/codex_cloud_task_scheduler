@@ -24,6 +24,7 @@ class ReleaseDeploymentTests(unittest.TestCase):
         self.assertIn("release-validation-", text)
         self.assertIn("-m 0700 /run/codex-dispatcher", text)
         self.assertIn("PYTHONDONTWRITEBYTECODE=1", text)
+        self.assertIn("PYTHONPATH=src:.", text)
         self.assertIn("umask 077; cd", text)
         self.assertIn("codex-runner", text)
         self.assertLess(
