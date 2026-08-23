@@ -28,7 +28,16 @@ from codex_dispatcher.slack_delivery import SlackDeliveryCoordinator
 from codex_dispatcher.slack_web_api import SlackWebApiPublisher
 from codex_dispatcher.source_bundle import GitSourceBundleBuilder
 from codex_dispatcher.ssh_dispatch_service import OfflineSshDispatchService
-from codex_dispatcher.ssh_preflight import SshPreflightPlan, build_ssh_preflight_plan
+from codex_dispatcher.ssh_preflight import (
+    SshPreflightPlan,
+    SshPreflightStatus,
+    build_ssh_preflight_plan,
+)
+from codex_dispatcher.ssh_recovery import (
+    SshRecoveryAction,
+    TerminalBranchCleanupFixtureTarget,
+    plan_ssh_recovery,
+)
 from codex_dispatcher.ssh_runner_transport import SshRunnerTransport
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.trackers.github_cli import GitHubCliTracker
@@ -36,7 +45,11 @@ from codex_dispatcher.trackers.base import PullRequestState, TaskState, Tracker
 from codex_dispatcher.trusted_mirror import GitHubMirrorRefresher, TrustedMirrorSource
 from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator
 from codex_dispatcher.work_item_lifecycle import WorkItemAbsenceReconciliation
-from codex_dispatcher.work_items import WorkItemState
+from codex_dispatcher.work_items import (
+    WorkItemState,
+    validate_git_sha,
+    validate_work_item_id,
+)
 
 if TYPE_CHECKING:
     from codex_dispatcher.fixture_faults import FixtureFaultInjection
@@ -152,6 +165,16 @@ def build_ssh_fixture_fault_sweep(
         raise SshRuntimeError(str(exc)) from exc
     if injection.repository != FIXTURE_REPOSITORY:
         raise SshRuntimeError("Fixture fault injection repository conflicts with its contract")
+    terminal_branch_cleanup_fixture_target = None
+    if injection.fault in {
+        FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT,
+        FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECOVERY,
+    }:
+        if injection.expected_work_item_id is None:
+            raise SshRuntimeError("terminal branch Fixture target is missing")
+        terminal_branch_cleanup_fixture_target = TerminalBranchCleanupFixtureTarget(
+            injection.expected_work_item_id
+        )
 
     runtime = _require_runtime(config)
     git_path = _protected_executable(runtime.git_path, "ssh_runtime.git_path")
@@ -178,6 +201,9 @@ def build_ssh_fixture_fault_sweep(
         ssh_path=ssh_path,
         slack_token=slack_token,
         fixture_fault_injection=injection,
+        terminal_branch_cleanup_fixture_target=(
+            terminal_branch_cleanup_fixture_target
+        ),
     )
 
 
@@ -192,6 +218,8 @@ def _assemble_ssh_control_sweep(
     ssh_path: Path,
     slack_token: str | None = None,
     fixture_fault_injection: FixtureFaultInjection | None = None,
+    terminal_branch_cleanup_fixture_target: TerminalBranchCleanupFixtureTarget
+    | None = None,
 ) -> SshControlSweep:
     """Assemble ports using the exact executable paths that were verified."""
 
@@ -310,6 +338,9 @@ def _assemble_ssh_control_sweep(
             else fixture_fault_injection.completion_candidate_hook
         ),
         runner_root=runtime.runner_root,
+        terminal_branch_cleanup_fixture_target=(
+            terminal_branch_cleanup_fixture_target
+        ),
     )
 
 
@@ -492,6 +523,93 @@ def run_ssh_preflight(
     with _temporary_state_snapshot(config.scheduler.database_path) as snapshot:
         store, database_preexisting = snapshot
         plan = build_ssh_preflight_plan(config, store, tracker)
+    return SshPreflightInspection(plan, checks, database_preexisting)
+
+
+def run_ssh_terminal_branch_cleanup_fixture_preflight(
+    *,
+    config: Config,
+    github_token: str,
+    issue_number: int,
+    work_item_id: str,
+    expected_head_sha: str,
+) -> SshPreflightInspection:
+    """Plan only one zero-retention Fixture cleanup after ordinary recovery is idle."""
+    from codex_dispatcher.fixture_faults import (
+        FixtureFaultRejected,
+        validate_fixture_config,
+    )
+
+    if not isinstance(config, Config):
+        raise TypeError("config must be a Config")
+    try:
+        validate_fixture_config(config)
+    except FixtureFaultRejected as exc:
+        raise SshRuntimeError(str(exc)) from exc
+    if type(issue_number) is not int or issue_number <= 0:
+        raise ValueError("issue_number must be a positive integer")
+    work_item_id = validate_work_item_id(work_item_id)
+    expected_head_sha = validate_git_sha(expected_head_sha, "expected_head_sha")
+    runtime = _require_runtime(config)
+    git_path = _protected_executable(runtime.git_path, "ssh_runtime.git_path")
+    gh_path = _protected_executable(runtime.gh_path, "ssh_runtime.gh_path")
+    ssh_path = _protected_executable(runtime.ssh_path, "ssh_runtime.ssh_path")
+    checks = run_control_host_contract_checks(
+        pins=config.tools,
+        git_path=git_path,
+        gh_path=gh_path,
+        ssh_path=ssh_path,
+    )
+    failed = tuple(check.name for check in checks if not check.ok)
+    if failed:
+        raise SshRuntimeError(
+            f"Control Host tool contract failed: {', '.join(failed)}"
+        )
+    tracker = GitHubCliTracker(gh_path=gh_path, token=github_token)
+    with _temporary_state_snapshot(config.scheduler.database_path) as snapshot:
+        store, database_preexisting = snapshot
+        ordinary = build_ssh_preflight_plan(config, store, tracker)
+        if ordinary.status is not SshPreflightStatus.IDLE:
+            raise SshRuntimeError(
+                "normal recovery and candidate planning must be idle before the exact cleanup Fixture"
+            )
+        work_item = store.get_work_item_by_issue(
+            config.repositories[0].slug,
+            issue_number,
+        )
+        if (
+            work_item is None
+            or work_item.work_item_id != work_item_id
+            or work_item.last_published_sha != expected_head_sha
+        ):
+            raise SshRuntimeError(
+                "terminal branch cleanup Fixture identity conflicts with SQLite"
+            )
+        recovery = plan_ssh_recovery(
+            config,
+            store,
+            tracker,
+            audit_terminal=True,
+            terminal_branch_cleanup_fixture_target=(
+                TerminalBranchCleanupFixtureTarget(work_item_id)
+            ),
+        )
+        status = (
+            SshPreflightStatus.READY_RECOVERY
+            if recovery.action is SshRecoveryAction.DELETE_TERMINAL_BRANCH
+            else SshPreflightStatus.BLOCKED
+            if recovery.action is SshRecoveryAction.BLOCK
+            else SshPreflightStatus.IDLE
+        )
+        plan = SshPreflightPlan(
+            status=status,
+            recovery_action=recovery.action,
+            task=recovery.task,
+            work_item=recovery.work_item,
+            turn=recovery.turn,
+            pull_request=recovery.pull_request,
+            reason=recovery.reason,
+        )
     return SshPreflightInspection(plan, checks, database_preexisting)
 
 

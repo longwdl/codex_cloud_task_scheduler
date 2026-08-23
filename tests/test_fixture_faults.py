@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -26,7 +27,11 @@ from codex_dispatcher.git_publisher import (
     PublicationReceipt,
 )
 from codex_dispatcher.publisher import PublicationPlan
-from codex_dispatcher.runner_protocol import RunnerOperation, RunnerRequest
+from codex_dispatcher.runner_protocol import (
+    NEXT_PROTOCOL_VERSION,
+    RunnerOperation,
+    RunnerRequest,
+)
 from codex_dispatcher.runner_transport import (
     RunnerTransportInterrupted,
     RunnerTurnRemoteState,
@@ -39,6 +44,10 @@ from codex_dispatcher.ssh_runner_transport import SshInvocationPlan
 from codex_dispatcher.ssh_preflight import SshPreflightPlan, SshPreflightStatus
 from codex_dispatcher.ssh_recovery import SshRecoveryAction
 from codex_dispatcher.state_store import StateStore
+from codex_dispatcher.terminal_retention import (
+    TerminalBranchCleanupState,
+    terminal_branch_request_sha256,
+)
 from codex_dispatcher.slack_reporting import (
     SlackDeliveryReceipt,
     SlackDeliveryState,
@@ -589,6 +598,111 @@ class FixtureFaultTests(unittest.TestCase):
             )
 
         self.assertEqual([], delegate.calls)
+
+    def test_terminal_branch_receipt_fault_requires_exact_prepared_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root, StateStore(
+            Path(raw_root) / "terminal-branch.db"
+        ) as store:
+            store.migrate()
+            completed = _running_item().transition_to(
+                WorkItemState.REVIEW,
+                at="2026-08-19T00:00:00Z",
+            )
+            completed = replace(
+                completed,
+                last_published_sha=HEAD_SHA,
+                pr_number=9,
+            ).transition_to(
+                WorkItemState.COMPLETED,
+                at="2026-08-19T00:00:00Z",
+            )
+            store.create_work_item(completed)
+            archive_request = RunnerRequest(
+                RunnerOperation.ARCHIVE,
+                completed.work_item_id,
+                version=NEXT_PROTOCOL_VERSION,
+                expected_head_sha=HEAD_SHA,
+            )
+            store.prepare_work_item_archive(
+                completed.work_item_id,
+                expected_head_sha=HEAD_SHA,
+                eligible_at="2026-08-19T00:00:00+00:00",
+                request_sha256=sha256(
+                    archive_request.to_json().encode("utf-8")
+                ).hexdigest(),
+            )
+            store.record_work_item_absence_reconciliation(
+                completed.work_item_id,
+                expected_head_sha=HEAD_SHA,
+                evidence_sha256="e" * 64,
+                observed_by="operator",
+                observed_at="2026-08-19T00:00:01+00:00",
+            )
+            request_sha256 = terminal_branch_request_sha256(
+                work_item_id=completed.work_item_id,
+                repository=completed.repository,
+                branch_name=completed.task_branch,
+                expected_head_sha=HEAD_SHA,
+            )
+            store.prepare_terminal_branch_cleanup(
+                completed.work_item_id,
+                expected_head_sha=HEAD_SHA,
+                eligible_at="2026-08-19T00:00:01+00:00",
+                request_sha256=request_sha256,
+            )
+            delegate = FakeTracker()
+            delegate.branches[(completed.repository, completed.task_branch)] = HEAD_SHA
+            injection = FixtureFaultInjection(
+                FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT,
+                ISSUE,
+                expected_work_item_id=completed.work_item_id,
+                expected_head_sha=HEAD_SHA,
+            )
+            tracker = injection.wrap_tracker(delegate, store=store)
+
+            with self.assertRaises(FixtureReceiptLost):
+                tracker.delete_branch(
+                    completed.repository,
+                    completed.task_branch,
+                    HEAD_SHA,
+                )
+
+            cleanup = store.get_terminal_branch_cleanup(completed.work_item_id)
+            self.assertTrue(injection.triggered)
+            self.assertIsNotNone(cleanup)
+            self.assertIs(TerminalBranchCleanupState.PREPARED, cleanup.state)
+            self.assertIsNone(
+                delegate.get_branch_head(
+                    completed.repository,
+                    completed.task_branch,
+                )
+            )
+            self.assertEqual(
+                1,
+                sum(call.method == "delete_branch" for call in delegate.calls),
+            )
+            recovery = FixtureFaultInjection(
+                FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECOVERY,
+                ISSUE,
+                expected_work_item_id=completed.work_item_id,
+                expected_head_sha=HEAD_SHA,
+            ).wrap_tracker(delegate, store=store)
+            self.assertIsNone(
+                recovery.get_branch_head(
+                    completed.repository,
+                    completed.task_branch,
+                )
+            )
+            with self.assertRaisesRegex(FixtureFaultRejected, "second delete"):
+                recovery.delete_branch(
+                    completed.repository,
+                    completed.task_branch,
+                    HEAD_SHA,
+                )
+            self.assertEqual(
+                1,
+                sum(call.method == "delete_branch" for call in delegate.calls),
+            )
 
     def test_fixture_fault_allows_completion_reads_but_rejects_before_local_write(self) -> None:
         delegate = FakeTracker()
@@ -1236,6 +1350,29 @@ class FixtureFaultTests(unittest.TestCase):
                 self.assertEqual(1, code)
                 self.assertFalse(payload["ok"])
                 load.assert_not_called()
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CODEX_DISPATCHER_ENABLE_SSH_WRITES": "1",
+                    "CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS": FIXTURE_REPOSITORY,
+                    "GITHUB_TOKEN": "github_pat_fixture_test",
+                },
+                clear=True,
+            ),
+            patch(
+                "codex_dispatcher.fixture_fault_cli.load_protected_ssh_config"
+            ) as load,
+        ):
+            code, payload = _run(
+                Path("/protected/config.toml"),
+                issue_number=ISSUE,
+                fault=FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT,
+            )
+
+            self.assertEqual(1, code)
+            self.assertIn("--work-item-id", payload["error"])
+            load.assert_not_called()
 
     def test_cli_slack_fault_requires_separate_gate_and_bot_token(self) -> None:
         with tempfile.TemporaryDirectory() as root:

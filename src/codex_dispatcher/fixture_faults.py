@@ -41,6 +41,10 @@ from codex_dispatcher.ssh_preflight import SshPreflightPlan, SshPreflightStatus
 from codex_dispatcher.ssh_recovery import SshRecoveryAction
 from codex_dispatcher.ssh_runner_transport import SshInvocationPlan
 from codex_dispatcher.state_store import StateStore
+from codex_dispatcher.terminal_retention import (
+    TerminalBranchCleanupState,
+    terminal_branch_request_sha256,
+)
 from codex_dispatcher.trackers.base import (
     ClaimResult,
     DraftPullRequestRequest,
@@ -61,7 +65,9 @@ from codex_dispatcher.work_items import (
     WorkItem,
     WorkItemState,
     validate_git_sha,
+    validate_work_item_id,
 )
+from codex_dispatcher.work_item_lifecycle import WorkItemArchiveStatus
 
 
 FIXTURE_REPOSITORY = "longwdl/codex-dispatcher-fixture"
@@ -91,6 +97,8 @@ class FixtureFaultPoint(StrEnum):
     SLACK_TERMINAL_RECEIPT = "slack-terminal-receipt"
     COMPLETION_COMMENT_RECEIPT = "completion-comment-receipt"
     COMPLETION_LABEL_RECEIPT = "completion-label-receipt"
+    TERMINAL_BRANCH_DELETE_RECEIPT = "terminal-branch-delete-receipt"
+    TERMINAL_BRANCH_DELETE_RECOVERY = "terminal-branch-delete-recovery"
 
 
 class FixtureFaultRejected(RuntimeError):
@@ -151,6 +159,8 @@ class FixtureFaultInjection:
     triggered: bool = False
     claim_acquired_callback: Callable[[TrackerTask], None] | None = None
     pinned_base_sha: str | None = None
+    expected_work_item_id: str | None = None
+    expected_head_sha: str | None = None
     recovery_operations: list[RunnerOperation] = field(default_factory=list)
     ssh_process_pid: int | None = field(default=None, init=False)
     ssh_process_group_id: int | None = field(default=None, init=False)
@@ -187,6 +197,25 @@ class FixtureFaultInjection:
                 raise FixtureFaultRejected(
                     "pinned base is allowed only for the process-kill Fixture"
                 )
+        if self.fault in {
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT,
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECOVERY,
+        }:
+            if self.expected_work_item_id is None or self.expected_head_sha is None:
+                raise FixtureFaultRejected(
+                    "terminal branch receipt fault requires exact WorkItem and head"
+                )
+            self.expected_work_item_id = validate_work_item_id(
+                self.expected_work_item_id
+            )
+            self.expected_head_sha = validate_git_sha(
+                self.expected_head_sha,
+                "expected_head_sha",
+            )
+        elif self.expected_work_item_id is not None or self.expected_head_sha is not None:
+            raise FixtureFaultRejected(
+                "terminal branch identity is allowed only for its receipt fault"
+            )
 
     def wrap_tracker(
         self,
@@ -197,9 +226,11 @@ class FixtureFaultInjection:
         if self.fault in {
             FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
             FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT,
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECOVERY,
         } and not isinstance(store, StateStore):
             raise FixtureFaultRejected(
-                "completion receipt fault requires durable SQLite proof"
+                "this receipt fault requires durable SQLite proof"
             )
         return _FixtureFaultTracker(self, tracker, store=store)
 
@@ -218,6 +249,8 @@ class FixtureFaultInjection:
         if self.fault in {
             FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
             FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT,
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECOVERY,
         }:
             return _FixtureRejectingSlackPublisher()
         if self.fault not in {
@@ -231,6 +264,8 @@ class FixtureFaultInjection:
         if self.fault in {
             FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
             FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT,
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECOVERY,
         }:
             return _FixtureRejectingSource()
         if self.fault is not FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL:
@@ -480,6 +515,13 @@ class _FixtureFaultTransport:
 
     def invoke(self, request, **kwargs):
         self._injection.require_target(self._injection.repository)
+        if self._injection.fault in {
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT,
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECOVERY,
+        }:
+            raise FixtureFaultRejected(
+                "terminal branch receipt fault unexpectedly invoked the Runner"
+            )
         if self._injection.fault in {
             FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
             FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
@@ -767,9 +809,11 @@ class _FixtureFaultPublisher:
         if self._injection.fault in {
             FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
             FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT,
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECOVERY,
         }:
             raise FixtureFaultRejected(
-                "completion receipt fault unexpectedly invoked the Publisher"
+                "this receipt fault unexpectedly invoked the Publisher"
             )
         if self._injection.fault is FixtureFaultPoint.START_STATUS_RECOVERY and (
             self._injection.recovery_operations
@@ -878,6 +922,8 @@ class _FixtureFaultTracker:
             FixtureFaultPoint.SLACK_TERMINAL_RECEIPT: set(),
             FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT: set(),
             FixtureFaultPoint.COMPLETION_LABEL_RECEIPT: {TaskState.COMPLETED},
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT: set(),
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECOVERY: set(),
         }[self._injection.fault]
         if state not in allowed:
             raise FixtureFaultRejected("Fixture fault stage attempted an unexpected state write")
@@ -1002,6 +1048,15 @@ class _FixtureFaultTracker:
 
     def get_branch_head(self, repository: str, branch_name: str) -> str | None:
         self._injection.require_repository(repository)
+        if self._injection.fault in {
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT,
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECOVERY,
+        }:
+            work_item = self._terminal_branch_work_item()
+            if branch_name != work_item.task_branch:
+                raise FixtureFaultRejected(
+                    "terminal branch receipt read escaped its exact branch"
+                )
         return self._delegate.get_branch_head(repository, branch_name)
 
     def delete_branch(
@@ -1011,9 +1066,69 @@ class _FixtureFaultTracker:
         expected_head_sha: str,
     ) -> None:
         self._injection.require_repository(repository)
-        return self._delegate.delete_branch(
-            repository, branch_name, expected_head_sha
+        if self._injection.fault is FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECOVERY:
+            raise FixtureFaultRejected(
+                "terminal branch recovery attempted a second delete"
+            )
+        if (
+            self._injection.fault
+            is not FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT
+        ):
+            return self._delegate.delete_branch(
+                repository, branch_name, expected_head_sha
+            )
+        work_item = self._terminal_branch_work_item()
+        cleanup = self._store.get_terminal_branch_cleanup(work_item.work_item_id)
+        request_sha256 = terminal_branch_request_sha256(
+            work_item_id=work_item.work_item_id,
+            repository=work_item.repository,
+            branch_name=work_item.task_branch,
+            expected_head_sha=expected_head_sha,
         )
+        if (
+            branch_name != work_item.task_branch
+            or expected_head_sha != self._injection.expected_head_sha
+            or cleanup is None
+            or cleanup.state is not TerminalBranchCleanupState.PREPARED
+            or cleanup.repository != repository
+            or cleanup.branch_name != branch_name
+            or cleanup.expected_head_sha != expected_head_sha
+            or cleanup.request_sha256 != request_sha256
+        ):
+            raise FixtureFaultRejected(
+                "terminal branch receipt delete escaped its exact prepared identity"
+            )
+        self._delegate.delete_branch(repository, branch_name, expected_head_sha)
+        if self._delegate.get_branch_head(repository, branch_name) is not None:
+            raise FixtureFaultRejected(
+                "terminal branch receipt delete has no independent absence proof"
+            )
+        self._injection.discard_receipt(
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT
+        )
+
+    def _terminal_branch_work_item(self) -> WorkItem:
+        if self._store is None:
+            raise FixtureFaultRejected(
+                "terminal branch receipt fault has no durable SQLite proof"
+            )
+        work_item = self._store.get_work_item_by_issue(
+            self._injection.repository,
+            self._injection.issue_number,
+        )
+        if (
+            work_item is None
+            or work_item.work_item_id != self._injection.expected_work_item_id
+            or work_item.repository != self._injection.repository
+            or work_item.issue_number != self._injection.issue_number
+            or work_item.state is not WorkItemState.COMPLETED
+            or work_item.last_published_sha != self._injection.expected_head_sha
+            or work_item.pr_number is None
+        ):
+            raise FixtureFaultRejected(
+                "terminal branch receipt fault has no exact completed WorkItem"
+            )
+        return work_item
 
     def _completion_work_item(self, state: WorkItemState) -> WorkItem:
         if self._store is None:
@@ -1208,6 +1323,78 @@ def validate_fixture_preflight(
         raise FixtureFaultRejected("preflight did not resolve the exact Fixture Issue")
 
     work_item = plan.work_item
+    if fault in {
+        FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT,
+        FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECOVERY,
+    }:
+        if store is None:
+            raise FixtureFaultRejected(
+                "terminal branch receipt fault requires read-only SQLite proof"
+            )
+        pull_request = plan.pull_request
+        archive = (
+            None
+            if work_item is None
+            else store.get_work_item_archive(work_item.work_item_id)
+        )
+        absence = (
+            None
+            if work_item is None
+            else store.get_work_item_absence_reconciliation(work_item.work_item_id)
+        )
+        cleanup = (
+            None
+            if work_item is None
+            else store.get_terminal_branch_cleanup(work_item.work_item_id)
+        )
+        cleanup_invalid = cleanup is not None
+        if (
+            fault is FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECOVERY
+            and work_item is not None
+        ):
+            cleanup_invalid = (
+                cleanup is None
+                or cleanup.state is not TerminalBranchCleanupState.PREPARED
+                or cleanup.work_item_id != work_item.work_item_id
+                or cleanup.repository != work_item.repository
+                or cleanup.branch_name != work_item.task_branch
+                or cleanup.expected_head_sha != work_item.last_published_sha
+            )
+        if (
+            plan.status is not SshPreflightStatus.READY_RECOVERY
+            or plan.recovery_action
+            is not SshRecoveryAction.DELETE_TERMINAL_BRANCH
+            or work_item is None
+            or work_item.repository != FIXTURE_REPOSITORY
+            or work_item.issue_number != issue_number
+            or task.issue_node_id != work_item.issue_node_id
+            or task.state is not TaskState.COMPLETED
+            or not task.is_open
+            or work_item.state is not WorkItemState.COMPLETED
+            or work_item.last_published_sha is None
+            or work_item.pr_number is None
+            or pull_request is None
+            or pull_request.number != work_item.pr_number
+            or pull_request.branch_name != work_item.task_branch
+            or pull_request.base_branch != work_item.base_branch
+            or pull_request.head_sha != work_item.last_published_sha
+            or pull_request.state is not PullRequestState.MERGED
+            or pull_request.is_draft
+            or pull_request.is_cross_repository
+            or cleanup_invalid
+            or (
+                absence is None
+                and (
+                    archive is None
+                    or archive.status is not WorkItemArchiveStatus.ARCHIVED
+                )
+            )
+        ):
+            raise FixtureFaultRejected(
+                "terminal branch receipt fault requires one exact completed archived Fixture"
+            )
+        return
+
     if fault is FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT:
         if (
             plan.status is not SshPreflightStatus.READY_RECOVERY

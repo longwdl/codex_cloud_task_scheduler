@@ -29,9 +29,14 @@ from codex_dispatcher.ssh_runtime import (
     build_ssh_fixture_fault_sweep,
     load_protected_ssh_config,
     run_ssh_preflight,
+    run_ssh_terminal_branch_cleanup_fixture_preflight,
     validate_runtime_state_path,
 )
 from codex_dispatcher.state_store import StateStore
+from codex_dispatcher.terminal_retention import (
+    TerminalBranchCleanupOutcome,
+    TerminalBranchCleanupState,
+)
 from codex_dispatcher.slack_reporting import SlackDeliveryState, SlackReportKind
 from codex_dispatcher.slack_live_fixture import verify_slack_workspace
 
@@ -48,6 +53,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--issue", required=True, type=int)
+    parser.add_argument("--work-item-id")
+    parser.add_argument("--expected-head-sha")
     parser.add_argument(
         "--fault",
         required=True,
@@ -115,6 +122,8 @@ def _run(
     *,
     issue_number: int,
     fault: FixtureFaultPoint,
+    work_item_id: str | None = None,
+    expected_head_sha: str | None = None,
 ) -> tuple[int, dict[str, object]]:
     if fault is FixtureFaultPoint.CLAIM_ACQUIRED_PROCESS_KILL:
         return 1, {
@@ -133,6 +142,23 @@ def _run(
         return 1, {"ok": False, "error": "a recognized explicit GitHub token is required"}
     if type(issue_number) is not int or issue_number <= 0:
         return 1, {"ok": False, "error": "fixture issue number must be positive"}
+    if fault in {
+        FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT,
+        FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECOVERY,
+    }:
+        if work_item_id is None or expected_head_sha is None:
+            return 1, {
+                "ok": False,
+                "error": (
+                    "terminal branch receipt fault requires --work-item-id "
+                    "and --expected-head-sha"
+                ),
+            }
+    elif work_item_id is not None or expected_head_sha is not None:
+        return 1, {
+            "ok": False,
+            "error": "terminal branch identity arguments require its receipt fault",
+        }
 
     backup_path: Path | None = None
     injection: FixtureFaultInjection | None = None
@@ -168,7 +194,21 @@ def _run(
         if not config.scheduler.database_path.is_file():
             raise FixtureFaultRejected("Fixture fault requires an existing state database")
 
-        inspection = run_ssh_preflight(config=config, github_token=token)
+        if fault in {
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT,
+            FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECOVERY,
+        }:
+            assert work_item_id is not None
+            assert expected_head_sha is not None
+            inspection = run_ssh_terminal_branch_cleanup_fixture_preflight(
+                config=config,
+                github_token=token,
+                issue_number=issue_number,
+                work_item_id=work_item_id,
+                expected_head_sha=expected_head_sha,
+            )
+        else:
+            inspection = run_ssh_preflight(config=config, github_token=token)
         with StateStore(config.scheduler.database_path, read_only=True) as proof_store:
             validate_fixture_preflight(
                 inspection.plan,
@@ -177,11 +217,17 @@ def _run(
                 store=proof_store,
             )
         backup_path = _create_backup(config.scheduler.database_path, fault)
-        injection = FixtureFaultInjection(fault=fault, issue_number=issue_number)
+        injection = FixtureFaultInjection(
+            fault=fault,
+            issue_number=issue_number,
+            expected_work_item_id=work_item_id,
+            expected_head_sha=expected_head_sha,
+        )
         result = None
         interruption: str | None = None
         observed_work_item = None
         observed_turn = None
+        observed_terminal_branch_cleanup = None
         with StateStore(config.scheduler.database_path) as store:
             store.migrate()
             if store.integrity_check() != "ok":
@@ -194,7 +240,13 @@ def _run(
                 slack_token=slack_token,
             )
             try:
-                result = sweep.run_once()
+                if fault in {
+                    FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT,
+                    FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECOVERY,
+                }:
+                    result = sweep.run_terminal_branch_cleanup_fixture_once()
+                else:
+                    result = sweep.run_once()
             except FixtureReceiptLost:
                 interruption = "receipt_lost"
             except FixtureProcessInterrupted:
@@ -204,6 +256,13 @@ def _run(
                 issue_number,
             )
             observed_turn = store.get_active_turn()
+            observed_terminal_branch_cleanup = (
+                None
+                if observed_work_item is None
+                else store.get_terminal_branch_cleanup(
+                    observed_work_item.work_item_id
+                )
+            )
             observed_turns = (
                 ()
                 if observed_work_item is None
@@ -223,6 +282,45 @@ def _run(
                     f"slack:{observed_work_item.work_item_id}:root"
                 )
             )
+
+        if fault is FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECOVERY:
+            if (
+                injection.triggered
+                or interruption is not None
+                or result is None
+                or result.status.value != "branch_cleaned"
+                or result.reason != TerminalBranchCleanupOutcome.RECONCILED_ABSENT.value
+                or observed_work_item is None
+                or observed_work_item.work_item_id != work_item_id
+                or observed_work_item.state.value != "completed"
+                or observed_work_item.last_published_sha != expected_head_sha
+                or observed_terminal_branch_cleanup is None
+                or observed_terminal_branch_cleanup.state
+                is not TerminalBranchCleanupState.COMPLETED
+                or observed_terminal_branch_cleanup.outcome
+                is not TerminalBranchCleanupOutcome.RECONCILED_ABSENT
+            ):
+                raise FixtureFaultRejected(
+                    "terminal branch recovery did not reconcile exact absence"
+                )
+            return 0, {
+                "ok": True,
+                "fixture_fault": True,
+                "fault": fault.value,
+                "fault_triggered": False,
+                "recovery_guarded": True,
+                "recovery_required": False,
+                "repository": FIXTURE_REPOSITORY,
+                "issue_number": issue_number,
+                "work_item_id": observed_work_item.work_item_id,
+                "turn_id": None,
+                "status": result.status.value,
+                "reason": result.reason,
+                "expected_head_sha": expected_head_sha,
+                "terminal_branch_absent": True,
+                "terminal_branch_cleanup_state": "completed",
+                "backup_path": str(backup_path),
+            }
 
         if fault in {
             FixtureFaultPoint.RECORDED_PUBLICATION_RECOVERY,
@@ -264,7 +362,27 @@ def _run(
 
         if not injection.triggered:
             raise FixtureFaultRejected("requested Fixture fault point was not reached")
-        if fault is FixtureFaultPoint.PUBLICATION_RECORDED:
+        if fault is FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT:
+            if (
+                result is not None
+                or interruption != "receipt_lost"
+                or observed_work_item is None
+                or observed_work_item.work_item_id != work_item_id
+                or observed_work_item.state.value != "completed"
+                or observed_work_item.last_published_sha != expected_head_sha
+                or observed_terminal_branch_cleanup is None
+                or observed_terminal_branch_cleanup.state
+                is not TerminalBranchCleanupState.PREPARED
+                or observed_terminal_branch_cleanup.expected_head_sha
+                != expected_head_sha
+            ):
+                raise FixtureFaultRejected(
+                    "terminal branch receipt fault did not preserve exact PREPARED recovery"
+                )
+            status = interruption
+            work_item_id = observed_work_item.work_item_id
+            turn_id = None
+        elif fault is FixtureFaultPoint.PUBLICATION_RECORDED:
             if (
                 interruption != "process_interrupted"
                 or observed_work_item is None
@@ -456,6 +574,14 @@ def _run(
                     "slack_outbox_state": "prepared",
                 }
             )
+        if fault is FixtureFaultPoint.TERMINAL_BRANCH_DELETE_RECEIPT:
+            payload.update(
+                {
+                    "expected_head_sha": expected_head_sha,
+                    "terminal_branch_absent": True,
+                    "terminal_branch_cleanup_state": "prepared",
+                }
+            )
         if fault in {
             FixtureFaultPoint.COMPLETION_COMMENT_RECEIPT,
             FixtureFaultPoint.COMPLETION_LABEL_RECEIPT,
@@ -509,6 +635,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.config,
         issue_number=args.issue,
         fault=FixtureFaultPoint(args.fault),
+        work_item_id=args.work_item_id,
+        expected_head_sha=args.expected_head_sha,
     )
     _emit(payload, as_json=args.json)
     return code

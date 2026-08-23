@@ -20,6 +20,7 @@ from codex_dispatcher.ssh_dispatch_service import (
 from codex_dispatcher.ssh_recovery import (
     SshRecoveryAction,
     SshRecoveryPlan,
+    TerminalBranchCleanupFixtureTarget,
     plan_ssh_recovery,
 )
 from codex_dispatcher.state_store import StateStore
@@ -114,6 +115,8 @@ class SshControlSweep:
         completion_candidate_hook: CompletionCandidateHook | None = None,
         claimant: str = "codex-dispatcher",
         runner_root: str = "/srv/codex-runner/work-items",
+        terminal_branch_cleanup_fixture_target: TerminalBranchCleanupFixtureTarget
+        | None = None,
     ) -> None:
         if not isinstance(config, Config):
             raise TypeError("config must be a Config")
@@ -124,6 +127,13 @@ class SshControlSweep:
             or "\x00" in claimant
         ):
             raise ValueError("claimant must be non-empty bounded text")
+        if terminal_branch_cleanup_fixture_target is not None and not isinstance(
+            terminal_branch_cleanup_fixture_target,
+            TerminalBranchCleanupFixtureTarget,
+        ):
+            raise TypeError(
+                "terminal_branch_cleanup_fixture_target must be an exact Fixture target or None"
+            )
         self._config = config
         self._store = store
         self._tracker = tracker
@@ -139,19 +149,20 @@ class SshControlSweep:
         self._runner_root = runner_root
         self._repositories = {item.slug: item for item in config.repositories}
         self._audit_terminal = True
+        self._terminal_branch_cleanup_fixture_target = (
+            terminal_branch_cleanup_fixture_target
+        )
 
     def run_once(self, *, turn_id: str | None = None) -> ControlSweepResult:
         """Run recovery first and claim at most one new Issue when state is idle."""
+        if self._terminal_branch_cleanup_fixture_target is not None:
+            raise RuntimeError(
+                "exact terminal branch cleanup Fixture requires its dedicated entry point"
+            )
         with self._lock:
             now = datetime.now(timezone.utc)
             self._audit_terminal = self._terminal_full_audit_due(now)
-            recovery = plan_ssh_recovery(
-                self._config,
-                self._store,
-                self._tracker,
-                now=now,
-                audit_terminal=self._audit_terminal,
-            )
+            recovery = self._plan_recovery(now=now)
             if recovery.action is not SshRecoveryAction.IDLE:
                 return self._handle_recovery(recovery, turn_id=turn_id)
             if self._audit_terminal:
@@ -222,6 +233,49 @@ class SshControlSweep:
                 source_bundle=source_bundle,
                 turn_id=turn_id,
             )
+
+    def run_terminal_branch_cleanup_fixture_once(self) -> ControlSweepResult:
+        """Run only one exact guarded Fixture cleanup after normal recovery is idle."""
+        target = self._terminal_branch_cleanup_fixture_target
+        if target is None:
+            raise RuntimeError("exact terminal branch cleanup Fixture target is missing")
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            ordinary = plan_ssh_recovery(
+                self._config,
+                self._store,
+                self._tracker,
+                now=now,
+                audit_terminal=True,
+            )
+            if ordinary.action is not SshRecoveryAction.IDLE:
+                raise RuntimeError(
+                    "normal recovery must be idle before the exact cleanup Fixture"
+                )
+            self._audit_terminal = True
+            recovery = self._plan_recovery(now=now)
+            if (
+                recovery.action is not SshRecoveryAction.DELETE_TERMINAL_BRANCH
+                or recovery.work_item is None
+                or recovery.work_item.work_item_id != target.work_item_id
+            ):
+                raise RuntimeError(
+                    recovery.reason
+                    or "exact terminal branch cleanup Fixture target is not eligible"
+                )
+            return self._handle_recovery(recovery, turn_id=None)
+
+    def _plan_recovery(self, *, now: datetime | None = None) -> SshRecoveryPlan:
+        return plan_ssh_recovery(
+            self._config,
+            self._store,
+            self._tracker,
+            now=now,
+            audit_terminal=self._audit_terminal,
+            terminal_branch_cleanup_fixture_target=(
+                self._terminal_branch_cleanup_fixture_target
+            ),
+        )
 
     def _terminal_full_audit_due(self, now: datetime) -> bool:
         cursor = self._store.get_sweep_cursor("terminal_github_audit")
@@ -340,12 +394,7 @@ class SshControlSweep:
         if recovery.action is SshRecoveryAction.DELETE_TERMINAL_BRANCH:
             assert recovery.work_item is not None
             assert recovery.branch_cleanup_eligible_at is not None
-            rechecked = plan_ssh_recovery(
-                self._config,
-                self._store,
-                self._tracker,
-                audit_terminal=self._audit_terminal,
-            )
+            rechecked = self._plan_recovery()
             if (
                 rechecked.action is not recovery.action
                 or rechecked.work_item is None
@@ -434,12 +483,7 @@ class SshControlSweep:
         if recovery.action is SshRecoveryAction.ARCHIVE_DISPOSED_WORK_ITEM:
             assert recovery.work_item is not None
             assert recovery.archive_eligible_at is not None
-            rechecked = plan_ssh_recovery(
-                self._config,
-                self._store,
-                self._tracker,
-                audit_terminal=self._audit_terminal,
-            )
+            rechecked = self._plan_recovery()
             if (
                 rechecked.action is not recovery.action
                 or rechecked.work_item is None
@@ -474,12 +518,7 @@ class SshControlSweep:
                 )
                 is not None
             ):
-                rechecked = plan_ssh_recovery(
-                    self._config,
-                    self._store,
-                    self._tracker,
-                    audit_terminal=self._audit_terminal,
-                )
+                rechecked = self._plan_recovery()
                 if (
                     rechecked.action is not recovery.action
                     or rechecked.work_item is None

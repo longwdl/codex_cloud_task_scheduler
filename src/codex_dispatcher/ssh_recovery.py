@@ -26,7 +26,13 @@ from codex_dispatcher.trackers.base import (
     Tracker,
     TrackerTask,
 )
-from codex_dispatcher.work_items import Turn, TurnState, WorkItem, WorkItemState
+from codex_dispatcher.work_items import (
+    Turn,
+    TurnState,
+    WorkItem,
+    WorkItemState,
+    validate_work_item_id,
+)
 from codex_dispatcher.work_items import SessionGenerationRole
 from codex_dispatcher.work_item_lifecycle import (
     WorkItemArchiveStatus,
@@ -71,6 +77,16 @@ class SshRecoveryPlan:
     branch_cleanup_eligible_at: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class TerminalBranchCleanupFixtureTarget:
+    """Exact WorkItem capability for the guarded zero-retention Fixture canary."""
+
+    work_item_id: str
+
+    def __post_init__(self) -> None:
+        validate_work_item_id(self.work_item_id)
+
+
 def plan_ssh_recovery(
     config: Config,
     store: StateStore,
@@ -78,10 +94,19 @@ def plan_ssh_recovery(
     *,
     now: datetime | None = None,
     audit_terminal: bool = True,
+    terminal_branch_cleanup_fixture_target: TerminalBranchCleanupFixtureTarget
+    | None = None,
 ) -> SshRecoveryPlan:
     """Return the only safe next recovery action using provider reads only."""
     if type(audit_terminal) is not bool:
         raise TypeError("audit_terminal must be a bool")
+    if terminal_branch_cleanup_fixture_target is not None and not isinstance(
+        terminal_branch_cleanup_fixture_target,
+        TerminalBranchCleanupFixtureTarget,
+    ):
+        raise TypeError(
+            "terminal_branch_cleanup_fixture_target must be an exact Fixture target or None"
+        )
     configured = {repository.slug: repository for repository in config.repositories}
     active_turn = store.get_active_turn()
     if active_turn is not None:
@@ -181,6 +206,7 @@ def plan_ssh_recovery(
         tracker,
         configured,
         observed_at=observed_at,
+        fixture_target=terminal_branch_cleanup_fixture_target,
     )
     if branch_cleanup is not None:
         return branch_cleanup
@@ -647,16 +673,24 @@ def _plan_terminal_branch_cleanup(
     configured: dict[str, object],
     *,
     observed_at: datetime,
+    fixture_target: TerminalBranchCleanupFixtureTarget | None = None,
 ) -> SshRecoveryPlan | None:
     runtime = config.ssh_runtime
     retention_seconds = (
-        None
+        0
+        if fixture_target is not None
+        else None
         if runtime is None
         else getattr(runtime, "terminal_branch_retention_seconds", None)
     )
     if retention_seconds is None:
         return None
     for work_item in store.list_work_items():
+        if (
+            fixture_target is not None
+            and work_item.work_item_id != fixture_target.work_item_id
+        ):
+            continue
         record = store.get_terminal_branch_cleanup(work_item.work_item_id)
         if record is not None:
             if record.state is TerminalBranchCleanupState.COMPLETED:

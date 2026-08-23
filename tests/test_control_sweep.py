@@ -35,7 +35,12 @@ from codex_dispatcher.slack_reporting import (
 )
 from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_dispatch_service import OfflineSshDispatchService
+from codex_dispatcher.ssh_recovery import TerminalBranchCleanupFixtureTarget
 from codex_dispatcher.state_store import StateStore
+from codex_dispatcher.terminal_retention import (
+    TerminalBranchCleanupOutcome,
+    TerminalBranchCleanupState,
+)
 from codex_dispatcher.testing.fake_runner import (
     FakeBundleVerifier,
     FakeSshRunnerTransport,
@@ -345,6 +350,7 @@ class SshControlSweepTests(unittest.TestCase):
         slack_delivery: SlackDeliveryCoordinator | None = None,
         completion_candidate_hook=None,
         config=None,
+        terminal_branch_cleanup_fixture_target=None,
     ) -> SshControlSweep:
         return SshControlSweep(
             config=config or make_config(global_max_active=4),
@@ -357,6 +363,9 @@ class SshControlSweepTests(unittest.TestCase):
             delivery=delivery,
             slack_delivery=slack_delivery,
             completion_candidate_hook=completion_candidate_hook,
+            terminal_branch_cleanup_fixture_target=(
+                terminal_branch_cleanup_fixture_target
+            ),
         )
 
     def _register_checkpoint(
@@ -827,17 +836,32 @@ class SshControlSweepTests(unittest.TestCase):
             make_config(global_max_active=4),
             ssh_runtime=SimpleNamespace(
                 completed_retention_seconds=None,
-                terminal_branch_retention_seconds=1,
+                terminal_branch_retention_seconds=10 * 365 * 24 * 60 * 60,
             ),
         )
-        sweep = self._sweep(tracker, _RecordingSource(), config=config)
+        target = TerminalBranchCleanupFixtureTarget(item.work_item_id)
+        sweep = self._sweep(
+            tracker,
+            _RecordingSource(),
+            config=config,
+            terminal_branch_cleanup_fixture_target=target,
+        )
 
         with self.assertRaisesRegex(RuntimeError, "lost branch"):
-            sweep.run_once()
-        reconciled = sweep.run_once()
+            sweep.run_terminal_branch_cleanup_fixture_once()
+        prepared = self.store.get_terminal_branch_cleanup(item.work_item_id)
+        reconciled = sweep.run_terminal_branch_cleanup_fixture_once()
+        ordinary = self._sweep(tracker, _RecordingSource(), config=config)
+        idle = ordinary.run_once()
 
+        self.assertIsNotNone(prepared)
+        self.assertIs(TerminalBranchCleanupState.PREPARED, prepared.state)
         self.assertEqual(ControlSweepStatus.BRANCH_CLEANED, reconciled.status)
         self.assertEqual("reconciled_absent", reconciled.reason)
+        cleanup = self.store.get_terminal_branch_cleanup(item.work_item_id)
+        self.assertIs(TerminalBranchCleanupState.COMPLETED, cleanup.state)
+        self.assertIs(TerminalBranchCleanupOutcome.RECONCILED_ABSENT, cleanup.outcome)
+        self.assertEqual(ControlSweepStatus.IDLE, idle.status)
         self.assertTrue(tracker.tasks[task.task_id].is_open)
         self.assertIs(TaskState.COMPLETED, tracker.tasks[task.task_id].state)
 
