@@ -49,14 +49,21 @@ RepoDigest `codex-cloud-task-scheduler-runner@sha256:a36f9077ec5e918a58152f7e99e
 source commit `5c268fb6fe4bb59ebab0cc9f84570bfff47de90b`, provenance `tree_equivalent`, zero
 containers, and Docker unique-size estimate 351,700,000 bytes. The combined estimate is 418,587,680
 bytes. Two separate rechecks, including the final pre-approval check, reported
-`reinspection_matches=true`, `state_writes=0`, and `requires_separate_apply=true`. No reclamation
-apply or Docker prune command was executed.
+`reinspection_matches=true`, `state_writes=0`, and `requires_separate_apply=true`. After explicit
+operator approval, a third identical recheck preceded the separate apply. Permanent receipt
+`/srv/codex-runner/reclamation-receipts/06b8114af8309de53ac79b587accc8ae3ac41cd8809685be1e59c8f5cf7f701e.json`
+is root-owned mode `0600`, has SHA-256
+`c437e1dcc83ccaf7c947b73abbc0bf7407e12762fdd7525a92ad0b6023946a3c`, and records
+`status=reclaimed`, all 19 release commits, the one image ID, and `reclaimed_bytes=418587680`.
+Post-checks found only current `6da4734` and rollback `aa2fff9` release directories, proved the old
+image absent and the configured image present, and observed available space increase by 418,828,288
+bytes. No Docker prune command was executed.
 
 The post-release preflight and both observed sweeps were `idle`, with four GitHub reads, zero
 writes, and zero failures. Fresh Online Backup `state-20260823T151231.030355Z.db` was 614,400 bytes
 with integrity `ok`; its restore drill passed migrations 1 through 18, zero foreign-key violations,
 and temporary-file cleanup. Final health reported zero alerts, zero active or blocked WorkItems,
-zero pending or blocked archive/branch cleanup, Runner capacity admissible with 74,031,616,000 bytes
+zero pending or blocked archive/branch cleanup, Runner capacity admissible with 74,450,329,600 bytes
 available, all four Control timers enabled/active, and the Runner capacity timer enabled/active.
 
 ## Safe inactive-Turn abandonment and schema-18 release — 2026-08-23
