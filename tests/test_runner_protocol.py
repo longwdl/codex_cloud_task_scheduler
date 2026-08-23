@@ -234,6 +234,24 @@ class RunnerProtocolTests(unittest.TestCase):
                         **values,
                     )
 
+    def test_v2_capacity_request_has_no_caller_controlled_identity(self) -> None:
+        request = RunnerRequest(
+            RunnerOperation.CAPACITY,
+            "wi_" + "0" * 24,
+            version=NEXT_PROTOCOL_VERSION,
+        )
+        self.assertEqual(request, parse_runner_request(request.to_json()))
+        self.assertEqual(
+            {"version", "op", "work_item_id"}, set(request.to_mapping())
+        )
+        with self.assertRaises(RunnerProtocolError):
+            RunnerRequest(
+                RunnerOperation.CAPACITY,
+                WORK_ITEM,
+                version=NEXT_PROTOCOL_VERSION,
+                expected_head_sha="a" * 40,
+            )
+
     def test_agent_result_is_strict_bounded_and_path_safe(self) -> None:
         payload = {
             "status": "needs_input",

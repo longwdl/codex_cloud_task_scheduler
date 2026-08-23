@@ -63,6 +63,7 @@ class FakeTracker(_ConfigurableFake):
         self.tasks: dict[str, TrackerTask] = {}
         self.comments: dict[str, tuple[TrackerComment, ...]] = {}
         self.pull_requests: dict[tuple[str, str], PullRequest] = {}
+        self.branches: dict[tuple[str, str], str] = {}
 
     def list_ready_tasks(self, repository: str) -> tuple[TrackerTask, ...]:
         self._record("list_ready_tasks", repository)
@@ -160,6 +161,26 @@ class FakeTracker(_ConfigurableFake):
         return self._outcome(
             "find_pr_by_branch", self.pull_requests.get((repository, branch_name))
         )  # type: ignore[return-value]
+
+    def get_branch_head(self, repository: str, branch_name: str) -> str | None:
+        self._record("get_branch_head", repository, branch_name)
+        return self._outcome(
+            "get_branch_head", self.branches.get((repository, branch_name))
+        )  # type: ignore[return-value]
+
+    def delete_branch(
+        self,
+        repository: str,
+        branch_name: str,
+        expected_head_sha: str,
+    ) -> None:
+        self._record("delete_branch", repository, branch_name, expected_head_sha)
+        current = self.branches.get((repository, branch_name))
+        if current is not None and current != expected_head_sha:
+            raise ValueError("branch head does not match the expected checkpoint")
+        self._outcome("delete_branch", None)
+        if "delete_branch" not in self._results and current is not None:
+            del self.branches[(repository, branch_name)]
 
     def create_draft_pr(self, request: DraftPullRequestRequest) -> PullRequest:
         self._record("create_draft_pr", request)

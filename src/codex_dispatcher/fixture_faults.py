@@ -1000,6 +1000,21 @@ class _FixtureFaultTracker:
         self._injection.completion_identity_validated = True
         return pull_request
 
+    def get_branch_head(self, repository: str, branch_name: str) -> str | None:
+        self._injection.require_repository(repository)
+        return self._delegate.get_branch_head(repository, branch_name)
+
+    def delete_branch(
+        self,
+        repository: str,
+        branch_name: str,
+        expected_head_sha: str,
+    ) -> None:
+        self._injection.require_repository(repository)
+        return self._delegate.delete_branch(
+            repository, branch_name, expected_head_sha
+        )
+
     def _completion_work_item(self, state: WorkItemState) -> WorkItem:
         if self._store is None:
             raise FixtureFaultRejected(

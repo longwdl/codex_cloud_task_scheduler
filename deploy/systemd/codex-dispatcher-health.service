@@ -18,7 +18,7 @@ ExecStart=/opt/codex-dispatcher/current/scripts/codex-dispatcher-health-v1
 
 ReadWritePaths=/var/lib/codex-dispatcher
 
-TimeoutStartSec=30s
+TimeoutStartSec=60s
 TimeoutStopSec=10s
 KillMode=control-group
 SendSIGKILL=yes

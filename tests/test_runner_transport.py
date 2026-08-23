@@ -14,6 +14,8 @@ from codex_dispatcher.runner_protocol import (
     parse_agent_result,
 )
 from codex_dispatcher.runner_transport import (
+    RUNNER_CAPACITY_SCOPE_ID,
+    RunnerCapacityReply,
     RunnerAbsenceReply,
     RunnerArchiveReply,
     RunnerArchiveState,
@@ -24,6 +26,7 @@ from codex_dispatcher.runner_transport import (
     parse_runner_ack,
     parse_runner_absence_reply,
     parse_runner_archive_reply,
+    parse_runner_capacity_reply,
     parse_runner_export_reply,
     parse_runner_turn_reply,
 )
@@ -364,6 +367,23 @@ class RunnerTransportContractTests(unittest.TestCase):
                 "c" * 40,
                 RunnerArchiveState.ARCHIVING,
             )
+
+    def test_capacity_reply_is_strict_and_recomputes_admission_flags(self) -> None:
+        reply = RunnerCapacityReply(
+            capacity_bytes=1_000,
+            available_bytes=300,
+            image_size_bytes=200,
+            host_reserve_bytes=200,
+            turn_admissible=True,
+            provision_admissible=False,
+            provision_shortfall_bytes=100,
+        )
+        self.assertEqual(reply, parse_runner_capacity_reply(reply.to_json()))
+        self.assertEqual(RUNNER_CAPACITY_SCOPE_ID, reply.work_item_id)
+        payload = json.loads(reply.to_json())
+        payload["provision_shortfall_bytes"] = 0
+        with self.assertRaises(RunnerProtocolError):
+            parse_runner_capacity_reply(json.dumps(payload))
 
 
 if __name__ == "__main__":

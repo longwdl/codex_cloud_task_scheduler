@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import json
 import re
+import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+from urllib.parse import quote
 
 from codex_dispatcher.command_runner import CommandResult, run_command
 from codex_dispatcher.trackers.base import (
@@ -37,6 +40,36 @@ class GitHubCliReadOnlyError(GitHubCliTrackerError):
 
 class GitHubCliUnsupportedReadError(GitHubCliTrackerError):
     """Raised for tracker reads not implemented by the current adapter."""
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubApiMetrics:
+    command_count: int
+    read_count: int
+    write_count: int
+    elapsed_milliseconds: int
+    core_remaining: int | None = None
+    core_limit: int | None = None
+    core_reset_epoch: int | None = None
+    graphql_remaining: int | None = None
+    graphql_limit: int | None = None
+    graphql_reset_epoch: int | None = None
+    rate_limit_error: str | None = None
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "command_count": self.command_count,
+            "read_count": self.read_count,
+            "write_count": self.write_count,
+            "elapsed_milliseconds": self.elapsed_milliseconds,
+            "core_remaining": self.core_remaining,
+            "core_limit": self.core_limit,
+            "core_reset_epoch": self.core_reset_epoch,
+            "graphql_remaining": self.graphql_remaining,
+            "graphql_limit": self.graphql_limit,
+            "graphql_reset_epoch": self.graphql_reset_epoch,
+            "rate_limit_error": self.rate_limit_error,
+        }
 
 
 _RUN_COMMENT_PREFIX = "<!-- codex-dispatcher:"
@@ -74,6 +107,49 @@ class GitHubCliTracker:
         self._gh_path = candidate
         self._token = token
         self._timeout_seconds = timeout_seconds
+        self._command_count = 0
+        self._read_count = 0
+        self._write_count = 0
+        self._elapsed_milliseconds = 0
+
+    def collect_api_metrics(self) -> GitHubApiMetrics:
+        """Return bounded command counters plus a best-effort provider budget snapshot."""
+        rate_values: dict[str, int] | None = None
+        rate_error: str | None = None
+        try:
+            payload = self._json_command(
+                (
+                    self._gh_path,
+                    "api",
+                    "--method",
+                    "GET",
+                    "-H",
+                    "Accept: application/vnd.github+json",
+                    "/rate_limit",
+                )
+            )
+            rate_values = _parse_rate_limit(payload)
+        except (GitHubCliTrackerError, ValueError):
+            rate_error = "github_rate_limit_unavailable"
+        return GitHubApiMetrics(
+            command_count=self._command_count,
+            read_count=self._read_count,
+            write_count=self._write_count,
+            elapsed_milliseconds=self._elapsed_milliseconds,
+            core_remaining=None if rate_values is None else rate_values["core_remaining"],
+            core_limit=None if rate_values is None else rate_values["core_limit"],
+            core_reset_epoch=(
+                None if rate_values is None else rate_values["core_reset_epoch"]
+            ),
+            graphql_remaining=(
+                None if rate_values is None else rate_values["graphql_remaining"]
+            ),
+            graphql_limit=None if rate_values is None else rate_values["graphql_limit"],
+            graphql_reset_epoch=(
+                None if rate_values is None else rate_values["graphql_reset_epoch"]
+            ),
+            rate_limit_error=rate_error,
+        )
 
     def list_ready_tasks(self, repository: str) -> tuple[TrackerTask, ...]:
         """Return open issues currently labelled ``agent:ready``.
@@ -183,6 +259,68 @@ class GitHubCliTracker:
         if len(parsed) > 1:
             raise GitHubCliTrackerError("multiple pull requests use the task branch")
         return parsed[0] if parsed else None
+
+    def get_branch_head(self, repository: str, branch_name: str) -> str | None:
+        """Return the exact task-branch head without treating absence as an error."""
+        repository = _validate_repository(repository)
+        branch_name = validate_branch(branch_name)
+        encoded = quote(branch_name, safe="")
+        payload = self._json_command(
+            (
+                self._gh_path,
+                "api",
+                "--method",
+                "GET",
+                "-H",
+                "Accept: application/vnd.github+json",
+                f"/repos/{repository}/git/matching-refs/heads/{encoded}",
+            )
+        )
+        if not isinstance(payload, list):
+            raise GitHubCliTrackerError("GitHub matching refs response must be an array")
+        exact_ref = f"refs/heads/{branch_name}"
+        matches = [item for item in payload if isinstance(item, dict) and item.get("ref") == exact_ref]
+        if len(matches) > 1:
+            raise GitHubCliTrackerError("multiple exact GitHub branch refs returned")
+        if not matches:
+            return None
+        target = matches[0].get("object")
+        if not isinstance(target, dict) or target.get("type") != "commit":
+            raise GitHubCliTrackerError("GitHub branch target is not a commit")
+        try:
+            return validate_git_sha(target.get("sha"), "branch head SHA")
+        except (TypeError, ValueError) as exc:
+            raise GitHubCliTrackerError("GitHub branch head SHA is invalid") from exc
+
+    def delete_branch(
+        self,
+        repository: str,
+        branch_name: str,
+        expected_head_sha: str,
+    ) -> None:
+        """Delete only a branch whose immediately re-read head is exact."""
+        repository = _validate_repository(repository)
+        branch_name = validate_branch(branch_name)
+        expected_head_sha = validate_git_sha(expected_head_sha, "expected_head_sha")
+        current = self.get_branch_head(repository, branch_name)
+        if current is None:
+            return
+        if current != expected_head_sha:
+            raise GitHubCliTrackerError("GitHub branch head changed before deletion")
+        encoded = quote(branch_name, safe="")
+        output = self._text_command(
+            (
+                self._gh_path,
+                "api",
+                "--method",
+                "DELETE",
+                "-H",
+                "Accept: application/vnd.github+json",
+                f"/repos/{repository}/git/refs/heads/{encoded}",
+            )
+        )
+        if output.strip():
+            raise GitHubCliTrackerError("GitHub branch deletion returned unexpected output")
 
     def claim(
         self,
@@ -471,6 +609,7 @@ class GitHubCliTracker:
         return self._command(argv).stdout
 
     def _command(self, argv: tuple[str, ...]) -> CommandResult:
+        started = time.monotonic()
         with TemporaryDirectory(prefix="codex-dispatcher-gh-") as config_directory:
             command_env = {
                 "GH_CONFIG_DIR": config_directory,
@@ -486,6 +625,14 @@ class GitHubCliTracker:
                 env=command_env,
                 secrets=secrets,
             )
+        self._command_count += 1
+        if _is_read_command(argv):
+            self._read_count += 1
+        else:
+            self._write_count += 1
+        self._elapsed_milliseconds += max(
+            0, int((time.monotonic() - started) * 1000)
+        )
         if (
             result.returncode != 0
             or result.timed_out
@@ -495,6 +642,41 @@ class GitHubCliTracker:
         ):
             raise GitHubCliTrackerError(_command_failure(result))
         return result
+
+
+def _is_read_command(argv: tuple[str, ...]) -> bool:
+    if len(argv) < 3:
+        return False
+    if argv[1] in {"issue", "pr"}:
+        return argv[2] in {"list", "view"}
+    if argv[1] != "api":
+        return False
+    try:
+        method = argv[argv.index("--method") + 1]
+    except (ValueError, IndexError):
+        method = "GET"
+    return method == "GET"
+
+
+def _parse_rate_limit(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        raise ValueError("GitHub rate limit response is invalid")
+    resources = value.get("resources")
+    if not isinstance(resources, dict):
+        raise ValueError("GitHub rate limit resources are invalid")
+    result: dict[str, int] = {}
+    for name in ("core", "graphql"):
+        resource = resources.get(name)
+        if not isinstance(resource, dict):
+            raise ValueError("GitHub rate limit resource is invalid")
+        for field in ("remaining", "limit", "reset"):
+            item = resource.get(field)
+            if type(item) is not int or item < 0:
+                raise ValueError("GitHub rate limit value is invalid")
+            result[f"{name}_{field if field != 'reset' else 'reset_epoch'}"] = item
+        if result[f"{name}_remaining"] > result[f"{name}_limit"]:
+            raise ValueError("GitHub rate limit remaining exceeds limit")
+    return result
 
 
 def _command_failure(result: CommandResult) -> str:

@@ -83,6 +83,117 @@ class RunnerTransport(Protocol):
     ) -> RunnerWireOutput: ...
 
 
+RUNNER_CAPACITY_SCOPE_ID = "wi_" + "0" * 24
+
+
+@dataclass(frozen=True, slots=True)
+class RunnerCapacityReply:
+    capacity_bytes: int
+    available_bytes: int
+    image_size_bytes: int
+    host_reserve_bytes: int
+    turn_admissible: bool
+    provision_admissible: bool
+    provision_shortfall_bytes: int
+    operation: RunnerOperation = RunnerOperation.CAPACITY
+    work_item_id: str = RUNNER_CAPACITY_SCOPE_ID
+    version: int = NEXT_PROTOCOL_VERSION
+
+    def __post_init__(self) -> None:
+        if self.operation is not RunnerOperation.CAPACITY:
+            raise RunnerProtocolError("operation does not return capacity evidence")
+        if self.version != NEXT_PROTOCOL_VERSION:
+            raise RunnerProtocolError("unsupported Runner capacity response version")
+        if self.work_item_id != RUNNER_CAPACITY_SCOPE_ID:
+            raise RunnerProtocolError("Runner capacity scope is invalid")
+        numeric = (
+            self.capacity_bytes,
+            self.available_bytes,
+            self.image_size_bytes,
+            self.host_reserve_bytes,
+            self.provision_shortfall_bytes,
+        )
+        if any(type(value) is not int or value < 0 for value in numeric):
+            raise RunnerProtocolError("Runner capacity values are invalid")
+        if (
+            self.capacity_bytes <= 0
+            or self.available_bytes > self.capacity_bytes
+            or self.image_size_bytes <= 0
+            or self.host_reserve_bytes <= 0
+            or type(self.turn_admissible) is not bool
+            or type(self.provision_admissible) is not bool
+        ):
+            raise RunnerProtocolError("Runner capacity values are inconsistent")
+        shortfall = max(
+            0,
+            self.image_size_bytes
+            + self.host_reserve_bytes
+            - self.available_bytes,
+        )
+        turn_admissible = (
+            self.available_bytes >= self.host_reserve_bytes
+            and self.available_bytes * 100 >= self.capacity_bytes * 15
+        )
+        if (
+            self.provision_shortfall_bytes != shortfall
+            or self.provision_admissible != (shortfall == 0)
+            or self.turn_admissible != turn_admissible
+        ):
+            raise RunnerProtocolError("Runner capacity admission flags are inconsistent")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "op": self.operation.value,
+            "work_item_id": self.work_item_id,
+            "state": "ok",
+            "capacity_bytes": self.capacity_bytes,
+            "available_bytes": self.available_bytes,
+            "image_size_bytes": self.image_size_bytes,
+            "host_reserve_bytes": self.host_reserve_bytes,
+            "turn_admissible": self.turn_admissible,
+            "provision_admissible": self.provision_admissible,
+            "provision_shortfall_bytes": self.provision_shortfall_bytes,
+        }
+
+    def to_json(self) -> str:
+        return _dump(self.to_mapping())
+
+
+def parse_runner_capacity_reply(value: str | bytes) -> RunnerCapacityReply:
+    payload = _load(value)
+    expected = {
+        "version",
+        "op",
+        "work_item_id",
+        "state",
+        "capacity_bytes",
+        "available_bytes",
+        "image_size_bytes",
+        "host_reserve_bytes",
+        "turn_admissible",
+        "provision_admissible",
+        "provision_shortfall_bytes",
+    }
+    if set(payload) != expected or payload.get("state") != "ok":
+        raise RunnerProtocolError("Runner capacity response fields are invalid")
+    try:
+        return RunnerCapacityReply(
+            operation=RunnerOperation(payload["op"]),
+            work_item_id=payload["work_item_id"],
+            version=payload["version"],
+            capacity_bytes=payload["capacity_bytes"],
+            available_bytes=payload["available_bytes"],
+            image_size_bytes=payload["image_size_bytes"],
+            host_reserve_bytes=payload["host_reserve_bytes"],
+            turn_admissible=payload["turn_admissible"],
+            provision_admissible=payload["provision_admissible"],
+            provision_shortfall_bytes=payload["provision_shortfall_bytes"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise RunnerProtocolError(str(exc)) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class RunnerAck:
     operation: RunnerOperation

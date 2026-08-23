@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Protocol
 
@@ -22,6 +23,11 @@ from codex_dispatcher.ssh_recovery import (
     plan_ssh_recovery,
 )
 from codex_dispatcher.state_store import StateStore
+from codex_dispatcher.terminal_retention import (
+    TerminalBranchCleanupOutcome,
+    TerminalBranchCleanupState,
+    terminal_branch_request_sha256,
+)
 from codex_dispatcher.trackers.base import (
     PullRequest,
     TaskState,
@@ -29,6 +35,7 @@ from codex_dispatcher.trackers.base import (
     TrackerComment,
     TrackerTask,
 )
+from codex_dispatcher.trackers.github_cli import GitHubApiMetrics
 from codex_dispatcher.turn_orchestration import TaskBranchPublisher, TurnProgress
 from codex_dispatcher.work_items import Turn, TurnState, WorkItem, WorkItemState
 from codex_dispatcher.work_item_lifecycle import WorkItemArchiveStatus
@@ -74,6 +81,7 @@ class ControlSweepStatus(StrEnum):
     AWAITING_ARCHIVE = "awaiting_archive"
     ARCHIVED = "archived"
     DISPOSITION_RECORDED = "disposition_recorded"
+    BRANCH_CLEANED = "branch_cleaned"
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +92,7 @@ class ControlSweepResult:
     work_item_id: str | None = None
     turn_id: str | None = None
     reason: str | None = None
+    github_api: GitHubApiMetrics | None = None
 
 
 class SshControlSweep:
@@ -129,13 +138,26 @@ class SshControlSweep:
         self._claimant = claimant
         self._runner_root = runner_root
         self._repositories = {item.slug: item for item in config.repositories}
+        self._audit_terminal = True
 
     def run_once(self, *, turn_id: str | None = None) -> ControlSweepResult:
         """Run recovery first and claim at most one new Issue when state is idle."""
         with self._lock:
-            recovery = plan_ssh_recovery(self._config, self._store, self._tracker)
+            now = datetime.now(timezone.utc)
+            self._audit_terminal = self._terminal_full_audit_due(now)
+            recovery = plan_ssh_recovery(
+                self._config,
+                self._store,
+                self._tracker,
+                now=now,
+                audit_terminal=self._audit_terminal,
+            )
             if recovery.action is not SshRecoveryAction.IDLE:
                 return self._handle_recovery(recovery, turn_id=turn_id)
+            if self._audit_terminal:
+                self._store.record_sweep_cursor(
+                    "terminal_github_audit", completed_at=now.isoformat()
+                )
 
             candidates = self._dispatch.plan_candidates(self._tracker)
             if not candidates.selected:
@@ -201,6 +223,25 @@ class SshControlSweep:
                 turn_id=turn_id,
             )
 
+    def _terminal_full_audit_due(self, now: datetime) -> bool:
+        cursor = self._store.get_sweep_cursor("terminal_github_audit")
+        if cursor is None:
+            return True
+        try:
+            completed_at = datetime.fromisoformat(cursor)
+        except ValueError:
+            return True
+        if completed_at.tzinfo is None or completed_at.utcoffset() is None:
+            return True
+        interval = timedelta(
+            seconds=self._config.scheduler.terminal_full_scan_interval_seconds
+        )
+        return now >= completed_at.astimezone(timezone.utc) + interval
+
+    def collect_github_api_metrics(self) -> GitHubApiMetrics | None:
+        collect = getattr(self._tracker, "collect_api_metrics", None)
+        return collect() if callable(collect) else None
+
     def _handle_recovery(
         self,
         recovery: SshRecoveryPlan,
@@ -208,6 +249,21 @@ class SshControlSweep:
         turn_id: str | None,
     ) -> ControlSweepResult:
         if recovery.action is SshRecoveryAction.BLOCK:
+            if recovery.work_item is not None and recovery.reason in {
+                "terminal_branch_head_conflict",
+                "terminal_branch_cleanup_identity_conflict",
+            }:
+                cleanup = self._store.get_terminal_branch_cleanup(
+                    recovery.work_item.work_item_id
+                )
+                if (
+                    cleanup is not None
+                    and cleanup.state is TerminalBranchCleanupState.PREPARED
+                ):
+                    self._store.block_terminal_branch_cleanup(
+                        recovery.work_item.work_item_id,
+                        error_code=recovery.reason,
+                    )
             return _plan_result(
                 ControlSweepStatus.BLOCKED,
                 recovery,
@@ -281,11 +337,108 @@ class SshControlSweep:
                 recovery,
                 reason=archive.error_code,
             )
+        if recovery.action is SshRecoveryAction.DELETE_TERMINAL_BRANCH:
+            assert recovery.work_item is not None
+            assert recovery.branch_cleanup_eligible_at is not None
+            rechecked = plan_ssh_recovery(
+                self._config,
+                self._store,
+                self._tracker,
+                audit_terminal=self._audit_terminal,
+            )
+            if (
+                rechecked.action is not recovery.action
+                or rechecked.work_item is None
+                or rechecked.work_item.work_item_id != recovery.work_item.work_item_id
+            ):
+                return _plan_result(
+                    ControlSweepStatus.BLOCKED,
+                    rechecked,
+                    reason=rechecked.reason or "terminal_branch_cleanup_candidate_changed",
+                )
+            disposition = self._store.get_work_item_disposition(
+                recovery.work_item.work_item_id
+            )
+            expected_head_sha = (
+                disposition.expected_head_sha
+                if disposition is not None
+                else recovery.work_item.last_published_sha
+            )
+            assert expected_head_sha is not None
+            request_sha256 = terminal_branch_request_sha256(
+                work_item_id=recovery.work_item.work_item_id,
+                repository=recovery.work_item.repository,
+                branch_name=recovery.work_item.task_branch,
+                expected_head_sha=expected_head_sha,
+            )
+            previous = self._store.get_terminal_branch_cleanup(
+                recovery.work_item.work_item_id
+            )
+            cleanup = self._store.prepare_terminal_branch_cleanup(
+                recovery.work_item.work_item_id,
+                expected_head_sha=expected_head_sha,
+                eligible_at=recovery.branch_cleanup_eligible_at,
+                request_sha256=request_sha256,
+            )
+            branch_head = self._tracker.get_branch_head(
+                cleanup.repository, cleanup.branch_name
+            )
+            if branch_head is None:
+                outcome = (
+                    TerminalBranchCleanupOutcome.RECONCILED_ABSENT
+                    if previous is not None
+                    else TerminalBranchCleanupOutcome.ALREADY_ABSENT
+                )
+                self._store.complete_terminal_branch_cleanup(
+                    cleanup.work_item_id, outcome=outcome
+                )
+                return _plan_result(
+                    ControlSweepStatus.BRANCH_CLEANED,
+                    recovery,
+                    reason=outcome.value,
+                )
+            if branch_head != expected_head_sha:
+                self._store.block_terminal_branch_cleanup(
+                    cleanup.work_item_id,
+                    error_code="terminal_branch_head_conflict",
+                )
+                return _plan_result(
+                    ControlSweepStatus.BLOCKED,
+                    recovery,
+                    reason="terminal_branch_head_conflict",
+                )
+            self._tracker.delete_branch(
+                cleanup.repository,
+                cleanup.branch_name,
+                expected_head_sha,
+            )
+            if self._tracker.get_branch_head(cleanup.repository, cleanup.branch_name) is not None:
+                self._store.block_terminal_branch_cleanup(
+                    cleanup.work_item_id,
+                    error_code="terminal_branch_delete_unconfirmed",
+                )
+                return _plan_result(
+                    ControlSweepStatus.BLOCKED,
+                    recovery,
+                    reason="terminal_branch_delete_unconfirmed",
+                )
+            self._store.complete_terminal_branch_cleanup(
+                cleanup.work_item_id,
+                outcome=TerminalBranchCleanupOutcome.DELETED,
+            )
+            return _plan_result(
+                ControlSweepStatus.BRANCH_CLEANED,
+                recovery,
+                reason=TerminalBranchCleanupOutcome.DELETED.value,
+            )
         if recovery.action is SshRecoveryAction.ARCHIVE_DISPOSED_WORK_ITEM:
             assert recovery.work_item is not None
             assert recovery.archive_eligible_at is not None
             rechecked = plan_ssh_recovery(
-                self._config, self._store, self._tracker
+                self._config,
+                self._store,
+                self._tracker,
+                audit_terminal=self._audit_terminal,
             )
             if (
                 rechecked.action is not recovery.action
@@ -322,7 +475,10 @@ class SshControlSweep:
                 is not None
             ):
                 rechecked = plan_ssh_recovery(
-                    self._config, self._store, self._tracker
+                    self._config,
+                    self._store,
+                    self._tracker,
+                    audit_terminal=self._audit_terminal,
                 )
                 if (
                     rechecked.action is not recovery.action

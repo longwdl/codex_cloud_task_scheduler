@@ -8,6 +8,7 @@ import sqlite3
 from collections.abc import Iterator, Mapping
 from contextlib import closing, contextmanager
 from dataclasses import replace
+from datetime import datetime
 from hashlib import sha256
 from importlib.resources import files
 from pathlib import Path
@@ -46,6 +47,11 @@ from codex_dispatcher.slack_reporting import (
     SlackOutboundMessage,
     SlackReport,
     SlackReportKind,
+)
+from codex_dispatcher.terminal_retention import (
+    TerminalBranchCleanup,
+    TerminalBranchCleanupOutcome,
+    TerminalBranchCleanupState,
 )
 from codex_dispatcher.work_items import (
     ACTIVE_TURN_STATES,
@@ -3595,6 +3601,219 @@ class StateStore:
             raise RuntimeError("completed health alert delivery disappeared")
         return completed
 
+    def get_sweep_cursor(self, name: str) -> str | None:
+        if name != "terminal_github_audit":
+            raise ValueError("unsupported sweep cursor")
+        row = self._connection.execute(
+            "SELECT completed_at FROM sweep_cursors WHERE name = ?", (name,)
+        ).fetchone()
+        return None if row is None else str(row[0])
+
+    def record_sweep_cursor(
+        self, name: str, *, completed_at: str | None = None
+    ) -> str:
+        if name != "terminal_github_audit":
+            raise ValueError("unsupported sweep cursor")
+        now = completed_at or utc_now_iso()
+        parsed = _aware_timestamp(now, "sweep cursor timestamp")
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT completed_at FROM sweep_cursors WHERE name = ?", (name,)
+            ).fetchone()
+            if existing is not None:
+                previous = datetime.fromisoformat(str(existing[0]))
+                if parsed < previous:
+                    raise ValueError("sweep cursor cannot move backwards")
+            connection.execute(
+                "INSERT INTO sweep_cursors(name, completed_at) VALUES (?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET completed_at = excluded.completed_at",
+                (name, now),
+            )
+        return now
+
+    def get_terminal_branch_cleanup(
+        self, work_item_id: str
+    ) -> TerminalBranchCleanup | None:
+        row = self._connection.execute(
+            "SELECT * FROM terminal_branch_cleanups WHERE work_item_id = ?",
+            (work_item_id,),
+        ).fetchone()
+        return self._row_to_terminal_branch_cleanup(row) if row is not None else None
+
+    def prepare_terminal_branch_cleanup(
+        self,
+        work_item_id: str,
+        *,
+        expected_head_sha: str,
+        eligible_at: str,
+        request_sha256: str,
+        updated_at: str | None = None,
+    ) -> TerminalBranchCleanup:
+        validate_git_sha(expected_head_sha, "expected_head_sha")
+        validate_sha256(request_sha256, "request_sha256")
+        now = updated_at or utc_now_iso()
+        for value in (eligible_at, now):
+            _aware_timestamp(value, "terminal branch cleanup timestamp")
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM work_items WHERE work_item_id = ?", (work_item_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"work item not found: {work_item_id}")
+            work_item = self._row_to_work_item(row)
+            disposition = connection.execute(
+                "SELECT expected_head_sha FROM work_item_dispositions "
+                "WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone()
+            terminal_head = (
+                str(disposition[0])
+                if disposition is not None
+                else work_item.last_published_sha
+                if work_item.state is WorkItemState.COMPLETED
+                else None
+            )
+            if terminal_head != expected_head_sha:
+                raise ValueError("branch cleanup requires the exact terminal checkpoint")
+            archived = connection.execute(
+                "SELECT 1 FROM work_item_archives "
+                "WHERE work_item_id = ? AND status = 'archived'",
+                (work_item_id,),
+            ).fetchone()
+            absent = connection.execute(
+                "SELECT 1 FROM work_item_absence_reconciliations WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone()
+            if archived is None and absent is None:
+                raise ValueError("branch cleanup requires terminal Runner evidence")
+            existing_row = connection.execute(
+                "SELECT * FROM terminal_branch_cleanups WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone()
+            if existing_row is not None:
+                existing = self._row_to_terminal_branch_cleanup(existing_row)
+                if (
+                    existing.repository != work_item.repository
+                    or existing.branch_name != work_item.task_branch
+                    or existing.expected_head_sha != expected_head_sha
+                    or existing.eligible_at != eligible_at
+                    or existing.request_sha256 != request_sha256
+                ):
+                    raise ValueError("terminal branch cleanup identity conflict")
+                return existing
+            connection.execute(
+                "INSERT INTO terminal_branch_cleanups "
+                "(work_item_id, repository, branch_name, expected_head_sha, eligible_at, "
+                "request_sha256, state, outcome, error_code, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'prepared', NULL, NULL, ?, ?)",
+                (
+                    work_item_id,
+                    work_item.repository,
+                    work_item.task_branch,
+                    expected_head_sha,
+                    eligible_at,
+                    request_sha256,
+                    now,
+                    now,
+                ),
+            )
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "terminal_branch_cleanup_prepared",
+                {
+                    "branch_name": work_item.task_branch,
+                    "eligible_at": eligible_at,
+                    "expected_head_sha": expected_head_sha,
+                    "request_sha256": request_sha256,
+                },
+                now,
+            )
+        prepared = self.get_terminal_branch_cleanup(work_item_id)
+        assert prepared is not None
+        return prepared
+
+    def complete_terminal_branch_cleanup(
+        self,
+        work_item_id: str,
+        *,
+        outcome: TerminalBranchCleanupOutcome,
+        updated_at: str | None = None,
+    ) -> TerminalBranchCleanup:
+        if not isinstance(outcome, TerminalBranchCleanupOutcome):
+            raise TypeError("outcome must be a TerminalBranchCleanupOutcome")
+        now = updated_at or utc_now_iso()
+        _aware_timestamp(now, "terminal branch cleanup timestamp")
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM terminal_branch_cleanups WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"terminal branch cleanup not found: {work_item_id}")
+            current = self._row_to_terminal_branch_cleanup(row)
+            if current.state is TerminalBranchCleanupState.COMPLETED:
+                if current.outcome is not outcome:
+                    raise ValueError("terminal branch cleanup outcome conflict")
+                return current
+            if current.state is not TerminalBranchCleanupState.PREPARED:
+                raise ValueError("blocked terminal branch cleanup cannot complete")
+            cursor = connection.execute(
+                "UPDATE terminal_branch_cleanups SET state = 'completed', outcome = ?, "
+                "updated_at = ? WHERE work_item_id = ? AND state = 'prepared'",
+                (outcome.value, now, work_item_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("concurrent terminal branch cleanup completion")
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "terminal_branch_cleanup_completed",
+                {"outcome": outcome.value},
+                now,
+            )
+        completed = self.get_terminal_branch_cleanup(work_item_id)
+        assert completed is not None
+        return completed
+
+    def block_terminal_branch_cleanup(
+        self,
+        work_item_id: str,
+        *,
+        error_code: str,
+        updated_at: str | None = None,
+    ) -> TerminalBranchCleanup:
+        if (
+            not isinstance(error_code, str)
+            or not error_code
+            or len(error_code) > 128
+            or re.fullmatch(r"[a-z0-9_]+", error_code) is None
+        ):
+            raise ValueError("terminal branch cleanup error code is invalid")
+        now = updated_at or utc_now_iso()
+        _aware_timestamp(now, "terminal branch cleanup timestamp")
+        with self._transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE terminal_branch_cleanups SET state = 'blocked', error_code = ?, "
+                "updated_at = ? WHERE work_item_id = ? AND state = 'prepared'",
+                (error_code, now, work_item_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("terminal branch cleanup is not prepared")
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "terminal_branch_cleanup_blocked",
+                {"error_code": error_code},
+                now,
+            )
+        blocked = self.get_terminal_branch_cleanup(work_item_id)
+        assert blocked is not None
+        return blocked
+
     def bind_draft_pr(
         self, work_item_id: str, pr_number: int, *, updated_at: str | None = None
     ) -> WorkItem:
@@ -4515,6 +4734,19 @@ class StateStore:
         return HealthAlertDelivery(**values)
 
     @staticmethod
+    def _row_to_terminal_branch_cleanup(
+        row: sqlite3.Row,
+    ) -> TerminalBranchCleanup:
+        values = dict(row)
+        values["state"] = TerminalBranchCleanupState(values["state"])
+        values["outcome"] = (
+            None
+            if values["outcome"] is None
+            else TerminalBranchCleanupOutcome(values["outcome"])
+        )
+        return TerminalBranchCleanup(**values)
+
+    @staticmethod
     def _parse_string_tuple(value: object, field: str) -> tuple[str, ...]:
         try:
             parsed = json.loads(value)
@@ -4532,3 +4764,13 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise ValueError("duplicate JSON field")
         result[key] = value
     return result
+
+
+def _aware_timestamp(value: object, field: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be an aware timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must be an aware timestamp")
+    return parsed

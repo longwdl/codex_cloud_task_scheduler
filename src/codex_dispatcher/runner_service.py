@@ -12,7 +12,11 @@ from codex_dispatcher.runner_protocol import (
     MAX_REQUEST_BYTES,
     RunnerOperation,
 )
-from codex_dispatcher.runner_transport import RunnerTransportRejected, RunnerWireOutput
+from codex_dispatcher.runner_transport import (
+    RunnerCapacityReply,
+    RunnerTransportRejected,
+    RunnerWireOutput,
+)
 from codex_dispatcher.runner_turns import RunnerTurnError, RunnerTurnExecutor
 from codex_dispatcher.runner_wire import (
     MAX_PROMPT_BYTES,
@@ -77,6 +81,18 @@ class LinuxRunnerService:
             elif request.operation is RunnerOperation.PROVE_ABSENCE:
                 with self._active_turn_lock():
                     reply = self._workspace.prove_absence(request)
+                output = RunnerWireOutput(reply.to_json().encode("utf-8"))
+            elif request.operation is RunnerOperation.CAPACITY:
+                snapshot = self._workspace.capacity_snapshot()
+                reply = RunnerCapacityReply(
+                    capacity_bytes=snapshot.capacity_bytes,
+                    available_bytes=snapshot.available_bytes,
+                    image_size_bytes=snapshot.image_size_bytes,
+                    host_reserve_bytes=snapshot.host_reserve_bytes,
+                    turn_admissible=snapshot.turn_admissible,
+                    provision_admissible=snapshot.provision_admissible,
+                    provision_shortfall_bytes=snapshot.provision_shortfall_bytes,
+                )
                 output = RunnerWireOutput(reply.to_json().encode("utf-8"))
             else:
                 raise RunnerTransportRejected("Runner operation is disabled")

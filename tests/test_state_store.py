@@ -23,6 +23,29 @@ def make_run(issue_number: int, *, run_id: str, attempt_no: int = 1) -> Run:
 
 
 class StateStoreTests(unittest.TestCase):
+    def test_sweep_cursor_is_strict_and_monotonic_by_explicit_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                self.assertIsNone(store.get_sweep_cursor("terminal_github_audit"))
+                first = store.record_sweep_cursor(
+                    "terminal_github_audit",
+                    completed_at="2026-08-23T00:00:00+00:00",
+                )
+                second = store.record_sweep_cursor(
+                    "terminal_github_audit",
+                    completed_at="2026-08-24T00:00:00+00:00",
+                )
+                self.assertEqual("2026-08-23T00:00:00+00:00", first)
+                self.assertEqual(second, store.get_sweep_cursor("terminal_github_audit"))
+                with self.assertRaisesRegex(ValueError, "backwards"):
+                    store.record_sweep_cursor(
+                        "terminal_github_audit",
+                        completed_at="2026-08-22T00:00:00+00:00",
+                    )
+                with self.assertRaises(ValueError):
+                    store.get_sweep_cursor("untrusted")
+
     def test_migrate_persist_and_reopen(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "state.db"

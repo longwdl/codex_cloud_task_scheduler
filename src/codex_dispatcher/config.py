@@ -21,6 +21,7 @@ class SchedulerConfig:
     workspace_root: Path
     poll_interval_seconds: int
     global_max_active: int
+    terminal_full_scan_interval_seconds: int = 86400
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +65,7 @@ class SshRuntimeConfig:
     assh_proxy_path: Path | None = None
     assh_home: Path | None = None
     completed_retention_seconds: int | None = None
+    terminal_branch_retention_seconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +132,13 @@ def _retention_seconds(value: Any, path: str) -> int:
     parsed = _positive_int(value, path)
     if parsed > 10 * 366 * 24 * 60 * 60:
         raise ValueError(f"{path} must not exceed ten years")
+    return parsed
+
+
+def _terminal_scan_interval(value: Any, path: str) -> int:
+    parsed = _positive_int(value, path)
+    if not 900 <= parsed <= 7 * 24 * 60 * 60:
+        raise ValueError(f"{path} must be between 900 and 604800 seconds")
     return parsed
 
 
@@ -201,13 +210,21 @@ def load_config(path: Path) -> Config:
     if missing_root:
         raise ValueError(f"root is missing required field(s): {', '.join(sorted(missing_root))}")
     scheduler = _expect_table(raw["scheduler"], "scheduler")
-    _check_keys(
-        scheduler,
-        frozenset(
-            {"database_path", "workspace_root", "poll_interval_seconds", "global_max_active"}
-        ),
-        "scheduler",
+    required_scheduler = frozenset(
+        {"database_path", "workspace_root", "poll_interval_seconds", "global_max_active"}
     )
+    unknown_scheduler = set(scheduler) - required_scheduler - {
+        "terminal_full_scan_interval_seconds"
+    }
+    missing_scheduler = required_scheduler - set(scheduler)
+    if unknown_scheduler:
+        raise ValueError(
+            "scheduler has unknown field(s): " + ", ".join(sorted(unknown_scheduler))
+        )
+    if missing_scheduler:
+        raise ValueError(
+            "scheduler is missing required field(s): " + ", ".join(sorted(missing_scheduler))
+        )
     tools = _expect_table(raw["tools"], "tools")
     required_tools = frozenset({"git_version", "gh_version", "codex_version"})
     unknown_tools = set(tools) - required_tools - {"ssh_version"}
@@ -302,6 +319,14 @@ def load_config(path: Path) -> Config:
             global_max_active=_positive_int(
                 scheduler["global_max_active"], "scheduler.global_max_active"
             ),
+            terminal_full_scan_interval_seconds=(
+                _terminal_scan_interval(
+                    scheduler["terminal_full_scan_interval_seconds"],
+                    "scheduler.terminal_full_scan_interval_seconds",
+                )
+                if "terminal_full_scan_interval_seconds" in scheduler
+                else 86400
+            ),
         ),
         tools=ToolPins(
             git_version=_string(tools["git_version"], "tools.git_version"),
@@ -343,7 +368,12 @@ def _parse_ssh_runtime(value: Any) -> SshRuntimeConfig:
         }
     )
     optional = frozenset(
-        {"assh_proxy_path", "assh_home", "completed_retention_seconds"}
+        {
+            "assh_proxy_path",
+            "assh_home",
+            "completed_retention_seconds",
+            "terminal_branch_retention_seconds",
+        }
     )
     unknown = set(table) - required - optional
     missing = required - set(table)
@@ -421,6 +451,14 @@ def _parse_ssh_runtime(value: Any) -> SshRuntimeConfig:
                 "ssh_runtime.completed_retention_seconds",
             )
             if "completed_retention_seconds" in table
+            else None
+        ),
+        terminal_branch_retention_seconds=(
+            _retention_seconds(
+                table["terminal_branch_retention_seconds"],
+                "ssh_runtime.terminal_branch_retention_seconds",
+            )
+            if "terminal_branch_retention_seconds" in table
             else None
         ),
     )

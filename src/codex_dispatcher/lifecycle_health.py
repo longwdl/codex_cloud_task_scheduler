@@ -8,7 +8,22 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from codex_dispatcher.config import Config
+from codex_dispatcher.runner_protocol import (
+    NEXT_PROTOCOL_VERSION,
+    RunnerOperation,
+    RunnerProtocolError,
+    RunnerRequest,
+)
+from codex_dispatcher.runner_transport import (
+    RUNNER_CAPACITY_SCOPE_ID,
+    RunnerCapacityReply,
+    RunnerTransport,
+    RunnerTransportError,
+    parse_runner_capacity_reply,
+)
+from codex_dispatcher.ssh_runner_transport import SshRunnerTransport
 from codex_dispatcher.state_store import StateStore
+from codex_dispatcher.terminal_retention import TerminalBranchCleanupState
 from codex_dispatcher.work_item_lifecycle import WorkItemArchiveStatus
 from codex_dispatcher.work_items import WorkItem, WorkItemState
 
@@ -68,6 +83,9 @@ class LifecycleHealthSnapshot:
     blocked_archives: int
     archived_work_items: int
     absence_reconciliations: int
+    pending_branch_cleanups: int
+    blocked_branch_cleanups: int
+    cleaned_branches: int
     alerts: tuple[LifecycleAlert, ...]
     alerts_truncated: bool
 
@@ -94,6 +112,9 @@ class LifecycleHealthSnapshot:
             "blocked_archives": self.blocked_archives,
             "archived_work_items": self.archived_work_items,
             "absence_reconciliations": self.absence_reconciliations,
+            "pending_branch_cleanups": self.pending_branch_cleanups,
+            "blocked_branch_cleanups": self.blocked_branch_cleanups,
+            "cleaned_branches": self.cleaned_branches,
             "alert_count": len(self.alerts),
             "alerts_truncated": self.alerts_truncated,
             "alerts": [alert.to_mapping() for alert in self.alerts],
@@ -151,6 +172,9 @@ def inspect_lifecycle_health(
     blocked_archives = 0
     archived_work_items = 0
     absence_reconciliations = 0
+    pending_branch_cleanups = 0
+    blocked_branch_cleanups = 0
+    cleaned_branches = 0
 
     if integrity != "ok":
         alerts.append(LifecycleAlert("database_integrity_failed"))
@@ -161,6 +185,7 @@ def inspect_lifecycle_health(
         archive = store.get_work_item_archive(work_item.work_item_id)
         absence = store.get_work_item_absence_reconciliation(work_item.work_item_id)
         disposition = dispositions.get(work_item.work_item_id)
+        branch_cleanup = store.get_terminal_branch_cleanup(work_item.work_item_id)
         terminal_runner_evidence = (
             absence is not None
             or (
@@ -171,6 +196,25 @@ def inspect_lifecycle_health(
 
         if absence is not None:
             absence_reconciliations += 1
+        if branch_cleanup is not None:
+            cleanup_age = _age_seconds(moment, branch_cleanup.updated_at)
+            if branch_cleanup.state is TerminalBranchCleanupState.PREPARED:
+                pending_branch_cleanups += 1
+                if cleanup_age > MAX_ARCHIVE_PENDING_AGE_SECONDS:
+                    alerts.append(
+                        _item_alert(
+                            "terminal_branch_cleanup_pending_too_long",
+                            work_item,
+                            cleanup_age,
+                        )
+                    )
+            elif branch_cleanup.state is TerminalBranchCleanupState.BLOCKED:
+                blocked_branch_cleanups += 1
+                alerts.append(
+                    _item_alert("terminal_branch_cleanup_blocked", work_item, cleanup_age)
+                )
+            else:
+                cleaned_branches += 1
         if archive is not None:
             if archive.status is WorkItemArchiveStatus.ARCHIVED:
                 archived_work_items += 1
@@ -259,9 +303,50 @@ def inspect_lifecycle_health(
         blocked_archives=blocked_archives,
         archived_work_items=archived_work_items,
         absence_reconciliations=absence_reconciliations,
+        pending_branch_cleanups=pending_branch_cleanups,
+        blocked_branch_cleanups=blocked_branch_cleanups,
+        cleaned_branches=cleaned_branches,
         alerts=tuple(alerts[:MAX_REPORTED_ALERTS]),
         alerts_truncated=truncated,
     )
+
+
+def inspect_runner_capacity(
+    config: Config,
+    *,
+    transport: RunnerTransport | None = None,
+) -> tuple[RunnerCapacityReply | None, tuple[LifecycleAlert, ...]]:
+    """Read one strict capacity snapshot through the fixed Runner SSH endpoint."""
+    runtime = config.ssh_runtime
+    if runtime is None:
+        raise ValueError("Runner capacity health requires ssh_runtime")
+    try:
+        remote = transport or SshRunnerTransport(
+            ssh_path=runtime.ssh_path,
+            host=runtime.host,
+            user=runtime.user,
+            port=runtime.port,
+            known_hosts_path=runtime.known_hosts_path,
+            identity_file=runtime.identity_file,
+            assh_proxy_path=runtime.assh_proxy_path,
+            assh_home=runtime.assh_home,
+            connect_timeout_seconds=runtime.connect_timeout_seconds,
+            operation_timeout_seconds=min(runtime.operation_timeout_seconds, 30),
+        )
+        request = RunnerRequest(
+            RunnerOperation.CAPACITY,
+            RUNNER_CAPACITY_SCOPE_ID,
+            version=NEXT_PROTOCOL_VERSION,
+        )
+        reply = parse_runner_capacity_reply(remote.invoke(request).payload)
+    except (OSError, ValueError, RunnerProtocolError, RunnerTransportError):
+        return None, (LifecycleAlert("runner_capacity_unavailable"),)
+    alerts: list[LifecycleAlert] = []
+    if not reply.turn_admissible:
+        alerts.append(LifecycleAlert("runner_turn_capacity_low"))
+    if not reply.provision_admissible:
+        alerts.append(LifecycleAlert("runner_provision_capacity_low"))
+    return reply, tuple(alerts)
 
 
 def inspect_systemd_health(

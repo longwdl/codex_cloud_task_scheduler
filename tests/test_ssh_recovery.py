@@ -270,6 +270,21 @@ class SshRecoveryTests(unittest.TestCase):
         plan = plan_ssh_recovery(self.config, self.store, self.tracker)
         self.assertEqual(SshRecoveryAction.IDLE, plan.action)
 
+        self.tracker.calls.clear()
+        incremental = plan_ssh_recovery(
+            self.config,
+            self.store,
+            self.tracker,
+            audit_terminal=False,
+        )
+        self.assertEqual(SshRecoveryAction.IDLE, incremental.action)
+        self.assertFalse(
+            any(
+                call.method in {"get_task", "find_pr_by_branch"}
+                for call in self.tracker.calls
+            )
+        )
+
     def test_completed_retention_plans_one_archive_and_reconciles_ambiguity(self) -> None:
         work_item = review_item()
         self.store.create_work_item(work_item)
@@ -339,6 +354,67 @@ class SshRecoveryTests(unittest.TestCase):
             SshRecoveryAction.RECONCILE_WORK_ITEM_ARCHIVE,
             reconcile.action,
         )
+
+    def test_terminal_branch_cleanup_requires_runner_evidence_and_exact_head(self) -> None:
+        work_item = review_item(22)
+        self.store.create_work_item(work_item)
+        completed = self.store.update_work_item_state(
+            work_item.work_item_id,
+            WorkItemState.COMPLETED,
+            updated_at="2026-08-20T00:00:00+00:00",
+        )
+        task = task_in(TaskState.COMPLETED, 22)
+        self.tracker.tasks["22"] = task
+        self.tracker.pull_requests[(completed.repository, completed.task_branch)] = (
+            pull_request_for(completed, PullRequestState.MERGED)
+        )
+        request = RunnerRequest(
+            RunnerOperation.ARCHIVE,
+            completed.work_item_id,
+            version=NEXT_PROTOCOL_VERSION,
+            expected_head_sha=completed.last_published_sha,
+        )
+        self.store.prepare_work_item_archive(
+            completed.work_item_id,
+            expected_head_sha=completed.last_published_sha or "",
+            eligible_at="2026-08-20T00:00:00+00:00",
+            request_sha256=sha256(request.to_json().encode("utf-8")).hexdigest(),
+        )
+        self.store.record_work_item_absence_reconciliation(
+            completed.work_item_id,
+            expected_head_sha=completed.last_published_sha or "",
+            evidence_sha256="e" * 64,
+            observed_by="operator",
+            observed_at="2026-08-20T00:00:01+00:00",
+        )
+        configured = replace(
+            self.config,
+            ssh_runtime=SimpleNamespace(
+                completed_retention_seconds=None,
+                terminal_branch_retention_seconds=3600,
+            ),
+        )
+        self.tracker.branches[(completed.repository, completed.task_branch)] = "d" * 40
+
+        planned = plan_ssh_recovery(
+            configured,
+            self.store,
+            self.tracker,
+            now=datetime(2026, 8, 21, tzinfo=timezone.utc),
+        )
+        self.assertIs(SshRecoveryAction.DELETE_TERMINAL_BRANCH, planned.action)
+        self.assertEqual(
+            "2026-08-20T01:00:01+00:00", planned.branch_cleanup_eligible_at
+        )
+
+        self.tracker.branches[(completed.repository, completed.task_branch)] = "f" * 40
+        blocked = plan_ssh_recovery(
+            configured,
+            self.store,
+            self.tracker,
+            now=datetime(2026, 8, 21, tzinfo=timezone.utc),
+        )
+        self.assertEqual("terminal_branch_head_conflict", blocked.reason)
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()

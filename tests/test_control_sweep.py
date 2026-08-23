@@ -21,7 +21,12 @@ from codex_dispatcher.dispatcher_lock import (
 from codex_dispatcher.git_publisher import GitPublicationInterrupted
 from codex_dispatcher.github_delivery import GitHubDeliveryCoordinator
 from codex_dispatcher.publisher import VerifiedBundle
-from codex_dispatcher.runner_protocol import RunnerOperation, parse_agent_result
+from codex_dispatcher.runner_protocol import (
+    NEXT_PROTOCOL_VERSION,
+    RunnerOperation,
+    RunnerRequest,
+    parse_agent_result,
+)
 from codex_dispatcher.slack_delivery import SlackDeliveryCoordinator
 from codex_dispatcher.slack_reporting import (
     SlackDeliveryReceipt,
@@ -238,6 +243,20 @@ class _InterruptingDeliveryTracker(FakeTracker):
         return updated
 
 
+class _LostBranchDeleteReceiptTracker(FakeTracker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupt_delete_once = True
+
+    def delete_branch(
+        self, repository: str, branch_name: str, expected_head_sha: str
+    ) -> None:
+        super().delete_branch(repository, branch_name, expected_head_sha)
+        if self.interrupt_delete_once:
+            self.interrupt_delete_once = False
+            raise RuntimeError("fixture lost branch deletion receipt")
+
+
 class _RecordingPublisher:
     def __init__(self, *, interrupt_once: bool = False) -> None:
         self.calls: list[tuple[bytes, object, object]] = []
@@ -356,6 +375,33 @@ class SshControlSweepTests(unittest.TestCase):
                 commit_count=1,
                 size_bytes=len(artifact),
             )
+        )
+
+    def test_idle_full_terminal_audit_records_a_bounded_cursor(self) -> None:
+        tracker = FakeTracker()
+        sweep = self._sweep(tracker, _RecordingSource())
+
+        first = sweep.run_once()
+        cursor = self.store.get_sweep_cursor("terminal_github_audit")
+        second = sweep.run_once()
+
+        self.assertEqual(ControlSweepStatus.IDLE, first.status)
+        self.assertEqual(ControlSweepStatus.IDLE, second.status)
+        self.assertIsNotNone(cursor)
+        self.assertEqual(cursor, self.store.get_sweep_cursor("terminal_github_audit"))
+
+    def test_completed_terminal_audit_records_cursor_before_ready_dispatch(self) -> None:
+        tracker = FakeTracker()
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        tracker.set_result("claim", SimpleNamespace(claimed=False, task=task, reason="race"))
+
+        result = self._sweep(tracker, _RecordingSource()).run_once()
+
+        self.assertEqual(ControlSweepStatus.CLAIM_NOT_ACQUIRED, result.status)
+        self.assertIsNotNone(
+            self.store.get_sweep_cursor("terminal_github_audit")
         )
 
     def test_new_issue_bundles_before_claim_and_runs_one_turn(self) -> None:
@@ -721,6 +767,79 @@ class SshControlSweepTests(unittest.TestCase):
             [RunnerOperation.ARCHIVE, RunnerOperation.ARCHIVE_STATUS],
             [call.operation for call in self.transport.calls],
         )
+
+    def test_terminal_branch_delete_receipt_loss_reconciles_without_issue_closure(self) -> None:
+        tracker = _LostBranchDeleteReceiptTracker()
+        task = replace(
+            claimed_task(),
+            state=TaskState.COMPLETED,
+            labels=("agent:completed", "exec:ssh-cli", "priority:p1"),
+        )
+        tracker.tasks[task.task_id] = task
+        item = self.dispatch.resolve_and_prepare(
+            claimed_task(), base_sha=BASE_SHA, source_bundle=_bundle()
+        )
+        head_sha = "d" * 40
+        self.store.record_published_sha(
+            item.work_item_id, previous_sha=BASE_SHA, head_sha=head_sha
+        )
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.RUNNING)
+        item = self.store.update_work_item_state(item.work_item_id, WorkItemState.REVIEW)
+        item = self.store.bind_draft_pr(item.work_item_id, 7)
+        item = self.store.update_work_item_state(
+            item.work_item_id,
+            WorkItemState.COMPLETED,
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        tracker.pull_requests[(item.repository, item.task_branch)] = PullRequest(
+            number=7,
+            url="https://github.com/owner/repo/pull/7",
+            branch_name=item.task_branch,
+            title="Codex work",
+            is_draft=False,
+            base_branch=item.base_branch,
+            state=PullRequestState.MERGED,
+            head_sha=head_sha,
+        )
+        tracker.branches[(item.repository, item.task_branch)] = head_sha
+        archive_request = RunnerRequest(
+            RunnerOperation.ARCHIVE,
+            item.work_item_id,
+            version=NEXT_PROTOCOL_VERSION,
+            expected_head_sha=head_sha,
+        )
+        self.store.prepare_work_item_archive(
+            item.work_item_id,
+            expected_head_sha=head_sha,
+            eligible_at="2026-01-01T00:00:00+00:00",
+            request_sha256=sha256(
+                archive_request.to_json().encode("utf-8")
+            ).hexdigest(),
+        )
+        self.store.record_work_item_absence_reconciliation(
+            item.work_item_id,
+            expected_head_sha=head_sha,
+            evidence_sha256="e" * 64,
+            observed_by="operator",
+            observed_at="2026-01-01T00:00:01+00:00",
+        )
+        config = replace(
+            make_config(global_max_active=4),
+            ssh_runtime=SimpleNamespace(
+                completed_retention_seconds=None,
+                terminal_branch_retention_seconds=1,
+            ),
+        )
+        sweep = self._sweep(tracker, _RecordingSource(), config=config)
+
+        with self.assertRaisesRegex(RuntimeError, "lost branch"):
+            sweep.run_once()
+        reconciled = sweep.run_once()
+
+        self.assertEqual(ControlSweepStatus.BRANCH_CLEANED, reconciled.status)
+        self.assertEqual("reconciled_absent", reconciled.reason)
+        self.assertTrue(tracker.tasks[task.task_id].is_open)
+        self.assertIs(TaskState.COMPLETED, tracker.tasks[task.task_id].state)
 
     def test_disposed_archive_rechecks_pr_immediately_before_runner_call(self) -> None:
         class MergeRaceTracker(FakeTracker):

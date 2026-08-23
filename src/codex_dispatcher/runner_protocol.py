@@ -42,6 +42,7 @@ class RunnerOperation(StrEnum):
     ARCHIVE = "archive"
     ARCHIVE_STATUS = "archive_status"
     PROVE_ABSENCE = "prove_absence"
+    CAPACITY = "capacity"
 
 
 _V1_REQUEST_FIELDS = {
@@ -118,6 +119,7 @@ _V2_REQUEST_FIELDS = {
             "archive_request_sha256",
         }
     ),
+    RunnerOperation.CAPACITY: frozenset({"version", "op", "work_item_id"}),
 }
 
 

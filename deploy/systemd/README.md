@@ -139,6 +139,23 @@ the credential file is loaded.
 
 ## Activation, observation, and rollback
 
+For the reviewed `s2` / `codex-runner` layout, `scripts/codex-dispatcher-release-v1` packages the
+previous manual activation boundary into one fail-closed transaction. The operator must first
+create one exact `git archive` at
+`/var/tmp/codex-dispatcher-release-<40-hex-commit>.tar` and independently record its SHA-256. The
+tool accepts only that path shape and exact digest, rejects links and unsafe tar members, creates a
+fresh Online Backup, stops all four Control timers, requires both host locks to be available, and
+runs the complete tests and compilation from short service-owned copies under `umask 077`.
+
+The identical archive bytes are verified on both hosts. Activation switches the Runner symlink
+first and the Control symlink second, both atomically. Any staging, unit-verification, or Runner
+capacity failure before handoff restores both previous symlinks and removes incoming/validation
+files. The tool deliberately does not start the write-enabled Dispatcher or restart timers: after
+its `requires_manual_sweep=true` receipt, inspect the recorded backup, start exactly one Dispatcher
+sweep, require an expected result, then run backup, restore, and health checks before starting the
+timers. Once that sweep begins, external state or schema may have changed and automatic binary-only
+rollback would be unsafe; use the matching backup and the documented recovery-first rollback.
+
 The state-changing activation sequence is intentionally not automated. Once separately approved,
 the operator installs the reviewed units, runs `systemctl daemon-reload`, manually starts exactly
 one service sweep, verifies its bounded journal result and SQLite/GitHub/Runner state, and only then
@@ -154,6 +171,27 @@ Observe with `systemctl status`, `systemctl list-timers`, and bounded queries su
 `journalctl -u codex-dispatcher-health.service -n 20`. A non-zero sweep or health check remains
 visible as a failed service activation; the dispatcher timer will try another recovery-first sweep
 after the inactive interval, while the health timer only observes and reports.
+
+Each SSH sweep emits bounded `github_api` evidence: total/read/write command counts, elapsed
+milliseconds, and a best-effort Core/GraphQL rate-limit snapshot. Terminal WorkItems carrying
+immutable Runner archive/absence evidence are omitted from ordinary sweeps and re-audited once per
+`scheduler.terminal_full_scan_interval_seconds`; an interrupted audit never advances its cursor.
+
+Terminal Issues remain open indefinitely. After `ssh_runtime.terminal_branch_retention_seconds`,
+only their task branches may be reclaimed. The sweep revalidates the open terminal Issue, exact
+merged/closed PR identity, immutable Runner evidence, and exact branch HEAD; it persists a prepared
+deletion receipt before the GitHub write and confirms branch absence afterward. A lost write receipt
+is reconciled as absent on the next sweep. A changed HEAD or identity blocks cleanup and is surfaced
+by lifecycle health. Restoring a deleted branch means pushing only the persisted exact terminal SHA.
+
+The health service also sends a strict protocol-v2 `capacity` read to the forced Runner endpoint.
+It reports `runner_capacity_unavailable`, `runner_turn_capacity_low`, or
+`runner_provision_capacity_low` through the same deduplicated Slack episode. Capacity canaries must
+not consume disk: stop the Dispatcher timer and service, back up the protected Runner config, raise
+only `host_free_reserve_bytes` above current availability, run one health check, restore the exact
+config, then run health twice to prove one threaded recovery and no duplicate. Backup/service
+canaries similarly use one controlled invalid input or stopped timer, never delete real backups,
+WorkItems, branches, or images; record the alert and recovery permalinks before re-enabling timers.
 
 Emergency stop disables `codex-dispatcher.timer`, `codex-dispatcher-backup.timer`, and
 `codex-dispatcher-health.timer`, and `codex-dispatcher-restore-drill.timer`, followed, if necessary,

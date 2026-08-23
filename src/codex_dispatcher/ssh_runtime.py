@@ -7,7 +7,7 @@ import stat
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -350,7 +350,10 @@ def run_ssh_control_sweep(
         ssh_path=ssh_path,
         slack_token=slack_token,
     )
-    return sweep.run_once()
+    result = sweep.run_once()
+    collect_metrics = getattr(sweep, "collect_github_api_metrics", None)
+    metrics = collect_metrics() if callable(collect_metrics) else None
+    return replace(result, github_api=metrics)
 
 
 def run_ssh_absence_reconciliation(

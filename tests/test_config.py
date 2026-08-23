@@ -88,9 +88,26 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(Path("state.db"), config.scheduler.database_path)
         self.assertEqual(Path("repos"), config.scheduler.workspace_root)
         self.assertEqual(2, config.scheduler.global_max_active)
+        self.assertEqual(86400, config.scheduler.terminal_full_scan_interval_seconds)
         self.assertEqual("owner/repo", config.repositories[0].slug)
         self.assertEqual((), config.repositories[0].denied_paths)
         self.assertIsNone(config.session_runtime)
+
+        configured = self._load(
+            VALID.replace(
+                "global_max_active = 2",
+                "global_max_active = 2\nterminal_full_scan_interval_seconds = 900",
+            )
+        )
+        self.assertEqual(900, configured.scheduler.terminal_full_scan_interval_seconds)
+
+        with self.assertRaisesRegex(ValueError, "between 900 and 604800"):
+            self._load(
+                VALID.replace(
+                    "global_max_active = 2",
+                    "global_max_active = 2\nterminal_full_scan_interval_seconds = 60",
+                )
+            )
 
     def test_rejects_unknown_secret_like_field(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown field"):

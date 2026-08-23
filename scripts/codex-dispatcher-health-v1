@@ -20,5 +20,6 @@ exec /opt/codex-python/current/bin/python3 -P -s -m codex_dispatcher \
     lifecycle-health \
     --config /etc/codex-dispatcher/config.toml \
     --systemd \
+    --runner-capacity \
     --notify-slack \
     --json

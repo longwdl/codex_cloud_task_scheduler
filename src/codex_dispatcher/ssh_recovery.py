@@ -10,6 +10,10 @@ from hashlib import sha256
 from codex_dispatcher.config import Config
 from codex_dispatcher.scheduler import SSH_CLI_EXECUTOR_LABEL
 from codex_dispatcher.state_store import StateStore
+from codex_dispatcher.terminal_retention import (
+    TerminalBranchCleanupState,
+    terminal_branch_request_sha256,
+)
 from codex_dispatcher.runner_protocol import (
     NEXT_PROTOCOL_VERSION,
     RunnerOperation,
@@ -45,6 +49,7 @@ class SshRecoveryAction(StrEnum):
     ARCHIVE_DISPOSED_WORK_ITEM = "archive_disposed_work_item"
     ARCHIVE_COMPLETED_WORK_ITEM = "archive_completed_work_item"
     RECONCILE_WORK_ITEM_ARCHIVE = "reconcile_work_item_archive"
+    DELETE_TERMINAL_BRANCH = "delete_terminal_branch"
     BLOCK = "block"
 
 
@@ -63,6 +68,7 @@ class SshRecoveryPlan:
     disposition_requested_by: str | None = None
     disposition_request_event_id: str | None = None
     disposition_requested_at: str | None = None
+    branch_cleanup_eligible_at: str | None = None
 
 
 def plan_ssh_recovery(
@@ -71,8 +77,11 @@ def plan_ssh_recovery(
     tracker: Tracker,
     *,
     now: datetime | None = None,
+    audit_terminal: bool = True,
 ) -> SshRecoveryPlan:
     """Return the only safe next recovery action using provider reads only."""
+    if type(audit_terminal) is not bool:
+        raise TypeError("audit_terminal must be a bool")
     configured = {repository.slug: repository for repository in config.repositories}
     active_turn = store.get_active_turn()
     if active_turn is not None:
@@ -111,7 +120,7 @@ def plan_ssh_recovery(
         )
 
     disposition = _plan_work_item_disposition(
-        config, store, tracker, configured
+        config, store, tracker, configured, audit_terminal=audit_terminal
     )
     if disposition is not None:
         return disposition
@@ -156,10 +165,25 @@ def plan_ssh_recovery(
     if observed_at.tzinfo is None or observed_at.utcoffset() is None:
         raise ValueError("now must include a timezone")
     completion = _plan_merged_completion(
-        config, store, tracker, configured, observed_at=observed_at
+        config,
+        store,
+        tracker,
+        configured,
+        observed_at=observed_at,
+        audit_terminal=audit_terminal,
     )
     if completion is not None:
         return completion
+
+    branch_cleanup = _plan_terminal_branch_cleanup(
+        config,
+        store,
+        tracker,
+        configured,
+        observed_at=observed_at,
+    )
+    if branch_cleanup is not None:
+        return branch_cleanup
 
     remote_claims: list[TrackerTask] = []
     for repository in config.repositories:
@@ -212,11 +236,15 @@ def _plan_work_item_disposition(
     store: StateStore,
     tracker: Tracker,
     configured: dict[str, object],
+    *,
+    audit_terminal: bool,
 ) -> SshRecoveryPlan | None:
     for disposition in store.list_work_item_dispositions():
         work_item = store.get_work_item(disposition.work_item_id)
         if work_item is None:
             return _blocked("disposed_work_item_missing")
+        if not audit_terminal and _has_terminal_runner_evidence(store, work_item):
+            continue
         task = tracker.get_task(work_item.repository, str(work_item.issue_number))
         error = _binding_error(task, work_item, configured)
         if error is not None:
@@ -493,11 +521,18 @@ def _plan_merged_completion(
     configured: dict[str, object],
     *,
     observed_at: datetime,
+    audit_terminal: bool,
 ) -> SshRecoveryPlan | None:
     for work_item in store.list_work_items():
         if store.get_work_item_disposition(work_item.work_item_id) is not None:
             continue
         if work_item.state not in {WorkItemState.REVIEW, WorkItemState.COMPLETED}:
+            continue
+        if (
+            not audit_terminal
+            and work_item.state is WorkItemState.COMPLETED
+            and _has_terminal_runner_evidence(store, work_item)
+        ):
             continue
         task = tracker.get_task(work_item.repository, str(work_item.issue_number))
         error = _binding_error(task, work_item, configured)
@@ -596,6 +631,179 @@ def _plan_merged_completion(
             pull_request=pull_request,
         )
     return None
+
+
+def _has_terminal_runner_evidence(store: StateStore, work_item: WorkItem) -> bool:
+    if store.get_work_item_absence_reconciliation(work_item.work_item_id) is not None:
+        return True
+    archive = store.get_work_item_archive(work_item.work_item_id)
+    return archive is not None and archive.status is WorkItemArchiveStatus.ARCHIVED
+
+
+def _plan_terminal_branch_cleanup(
+    config: Config,
+    store: StateStore,
+    tracker: Tracker,
+    configured: dict[str, object],
+    *,
+    observed_at: datetime,
+) -> SshRecoveryPlan | None:
+    runtime = config.ssh_runtime
+    retention_seconds = (
+        None
+        if runtime is None
+        else getattr(runtime, "terminal_branch_retention_seconds", None)
+    )
+    if retention_seconds is None:
+        return None
+    for work_item in store.list_work_items():
+        record = store.get_terminal_branch_cleanup(work_item.work_item_id)
+        if record is not None:
+            if record.state is TerminalBranchCleanupState.COMPLETED:
+                continue
+            if record.state is TerminalBranchCleanupState.BLOCKED:
+                return _blocked(
+                    "terminal_branch_cleanup_blocked", work_item=work_item
+                )
+        disposition = store.get_work_item_disposition(work_item.work_item_id)
+        expected_head_sha = (
+            disposition.expected_head_sha
+            if disposition is not None
+            else work_item.last_published_sha
+            if work_item.state is WorkItemState.COMPLETED
+            else None
+        )
+        if expected_head_sha is None:
+            continue
+        terminal_at = _terminal_runner_evidence_at(store, work_item)
+        if terminal_at is None:
+            continue
+        eligible = terminal_at + timedelta(
+            seconds=retention_seconds
+        )
+        eligible_at = eligible.isoformat()
+        if observed_at < eligible:
+            continue
+        task = tracker.get_task(work_item.repository, str(work_item.issue_number))
+        error = _binding_error(task, work_item, configured)
+        if error is not None:
+            return _blocked(error, task=task, work_item=work_item)
+        assert task is not None
+        if not task.is_open:
+            return _blocked(
+                "terminal_issue_must_remain_open", task=task, work_item=work_item
+            )
+        pull_request = tracker.find_pr_by_branch(
+            work_item.repository, work_item.task_branch
+        )
+        if disposition is not None:
+            if task.state is not TaskState.DISCARD:
+                return _blocked(
+                    "terminal_disposition_issue_state_conflict",
+                    task=task,
+                    work_item=work_item,
+                    pull_request=pull_request,
+                )
+            pr_error = _disposed_pull_request_error(
+                disposition, work_item, pull_request
+            )
+            if pr_error is not None:
+                return _blocked(
+                    pr_error,
+                    task=task,
+                    work_item=work_item,
+                    pull_request=pull_request,
+                )
+            if (
+                disposition.kind is WorkItemDispositionKind.SUPERSEDED
+                and pull_request is not None
+                and pull_request.state is not PullRequestState.CLOSED
+            ):
+                return _blocked(
+                    "terminal_disposition_pull_request_not_closed",
+                    task=task,
+                    work_item=work_item,
+                    pull_request=pull_request,
+                )
+        else:
+            if task.state is not TaskState.COMPLETED:
+                return _blocked(
+                    "terminal_completed_issue_state_conflict",
+                    task=task,
+                    work_item=work_item,
+                    pull_request=pull_request,
+                )
+            pr_error = _completion_pull_request_error(pull_request, work_item)
+            if pr_error is not None:
+                return _blocked(
+                    pr_error,
+                    task=task,
+                    work_item=work_item,
+                    pull_request=pull_request,
+                )
+            if pull_request is None or pull_request.state is not PullRequestState.MERGED:
+                return _blocked(
+                    "terminal_completed_pull_request_not_merged",
+                    task=task,
+                    work_item=work_item,
+                    pull_request=pull_request,
+                )
+        request_sha256 = terminal_branch_request_sha256(
+            work_item_id=work_item.work_item_id,
+            repository=work_item.repository,
+            branch_name=work_item.task_branch,
+            expected_head_sha=expected_head_sha,
+        )
+        if record is not None and (
+            record.repository != work_item.repository
+            or record.branch_name != work_item.task_branch
+            or record.expected_head_sha != expected_head_sha
+            or record.eligible_at != eligible_at
+            or record.request_sha256 != request_sha256
+        ):
+            return _blocked(
+                "terminal_branch_cleanup_identity_conflict",
+                task=task,
+                work_item=work_item,
+                pull_request=pull_request,
+            )
+        branch_head = tracker.get_branch_head(
+            work_item.repository, work_item.task_branch
+        )
+        if branch_head is not None and branch_head != expected_head_sha:
+            return _blocked(
+                "terminal_branch_head_conflict",
+                task=task,
+                work_item=work_item,
+                pull_request=pull_request,
+            )
+        return SshRecoveryPlan(
+            SshRecoveryAction.DELETE_TERMINAL_BRANCH,
+            task=task,
+            work_item=work_item,
+            pull_request=pull_request,
+            branch_cleanup_eligible_at=eligible_at,
+        )
+    return None
+
+
+def _terminal_runner_evidence_at(
+    store: StateStore, work_item: WorkItem
+) -> datetime | None:
+    absence = store.get_work_item_absence_reconciliation(work_item.work_item_id)
+    value: str | None = absence.observed_at if absence is not None else None
+    if value is None:
+        archive = store.get_work_item_archive(work_item.work_item_id)
+        if archive is None or archive.status is not WorkItemArchiveStatus.ARCHIVED:
+            return None
+        value = archive.runner_archived_at
+    try:
+        parsed = datetime.fromisoformat(value) if value is not None else None
+    except ValueError:
+        return None
+    if parsed is None or parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 def _plan_completed_archive(

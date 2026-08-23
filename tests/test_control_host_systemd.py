@@ -204,6 +204,7 @@ class ControlHostSystemdTests(unittest.TestCase):
         self.assertIn('if [ "$#" -ne 0 ]; then', wrapper)
         self.assertIn("lifecycle-health", wrapper)
         self.assertIn("--systemd", wrapper)
+        self.assertIn("--runner-capacity", wrapper)
         self.assertIn("--notify-slack", wrapper)
         self.assertNotIn("--apply", wrapper)
         self.assertNotIn('"$@"', wrapper)

@@ -68,6 +68,97 @@ def pull_request(
 
 
 class GitHubCliTrackerTests(unittest.TestCase):
+    def test_terminal_branch_reads_and_deletes_only_an_exact_encoded_ref(self) -> None:
+        branch = "codex/issue-12-abcdef123456"
+        head = "a" * 40
+        refs = [{"ref": f"refs/heads/{branch}", "object": {"type": "commit", "sha": head}}]
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            return_value=result(refs),
+        ) as runner:
+            observed = GitHubCliTracker(gh_path=GH).get_branch_head(
+                REPOSITORY, branch
+            )
+        self.assertEqual(head, observed)
+        self.assertTrue(
+            any(
+                "heads/codex%2Fissue-12-abcdef123456" in argument
+                for argument in runner.call_args.args[0]
+            )
+        )
+
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            side_effect=[result(refs), CommandResult(0, "", "")],
+        ) as runner:
+            GitHubCliTracker(gh_path=GH).delete_branch(REPOSITORY, branch, head)
+        delete_argv = runner.call_args_list[1].args[0]
+        self.assertEqual("DELETE", delete_argv[delete_argv.index("--method") + 1])
+        self.assertTrue(
+            any(
+                "refs/heads/codex%2Fissue-12-abcdef123456" in argument
+                for argument in delete_argv
+            )
+        )
+
+    def test_terminal_branch_delete_rejects_a_changed_head_before_write(self) -> None:
+        branch = "codex/issue-12-abcdef123456"
+        refs = [
+            {
+                "ref": f"refs/heads/{branch}",
+                "object": {"type": "commit", "sha": "b" * 40},
+            }
+        ]
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            return_value=result(refs),
+        ) as runner:
+            with self.assertRaisesRegex(GitHubCliTrackerError, "changed"):
+                GitHubCliTracker(gh_path=GH).delete_branch(
+                    REPOSITORY, branch, "a" * 40
+                )
+        runner.assert_called_once()
+
+    def test_api_metrics_count_commands_and_report_core_and_graphql_budget(self) -> None:
+        tracker = GitHubCliTracker(gh_path=GH)
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            side_effect=[
+                result([]),
+                result(
+                    {
+                        "resources": {
+                            "core": {"remaining": 4990, "limit": 5000, "reset": 1800},
+                            "graphql": {
+                                "remaining": 4980,
+                                "limit": 5000,
+                                "reset": 1801,
+                            },
+                        }
+                    }
+                ),
+            ],
+        ):
+            self.assertEqual((), tracker.list_ready_tasks(REPOSITORY))
+            metrics = tracker.collect_api_metrics()
+
+        self.assertEqual(2, metrics.command_count)
+        self.assertEqual(2, metrics.read_count)
+        self.assertEqual(0, metrics.write_count)
+        self.assertEqual(4990, metrics.core_remaining)
+        self.assertEqual(4980, metrics.graphql_remaining)
+        self.assertIsNone(metrics.rate_limit_error)
+
+    def test_api_metrics_do_not_fail_a_sweep_when_budget_read_is_unavailable(self) -> None:
+        tracker = GitHubCliTracker(gh_path=GH)
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            return_value=CommandResult(1, "", "provider failure"),
+        ):
+            metrics = tracker.collect_api_metrics()
+        self.assertEqual("github_rate_limit_unavailable", metrics.rate_limit_error)
+        self.assertEqual(1, metrics.command_count)
+
     def test_discard_state_requires_stable_label_event_identity(self) -> None:
         discarded = issue(
             labels=[label("agent:discard"), label("exec:ssh-cli")]

@@ -98,9 +98,9 @@ class Tracker(Protocol):
     """Port for tracker reads and explicitly side-effecting writes.
 
     ``list_ready_tasks``, ``list_open_tasks``, ``get_task``,
-    ``list_comments``, and ``find_pr_by_branch`` are reads. Every other method
-    is a write and must be safe for dispatcher retries where its provider
-    supports idempotency.
+    ``list_comments``, ``find_pr_by_branch``, and ``get_branch_head`` are reads.
+    Every other method is a write and must be safe for dispatcher retries where
+    its provider supports idempotency.
     """
 
     def list_ready_tasks(self, repository: str) -> tuple[TrackerTask, ...]: ...
@@ -129,5 +129,14 @@ class Tracker(Protocol):
     def upsert_run_comment(self, repository: str, task_id: str, marker: str, body: str) -> None: ...
 
     def find_pr_by_branch(self, repository: str, branch_name: str) -> PullRequest | None: ...
+
+    def get_branch_head(self, repository: str, branch_name: str) -> str | None: ...
+
+    def delete_branch(
+        self,
+        repository: str,
+        branch_name: str,
+        expected_head_sha: str,
+    ) -> None: ...
 
     def create_draft_pr(self, request: DraftPullRequestRequest) -> PullRequest: ...

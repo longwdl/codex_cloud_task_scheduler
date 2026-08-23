@@ -67,6 +67,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Also inspect the fixed Control Host service and timer allowlist.",
     )
     lifecycle_health.add_argument(
+        "--runner-capacity",
+        action="store_true",
+        help="Also read one strict capacity snapshot through the fixed Runner endpoint.",
+    )
+    lifecycle_health.add_argument(
         "--notify-slack",
         action="store_true",
         help="Persist and deliver idempotent Slack alert/recovery notifications.",
@@ -382,7 +387,11 @@ def _runner_capacity(
 
 
 def _lifecycle_health(
-    config_path: Path, *, check_systemd: bool, notify_slack: bool = False
+    config_path: Path,
+    *,
+    check_systemd: bool,
+    check_runner_capacity: bool = False,
+    notify_slack: bool = False,
 ) -> tuple[int, dict[str, object]]:
     slack_token: str | None = None
     try:
@@ -392,6 +401,7 @@ def _lifecycle_health(
         from codex_dispatcher.lifecycle_health import (
             MAX_REPORTED_ALERTS,
             inspect_lifecycle_health,
+            inspect_runner_capacity,
             inspect_systemd_health,
         )
         from codex_dispatcher.slack_web_api import SlackWebApiPublisher
@@ -416,7 +426,15 @@ def _lifecycle_health(
             systemd_alerts = ()
             if check_systemd:
                 unit_states, systemd_alerts = inspect_systemd_health()
-            combined_alerts = tuple(snapshot.alerts) + tuple(systemd_alerts)
+            runner_capacity = None
+            runner_alerts = ()
+            if check_runner_capacity:
+                runner_capacity, runner_alerts = inspect_runner_capacity(config)
+            combined_alerts = (
+                tuple(snapshot.alerts)
+                + tuple(systemd_alerts)
+                + tuple(runner_alerts)
+            )
             alerts_truncated = snapshot.alerts_truncated or (
                 len(combined_alerts) > MAX_REPORTED_ALERTS
             )
@@ -445,10 +463,13 @@ def _lifecycle_health(
         payload["alerts"] = [alert.to_mapping() for alert in combined_alerts]
         payload["alert_count"] = len(combined_alerts)
         payload["alerts_truncated"] = alerts_truncated
-        payload["ok"] = snapshot.ok and not systemd_alerts
+        payload["ok"] = snapshot.ok and not systemd_alerts and not runner_alerts
         payload["systemd_checked"] = check_systemd
         if check_systemd:
             payload["systemd_units"] = [state.to_mapping() for state in unit_states]
+        payload["runner_capacity_checked"] = check_runner_capacity
+        if runner_capacity is not None:
+            payload["runner_capacity"] = runner_capacity.to_mapping()
         payload["slack_notification_enabled"] = notify_slack
         if notification is not None:
             payload["slack_notification"] = notification.to_mapping()
@@ -587,6 +608,9 @@ def _ssh_run_once(config_path: Path) -> tuple[int, dict[str, object]]:
         "work_item_id": result.work_item_id,
         "turn_id": result.turn_id,
         "reason": result.reason,
+        "github_api": (
+            None if result.github_api is None else result.github_api.to_mapping()
+        ),
     }
 
 
@@ -848,6 +872,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         code, payload = _lifecycle_health(
             args.config,
             check_systemd=args.systemd,
+            check_runner_capacity=args.runner_capacity,
             notify_slack=args.notify_slack,
         )
         _emit(payload, args.json)

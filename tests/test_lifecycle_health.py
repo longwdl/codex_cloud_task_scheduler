@@ -17,7 +17,13 @@ from codex_dispatcher.lifecycle_health import (
     SYSTEMD_TIMER_UNITS,
     SystemdUnitState,
     inspect_lifecycle_health,
+    inspect_runner_capacity,
     inspect_systemd_health,
+)
+from codex_dispatcher.runner_transport import (
+    RunnerCapacityReply,
+    RunnerTransportInterrupted,
+    RunnerWireOutput,
 )
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.work_items import WorkItem, WorkItemState
@@ -85,6 +91,36 @@ def _complete(store: StateStore, item: WorkItem, at: str) -> None:
 
 
 class LifecycleHealthTests(unittest.TestCase):
+    def test_runner_capacity_health_reports_thresholds_and_unavailability(self) -> None:
+        class CapacityTransport:
+            def invoke(self, request, *, stdin=b"", source_artifact=None):
+                return RunnerWireOutput(
+                    RunnerCapacityReply(
+                        capacity_bytes=1_000,
+                        available_bytes=200,
+                        image_size_bytes=200,
+                        host_reserve_bytes=200,
+                        turn_admissible=True,
+                        provision_admissible=False,
+                        provision_shortfall_bytes=200,
+                    ).to_json().encode("utf-8")
+                )
+
+        reply, alerts = inspect_runner_capacity(
+            _config(Path("/tmp/state.db")), transport=CapacityTransport()
+        )
+        self.assertIsNotNone(reply)
+        self.assertEqual({"runner_provision_capacity_low"}, {item.code for item in alerts})
+
+        class UnavailableTransport:
+            def invoke(self, request, *, stdin=b"", source_artifact=None):
+                raise RunnerTransportInterrupted("fixture unavailable")
+
+        reply, alerts = inspect_runner_capacity(
+            _config(Path("/tmp/state.db")), transport=UnavailableTransport()
+        )
+        self.assertIsNone(reply)
+        self.assertEqual("runner_capacity_unavailable", alerts[0].code)
     def test_reports_long_blocked_overdue_completed_and_ambiguous_archive(self) -> None:
         now = datetime(2026, 8, 23, tzinfo=timezone.utc)
         old = "2026-08-01T00:00:00+00:00"

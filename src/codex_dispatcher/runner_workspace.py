@@ -15,6 +15,7 @@ from typing import Any
 
 from codex_dispatcher.command_runner import CommandResult, run_command
 from codex_dispatcher.runner_disk import (
+    DiskCapacitySnapshot,
     FusedWorkItemDisk,
     RunnerDiskError,
     WorkItemDiskArchiveState,
@@ -272,6 +273,15 @@ class RunnerWorkspace:
             self._work_item_disk.assert_turn_admission()
         except RunnerDiskError as exc:
             raise RunnerWorkspaceError("Runner disk admission rejected the Turn") from exc
+
+    def capacity_snapshot(self) -> DiskCapacitySnapshot:
+        """Return read-only admission evidence from the configured bounded disk."""
+        if self._work_item_disk is None:
+            raise RunnerWorkspaceError("Runner bounded disk capacity is unavailable")
+        try:
+            return self._work_item_disk.capacity_snapshot()
+        except RunnerDiskError as exc:
+            raise RunnerWorkspaceError("Runner disk capacity is unavailable") from exc
 
     def current_head(self, work_item_id: str, *, require_clean: bool = True) -> str:
         metadata = self.metadata(work_item_id)
