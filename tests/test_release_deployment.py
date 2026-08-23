@@ -26,6 +26,7 @@ class ReleaseDeploymentTests(unittest.TestCase):
         self.assertIn("PYTHONDONTWRITEBYTECODE=1", text)
         self.assertIn("PYTHONPATH=src:.", text)
         self.assertIn("umask 077; cd", text)
+        self.assertEqual(2, text.count('-C "$runner_validation"'))
         self.assertIn("codex-runner", text)
         self.assertLess(
             text.index("/srv/codex-runner/current.next"),

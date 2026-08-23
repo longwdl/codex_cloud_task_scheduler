@@ -195,6 +195,7 @@ validate_runner() {
         "$runner_validation"
     /usr/bin/ssh -o BatchMode=yes codex-runner \
         /usr/bin/sudo -n -u codex-runner /usr/bin/env -i \
+        -C "$runner_validation" \
         HOME=/srv/codex-runner/home LANG=C.UTF-8 LC_ALL=C.UTF-8 \
         PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
         "PYTHONPATH=$runner_validation/src:$runner_validation" \
@@ -202,6 +203,7 @@ validate_runner() {
         -s "$runner_validation/tests" -q
     /usr/bin/ssh -o BatchMode=yes codex-runner \
         /usr/bin/sudo -n -u codex-runner /usr/bin/env -i \
+        -C "$runner_validation" \
         HOME=/srv/codex-runner/home LANG=C.UTF-8 LC_ALL=C.UTF-8 \
         PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
         "PYTHONPATH=$runner_validation/src:$runner_validation" \
