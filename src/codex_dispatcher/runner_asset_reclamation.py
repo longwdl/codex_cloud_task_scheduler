@@ -492,6 +492,7 @@ def collect_runner_asset_snapshot(
     rollback_release_commits: tuple[str, ...],
     rollback_image_refs: tuple[str, ...],
     images: tuple[DockerImageAsset, ...],
+    trusted_work_items_owner_uid: int | None = None,
 ) -> RunnerAssetSnapshot:
     """Collect every local reference that can retain a Runner release or image."""
     for commit in rollback_release_commits:
@@ -511,7 +512,18 @@ def collect_runner_asset_snapshot(
     if not isinstance(work_items_root_value, str):
         raise RunnerAssetReclamationError("Runner work-items root is invalid")
     work_items_root = Path(work_items_root_value)
-    _protected_directory(work_items_root, "Runner work-items root")
+    work_items_owner_uid = (
+        os.geteuid()
+        if trusted_work_items_owner_uid is None
+        else trusted_work_items_owner_uid
+    )
+    if type(work_items_owner_uid) is not int or work_items_owner_uid < 0:
+        raise RunnerAssetReclamationError("Runner work-items owner is invalid")
+    _protected_directory(
+        work_items_root,
+        "Runner work-items root",
+        trusted_owner_uid=work_items_owner_uid,
+    )
 
     try:
         current_value = os.readlink(current_link)
@@ -521,9 +533,15 @@ def collect_runner_asset_snapshot(
     if (releases_root / current_commit).resolve() != current_link.resolve():
         raise RunnerAssetReclamationError("Runner current link escapes the release root")
 
-    registry = _identity_directory(work_items_root / ".registry")
-    archives = _identity_directory(work_items_root / ".archives")
-    absences = _identity_directory(work_items_root / ".absences")
+    registry = _identity_directory(
+        work_items_root / ".registry", trusted_owner_uid=work_items_owner_uid
+    )
+    archives = _identity_directory(
+        work_items_root / ".archives", trusted_owner_uid=work_items_owner_uid
+    )
+    absences = _identity_directory(
+        work_items_root / ".absences", trusted_owner_uid=work_items_owner_uid
+    )
     if set(archives) - set(registry):
         raise RunnerAssetReclamationError("Runner archive is missing its permanent registry")
     if set(absences) & set(registry):
@@ -548,7 +566,13 @@ def collect_runner_asset_snapshot(
             / f"issue-{issue_number}"
         )
         state = root / "runner-state"
-        if not state.is_dir() or state.is_symlink():
+        try:
+            _protected_directory(
+                state,
+                "WorkItem state directory",
+                trusted_owner_uid=work_items_owner_uid,
+            )
+        except RunnerAssetReclamationError:
             blockers.append(f"active registry {work_item_id} is not inspectable")
             continue
         for binding in sorted(state.rglob("codex-session.json")):
@@ -559,7 +583,10 @@ def collect_runner_asset_snapshot(
             if len(relative.parts) > 4:
                 raise RunnerAssetReclamationError("session binding depth is invalid")
             payload = _read_protected_json(
-                binding, "WorkItem session binding", maximum=4096
+                binding,
+                "WorkItem session binding",
+                maximum=4096,
+                trusted_owner_uid=work_items_owner_uid,
             )
             image = payload.get("image")
             if (
@@ -772,13 +799,24 @@ def _read_receipt(path: Path) -> dict[str, object]:
     return payload
 
 
-def _identity_directory(path: Path) -> dict[str, dict[str, object]]:
-    _protected_directory(path, "Runner identity directory")
+def _identity_directory(
+    path: Path, *, trusted_owner_uid: int
+) -> dict[str, dict[str, object]]:
+    _protected_directory(
+        path,
+        "Runner identity directory",
+        trusted_owner_uid=trusted_owner_uid,
+    )
     result: dict[str, dict[str, object]] = {}
     for child in sorted(path.iterdir()):
         if child.suffix != ".json":
             raise RunnerAssetReclamationError("Runner identity directory has an unknown entry")
-        payload = _read_protected_json(child, "Runner identity", maximum=16 * 1024)
+        payload = _read_protected_json(
+            child,
+            "Runner identity",
+            maximum=16 * 1024,
+            trusted_owner_uid=trusted_owner_uid,
+        )
         work_item_id = validate_work_item_id(payload.get("work_item_id"))
         if child.stem != work_item_id or work_item_id in result:
             raise RunnerAssetReclamationError("Runner identity filename conflicts")
@@ -786,7 +824,13 @@ def _identity_directory(path: Path) -> dict[str, dict[str, object]]:
     return result
 
 
-def _read_protected_json(path: Path, field: str, *, maximum: int) -> dict[str, object]:
+def _read_protected_json(
+    path: Path,
+    field: str,
+    *,
+    maximum: int,
+    trusted_owner_uid: int | None = None,
+) -> dict[str, object]:
     try:
         metadata = path.stat(follow_symlinks=False)
         raw = path.read_bytes()
@@ -795,7 +839,12 @@ def _read_protected_json(path: Path, field: str, *, maximum: int) -> dict[str, o
     if (
         not stat.S_ISREG(metadata.st_mode)
         or path.is_symlink()
-        or metadata.st_uid not in {0, os.geteuid()}
+        or metadata.st_uid
+        not in (
+            {0, os.geteuid()}
+            if trusted_owner_uid is None
+            else {trusted_owner_uid}
+        )
         or metadata.st_mode & 0o022
         or metadata.st_nlink != 1
         or not 0 < len(raw) <= maximum
@@ -811,7 +860,9 @@ def _read_protected_json(path: Path, field: str, *, maximum: int) -> dict[str, o
     return payload
 
 
-def _protected_directory(path: Path, field: str) -> None:
+def _protected_directory(
+    path: Path, field: str, *, trusted_owner_uid: int | None = None
+) -> None:
     try:
         metadata = path.stat(follow_symlinks=False)
     except OSError as exc:
@@ -819,7 +870,12 @@ def _protected_directory(path: Path, field: str) -> None:
     if (
         not stat.S_ISDIR(metadata.st_mode)
         or path.is_symlink()
-        or metadata.st_uid not in {0, os.geteuid()}
+        or metadata.st_uid
+        not in (
+            {0, os.geteuid()}
+            if trusted_owner_uid is None
+            else {trusted_owner_uid}
+        )
         or metadata.st_mode & 0o022
     ):
         raise RunnerAssetReclamationError(f"{field} must be owned and protected")

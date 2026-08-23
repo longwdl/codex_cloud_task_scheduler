@@ -90,6 +90,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _run_reclamation(args: argparse.Namespace) -> dict[str, object]:
     rollback_commits, rollback_images = _rollback_references()
+    work_items_owner_uid = WORK_ITEMS_ROOT.stat(follow_symlinks=False).st_uid
+    active_lock_owner_uid = Path("/srv/codex-runner/run/active.lock").stat(
+        follow_symlinks=False
+    ).st_uid
+    if work_items_owner_uid != active_lock_owner_uid:
+        raise RunnerAssetReclamationError(
+            "Runner evidence and active lock owners differ"
+        )
     inspector = _DockerInspector(RUNNER_CONFIG, PROVENANCE_PATH)
     snapshot = collect_runner_asset_snapshot(
         config_path=RUNNER_CONFIG,
@@ -98,6 +106,7 @@ def _run_reclamation(args: argparse.Namespace) -> dict[str, object]:
         rollback_release_commits=rollback_commits,
         rollback_image_refs=rollback_images,
         images=inspector.inspect(),
+        trusted_work_items_owner_uid=work_items_owner_uid,
     )
     plan = plan_runner_asset_reclamation(snapshot)
     if args.command == "reclamation-plan":

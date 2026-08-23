@@ -206,12 +206,26 @@ class RunnerAssetReclamationTests(unittest.TestCase):
                 rollback_release_commits=(),
                 rollback_image_refs=(),
                 images=(image(CURRENT_IMAGE, "1"),),
+                trusted_work_items_owner_uid=work_items.stat().st_uid,
             )
 
             self.assertEqual((WORK_ITEM,), snapshot.registry_work_item_ids)
             self.assertEqual((WORK_ITEM,), snapshot.archived_work_item_ids)
             self.assertEqual((), snapshot.work_item_images)
             self.assertEqual((), snapshot.blocked_reasons)
+
+            with self.assertRaisesRegex(
+                RunnerAssetReclamationError, "owned and protected"
+            ):
+                collect_runner_asset_snapshot(
+                    config_path=config,
+                    releases_root=releases,
+                    current_link=current,
+                    rollback_release_commits=(),
+                    rollback_image_refs=(),
+                    images=(image(CURRENT_IMAGE, "1"),),
+                    trusted_work_items_owner_uid=work_items.stat().st_uid + 1,
+                )
 
     def test_exact_release_delete_revalidates_tree(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
