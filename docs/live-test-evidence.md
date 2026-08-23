@@ -101,6 +101,15 @@ bounded image at HEAD `f5037925502905fd3d22a807df7291ba1004bab9`, reclaiming
 8,589,934,592 bytes. The backward-compatible WorkItem state remains `blocked`, while the disposition
 terminal overlay prevents any later Turn or generation.
 
+The owner then authorized the six remaining historical review PRs for discard. Issues #2, #4, #6,
+#8, #10, and #16 changed from `agent:review` to `agent:discard`; audited GitHub event ids were
+`29861032691`, `29861033392`, `29861034200`, `29861034943`, `29861035613`, and `29861036319`.
+Twelve serialized normal sweeps recorded six immutable `superseded` dispositions and archived the
+six legacy directories, reclaiming 863,514 bytes. Their only generations are retired. The
+backward-compatible WorkItem state remains `review`. PRs #3, #5, #7, #9, #11, and #17 remain open
+drafts at their persisted branches and exact head SHAs; discard intentionally neither closes a PR
+nor deletes its remote branch.
+
 After Issues #28, #30, #32, #34, and #35 were projected to `agent:completed`, every reclamation
 target was re-read as an exact merged PR at the persisted head. Under the Control process lock, an
 explicit bounded operator batch archived only Issues #14, #18, #28, #30, #32, #34, and #35. #14
@@ -120,6 +129,13 @@ sweep returned strict `idle`, and both Dispatcher and backup timers were restore
 rollback remains the previous `aef09f5` links, but schema rollback also requires the validated
 pre-migration backup because schema 13 is additive and old code is unaware of the new terminal
 overlay.
+
+After the six superseded archives, a further normal sweep returned success without selecting more
+work. Runner retained only Issue #1 under the fixture workspace root, with zero staging entries and
+74,070,376,448 available bytes. Control still had zero active Turns and zero absence rows; Issues
+#24 and #26 still had neither archive nor disposition rows. Online Backup
+`state-20260823T012651.702413Z.db` passed schema-13 integrity and foreign-key checks with zero active
+Turns. Dispatcher and backup timers were restored active, while the oneshot service was inactive.
 
 ## Completed WorkItem lifecycle and disk reclamation release — 2026-08-23
 
