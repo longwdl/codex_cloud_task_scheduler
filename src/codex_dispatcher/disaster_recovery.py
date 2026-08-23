@@ -433,8 +433,10 @@ def _reconcile_github(store: StateStore, tracker: Tracker) -> tuple[int, int]:
         elif work_item.last_published_sha is not None:
             if branch_head != work_item.last_published_sha:
                 raise DisasterRecoveryError("GitHub task branch conflicts with SQLite")
-        elif branch_head is not None:
-            raise DisasterRecoveryError("unpublished GitHub task branch exists")
+        elif branch_head not in {None, work_item.base_sha}:
+            raise DisasterRecoveryError(
+                "unpublished GitHub task branch differs from its persisted base"
+            )
     return issue_count, pr_count
 
 

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from codex_dispatcher.control_host_backup import create_state_backup
 from codex_dispatcher.disaster_recovery import (
+    _reconcile_github,
     collect_runner_recovery_snapshot,
     DisasterRecoveryError,
     run_schema18_disaster_recovery_drill,
@@ -50,6 +51,36 @@ class _SlackVerifier:
 
 
 class DisasterRecoveryTests(unittest.TestCase):
+    def test_unpublished_branch_may_remain_at_exact_persisted_base(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            item = WorkItem.new(
+                repository="owner/repo",
+                issue_number=9,
+                issue_node_id="I_kwDOFixture9",
+                base_branch="main",
+                base_sha="9" * 40,
+                at="2026-08-23T00:00:00+00:00",
+            )
+            tracker = FakeTracker()
+            tracker.tasks["9"] = TrackerTask(
+                repository=item.repository,
+                task_id="9",
+                issue_number=9,
+                title="fixture",
+                body="fixture",
+                state=TaskState.READY,
+                labels=("agent:ready",),
+                created_at="2026-08-23T00:00:00Z",
+                ready_approved_by="maintainer",
+                issue_node_id=item.issue_node_id,
+            )
+            tracker.branches[(item.repository, item.task_branch)] = item.base_sha
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                store.create_work_item(item)
+
+                self.assertEqual((1, 0), _reconcile_github(store, tracker))
+
     def test_root_admin_can_bind_snapshot_to_explicit_runner_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             work_items = Path(temp_dir) / "work-items"
