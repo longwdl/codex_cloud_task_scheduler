@@ -3,6 +3,44 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Slack health alerts, bounded backup retention, and restore drill — 2026-08-23
+
+Commit `88e25f2514f59ee0f68377d1045a55a2e00e75e5` added schema 14, the durable health-alert
+outbox, Slack alert/recovery projection, validated backup rotation, and the protected restore drill.
+The final exact archive passed 543 unit tests in 89.867 seconds as the real Control service account
+under a short service-owned temporary root with unit-equivalent `umask 077`; compilation, wrapper
+syntax, diff checks, and `systemd-analyze verify` also passed. The only systemd diagnostic was an
+unrelated pre-existing `snapd.service` warning. Runner code and its active release were unchanged.
+
+Before migration, the stopped-and-idle Control service created Online Backup
+`state-20260823T042620.907876Z.db`. Control then atomically switched from release
+`f38959a820be99296e723d8c8dd6202c9d690d02` to the exact commit above. The first dispatcher run
+migrated versions 1 through 14 and returned `idle`; the live database passed `integrity_check`, had
+zero foreign-key violations, and retained zero active health alerts after the canary.
+
+The first new backup service created mode-protected
+`state-20260823T042930.026736Z.db`, validated the complete canonical set before deletion, removed
+two excess valid copies totaling 991,232 bytes, and retained eight databases: the original
+schema-13 anchor `state-20260822T185953.695987Z.db` plus the newest seven. The credential-free,
+network-isolated restore service then restored the newest backup to a temporary database, verified
+the exact shipped migration ledger 1 through 14, `integrity=ok`, and zero foreign-key violations,
+and removed the temporary restore.
+
+The Slack delivery canary first confirmed that a healthy report emitted no message. Control then
+stopped only the still-enabled restore-drill timer. Health failed with exactly one
+`systemd_timer_not_active` alert and durably delivered one
+[`alert` root message](https://codex-nt54555.slack.com/archives/C0BR2D0MS8Y/p1787459838171809).
+After restarting the timer, the next health run delivered one
+[`recovery` reply](https://codex-nt54555.slack.com/archives/C0BR2D0MS8Y/p1787459863402639?thread_ts=1787459838.171809&cid=C0BR2D0MS8Y)
+in that root thread. A third healthy run emitted no duplicate. SQLite contains exactly those two
+immutable delivered outbox rows and no active alert.
+
+Final read-back found dispatcher, health, backup, and restore-drill timers all `enabled/active`, and
+the most recent result for each corresponding service was `success`. The service-owned candidate
+test directory was deleted after validation, reclaiming 2,768,823 bytes. Rollback is the retained
+`f38959a` release plus the pre-migration Online Backup; because schema 14 is additive, rollback must
+restore that backup before switching binaries if schema-level rollback is required.
+
 ## Trusted absence, Sol routing, retention, and monitoring — 2026-08-23
 
 The owner authorized the remaining historical cleanup and all Fixture-only review/merge actions.
