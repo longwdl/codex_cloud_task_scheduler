@@ -43,6 +43,14 @@ class ReleaseDeploymentTests(unittest.TestCase):
         self.assertIn("current.rollback", text)
         self.assertIn("release links changed after activation", text)
         self.assertIn("configuration changed after activation", text)
+        self.assertLess(
+            text.index("record_phase quiesce"),
+            text.index("dispatcher_invocation_id_before=$(/usr/bin/systemctl"),
+        )
+        self.assertLess(
+            text.index("dispatcher_invocation_id_before=$(/usr/bin/systemctl"),
+            text.index("record_phase stage_control_intent"),
+        )
         self.assertIn("candidate release already exists", text)
         self.assertIn('created_control=0', text)
         self.assertIn('created_runner=0', text)
