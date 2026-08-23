@@ -143,7 +143,11 @@ for service in \
     codex-dispatcher-backup.service \
     codex-dispatcher-restore-drill.service
 do
-    [ "$(/usr/bin/systemctl is-active "$service" || true)" = inactive ]
+    service_state=$(/usr/bin/systemctl show "$service" -p ActiveState --value)
+    case "$service_state" in
+        inactive|failed) ;;
+        *) printf '%s\n' "Control service is not stopped: $service" >&2; exit 1 ;;
+    esac
 done
 # RuntimeDirectory is ephemeral and may disappear when the oneshot Dispatcher
 # exits. Recreate the exact systemd-owned boundary before checking the lock;
