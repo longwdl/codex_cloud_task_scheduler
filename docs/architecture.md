@@ -448,6 +448,14 @@ receipt under `.absences/` before responding; retries return the same receipt. C
 canonical response SHA and Runner observation time in the schema-13 absence ledger. A local JSON
 assertion remains insufficient, and Control never fabricates a Runner `ARCHIVED` receipt.
 
+The archive and absence ledgers remain independent and immutable. Read-only status and lifecycle
+health derive one `terminal_storage_effective_counts` projection without rewriting either ledger:
+an exact permanent absence receipt takes precedence over an unfinished `prepared`, `ambiguous`, or
+`blocked` archive row and is reported as `absence_reconciled`; a completed archive is `archived`;
+an item without either receipt is `retained`. Missing or mismatched archive identity, or simultaneous
+completed-archive and absence evidence, is `evidence_conflict`, makes the projection unhealthy, and
+requires operator investigation rather than inference.
+
 Likewise, an ambiguous Slack root response is reconciled before Codex starts. An ambiguous terminal
 Slack response is retried from the durable Turn and outbox identity after the commit/PR work is
 already complete; it cannot restart Codex, repeat a push, or create another PR. The terminal Issue

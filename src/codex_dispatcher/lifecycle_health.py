@@ -27,6 +27,10 @@ from codex_dispatcher.runner_transport import (
 )
 from codex_dispatcher.ssh_runner_transport import SshRunnerTransport
 from codex_dispatcher.state_store import StateStore
+from codex_dispatcher.terminal_storage import (
+    TerminalStorageEffectiveState,
+    effective_terminal_storage_state,
+)
 from codex_dispatcher.terminal_retention import TerminalBranchCleanupState
 from codex_dispatcher.work_item_lifecycle import WorkItemArchiveStatus
 from codex_dispatcher.work_items import WorkItem, WorkItemState
@@ -92,6 +96,7 @@ class LifecycleHealthSnapshot:
     pending_branch_cleanups: int
     blocked_branch_cleanups: int
     cleaned_branches: int
+    terminal_storage_effective_counts: tuple[tuple[str, int], ...]
     github_api_sweeps: int
     github_api_latest: GitHubApiSweepMetric | None
     github_api_latest_age_seconds: int | None
@@ -127,6 +132,9 @@ class LifecycleHealthSnapshot:
             "pending_branch_cleanups": self.pending_branch_cleanups,
             "blocked_branch_cleanups": self.blocked_branch_cleanups,
             "cleaned_branches": self.cleaned_branches,
+            "terminal_storage_effective_counts": dict(
+                self.terminal_storage_effective_counts
+            ),
             "github_api_sweeps": self.github_api_sweeps,
             "github_api_latest": (
                 None
@@ -185,6 +193,13 @@ def inspect_lifecycle_health(
         disposition.work_item_id: disposition
         for disposition in store.list_work_item_dispositions()
     }
+    archives = {
+        archive.work_item_id: archive for archive in store.list_work_item_archives()
+    }
+    absences = {
+        absence.work_item_id: absence
+        for absence in store.list_work_item_absence_reconciliations()
+    }
     abandonments = store.list_turn_execution_abandonments()
     abandonments_by_work_item = {
         abandonment.work_item_id: abandonment for abandonment in abandonments
@@ -207,6 +222,9 @@ def inspect_lifecycle_health(
     pending_branch_cleanups = 0
     blocked_branch_cleanups = 0
     cleaned_branches = 0
+    terminal_storage_effective_counts = {
+        state.value: 0 for state in TerminalStorageEffectiveState
+    }
 
     if integrity != "ok":
         alerts.append(LifecycleAlert("database_integrity_failed"))
@@ -272,11 +290,17 @@ def inspect_lifecycle_health(
                 )
 
     for work_item in work_items:
-        archive = store.get_work_item_archive(work_item.work_item_id)
-        absence = store.get_work_item_absence_reconciliation(work_item.work_item_id)
+        archive = archives.get(work_item.work_item_id)
+        absence = absences.get(work_item.work_item_id)
         disposition = dispositions.get(work_item.work_item_id)
         abandonment = abandonments_by_work_item.get(work_item.work_item_id)
         branch_cleanup = store.get_terminal_branch_cleanup(work_item.work_item_id)
+        effective_storage = effective_terminal_storage_state(archive, absence)
+        terminal_storage_effective_counts[effective_storage.value] += 1
+        if effective_storage is TerminalStorageEffectiveState.EVIDENCE_CONFLICT:
+            alerts.append(
+                _item_alert("terminal_storage_evidence_conflict", work_item)
+            )
         terminal_runner_evidence = (
             absence is not None
             or (
@@ -406,6 +430,9 @@ def inspect_lifecycle_health(
         pending_branch_cleanups=pending_branch_cleanups,
         blocked_branch_cleanups=blocked_branch_cleanups,
         cleaned_branches=cleaned_branches,
+        terminal_storage_effective_counts=tuple(
+            terminal_storage_effective_counts.items()
+        ),
         github_api_sweeps=github_api_sweeps,
         github_api_latest=github_api_latest,
         github_api_latest_age_seconds=github_api_latest_age_seconds,

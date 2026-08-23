@@ -34,6 +34,7 @@ from codex_dispatcher.runner_transport import (
 )
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.testing.fakes import FakeTracker
+from codex_dispatcher.work_items import WorkItem
 from tests.test_scheduler import make_config
 
 
@@ -184,6 +185,37 @@ class CliTests(unittest.TestCase):
                         cloud_environment_id="env-1",
                     )
                 )
+                at = "2026-08-23T00:00:00+00:00"
+                work_item = WorkItem.new(
+                    repository="owner/repo",
+                    issue_number=2,
+                    issue_node_id="I_fixture_2",
+                    base_branch="main",
+                    base_sha="a" * 40,
+                    at=at,
+                )
+                store.create_work_item(work_item)
+                store._connection.execute(
+                    "UPDATE work_items SET state = 'completed', "
+                    "last_published_sha = ?, updated_at = ? WHERE work_item_id = ?",
+                    ("b" * 40, at, work_item.work_item_id),
+                )
+                store._connection.commit()
+                store.prepare_work_item_archive(
+                    work_item.work_item_id,
+                    expected_head_sha="b" * 40,
+                    eligible_at=at,
+                    request_sha256="c" * 64,
+                    updated_at=at,
+                )
+                store.record_work_item_absence_reconciliation(
+                    work_item.work_item_id,
+                    expected_head_sha="b" * 40,
+                    evidence_sha256="d" * 64,
+                    observed_by="operator",
+                    observed_at=at,
+                    created_at=at,
+                )
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 exit_code = main(["status", "--database", str(database), "--json"])
@@ -192,6 +224,21 @@ class CliTests(unittest.TestCase):
         self.assertEqual(0, exit_code)
         self.assertEqual("ok", payload["integrity"])
         self.assertEqual(["run-1"], payload["active_runs"])
+        self.assertEqual(
+            1,
+            payload["terminal_storage_effective_counts"]["absence_reconciled"],
+        )
+        self.assertEqual(1, payload["terminal_storage_effective_overrides_total"])
+        self.assertEqual(
+            {
+                "work_item_id": work_item.work_item_id,
+                "repository": "owner/repo",
+                "issue_number": 2,
+                "raw_archive_status": "prepared",
+                "effective_state": "absence_reconciled",
+            },
+            payload["terminal_storage_effective_overrides"][0],
+        )
 
     def test_state_backup_uses_protected_config_without_credentials(self) -> None:
         config = make_config()

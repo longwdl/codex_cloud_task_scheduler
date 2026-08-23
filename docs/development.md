@@ -100,7 +100,10 @@ The environment-independent core now additionally contains:
   reclamation;
 - an explicit protocol-v2 absence reconciliation path whose Runner-persisted receipt binds the
   normal archive request and rejects any remaining registry, workspace, staging, image, or mount
-  state before schema-13 evidence is recorded.
+  state before schema-13 evidence is recorded;
+- a read-only one-value terminal-storage projection in `status` and lifecycle health that gives an
+  exact absence receipt precedence over its deliberately unfinished archive row while retaining both
+  raw ledgers for audit, and fails closed on contradictory evidence;
 - an explicit protocol-v2 inactive execution abandonment path with distinct observation-unavailable
   evidence, Runner-lock reinspection, lost-STOP-response replay, schema-18 receipts, and immediate
   lifecycle health projection; it contains no container stop/kill/remove action.

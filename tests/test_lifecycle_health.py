@@ -288,6 +288,51 @@ class LifecycleHealthTests(unittest.TestCase):
             self.assertTrue(snapshot.ok)
             self.assertEqual((), snapshot.alerts)
 
+    def test_absence_receipt_is_one_terminal_storage_state(self) -> None:
+        now = datetime(2026, 8, 23, tzinfo=timezone.utc)
+        at = now.isoformat()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "state.db"
+            with StateStore(database) as store:
+                store.migrate()
+                _seed_observability(store, at)
+                item = _item(7, at)
+                _complete(store, item, at)
+                store.prepare_work_item_archive(
+                    item.work_item_id,
+                    expected_head_sha=HEAD,
+                    eligible_at=at,
+                    request_sha256="c" * 64,
+                    updated_at=at,
+                )
+                store.record_work_item_absence_reconciliation(
+                    item.work_item_id,
+                    expected_head_sha=HEAD,
+                    evidence_sha256="d" * 64,
+                    observed_by="operator",
+                    observed_at=at,
+                    created_at=at,
+                )
+                snapshot = inspect_lifecycle_health(
+                    _config(database), store, now=now
+                )
+
+        self.assertTrue(snapshot.ok)
+        self.assertEqual(1, snapshot.absence_reconciliations)
+        self.assertEqual(0, snapshot.pending_archives)
+        self.assertEqual(
+            1,
+            dict(snapshot.terminal_storage_effective_counts)[
+                "absence_reconciled"
+            ],
+        )
+        self.assertEqual(
+            snapshot.terminal_storage_effective_counts,
+            tuple(
+                snapshot.to_mapping()["terminal_storage_effective_counts"].items()
+            ),
+        )
+
     def test_observability_health_uses_persisted_metric_and_cursor_age(self) -> None:
         now = datetime(2026, 8, 23, tzinfo=timezone.utc)
         old = "2026-08-20T00:00:00+00:00"

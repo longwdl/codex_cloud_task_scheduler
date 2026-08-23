@@ -17,6 +17,10 @@ from codex_dispatcher.config import Config, load_config
 from codex_dispatcher.domain import Run
 from codex_dispatcher.scheduler import DryRunPlan, build_dry_run_plan
 from codex_dispatcher.state_store import StateStore
+from codex_dispatcher.terminal_storage import (
+    TerminalStorageEffectiveState,
+    effective_terminal_storage_state,
+)
 from codex_dispatcher.trackers.base import Tracker
 
 
@@ -326,13 +330,54 @@ def _status(database_path: Path) -> tuple[int, dict[str, object]]:
         with StateStore(database_path, read_only=True) as store:
             integrity = store.integrity_check()
             active_runs = store.list_active_runs()
+            effective_counts = {
+                state.value: 0 for state in TerminalStorageEffectiveState
+            }
+            effective_overrides: list[dict[str, object]] = []
+            archives = {
+                archive.work_item_id: archive
+                for archive in store.list_work_item_archives()
+            }
+            absences = {
+                absence.work_item_id: absence
+                for absence in store.list_work_item_absence_reconciliations()
+            }
+            for work_item in store.list_work_items():
+                archive = archives.get(work_item.work_item_id)
+                absence = absences.get(work_item.work_item_id)
+                effective = effective_terminal_storage_state(archive, absence)
+                effective_counts[effective.value] += 1
+                if absence is not None or (
+                    effective is TerminalStorageEffectiveState.EVIDENCE_CONFLICT
+                ):
+                    effective_overrides.append(
+                        {
+                            "work_item_id": work_item.work_item_id,
+                            "repository": work_item.repository,
+                            "issue_number": work_item.issue_number,
+                            "raw_archive_status": (
+                                None if archive is None else archive.status.value
+                            ),
+                            "effective_state": effective.value,
+                        }
+                    )
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         return 1, {"ok": False, "error": str(exc), "path": str(database_path)}
 
-    return 0, {
-        "ok": integrity == "ok",
+    conflict_count = effective_counts[
+        TerminalStorageEffectiveState.EVIDENCE_CONFLICT.value
+    ]
+    override_limit = 100
+    return (0 if integrity == "ok" and conflict_count == 0 else 1), {
+        "ok": integrity == "ok" and conflict_count == 0,
         "integrity": integrity,
         "active_runs": [run.run_id for run in active_runs],
+        "terminal_storage_effective_counts": effective_counts,
+        "terminal_storage_effective_overrides": effective_overrides[:override_limit],
+        "terminal_storage_effective_overrides_total": len(effective_overrides),
+        "terminal_storage_effective_overrides_truncated": (
+            len(effective_overrides) > override_limit
+        ),
         "path": str(database_path),
     }
 
