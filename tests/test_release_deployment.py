@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "codex-dispatcher-release-v1"
+RUNNER_VALIDATOR = ROOT / "scripts" / "codex-runner-release-validate-v1"
 
 
 class ReleaseDeploymentTests(unittest.TestCase):
@@ -26,7 +27,7 @@ class ReleaseDeploymentTests(unittest.TestCase):
         self.assertIn("PYTHONDONTWRITEBYTECODE=1", text)
         self.assertIn("PYTHONPATH=src:.", text)
         self.assertIn("umask 077; cd", text)
-        self.assertEqual(2, text.count('-C "$runner_validation"'))
+        self.assertIn("codex-runner-release-validate-v1", text)
         self.assertIn("codex-runner", text)
         self.assertLess(
             text.index("/srv/codex-runner/current.next"),
@@ -38,6 +39,16 @@ class ReleaseDeploymentTests(unittest.TestCase):
         self.assertNotIn("eval ", text)
         self.assertNotIn("release'/.'", text)
         self.assertNotIn("--force", text)
+
+    def test_runner_validator_enforces_protected_cwd_and_umask(self) -> None:
+        text = RUNNER_VALIDATOR.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("#!/bin/sh\n"))
+        self.assertNotEqual(0, RUNNER_VALIDATOR.stat().st_mode & 0o111)
+        self.assertIn("umask 077", text)
+        self.assertIn("release-validation-", text)
+        self.assertIn('= 700 ]', text)
+        self.assertIn('cd "$validation_root"', text)
+        self.assertIn("unittest discover", text)
 
     def test_release_tool_rejects_unstructured_invocations_before_sudo(self) -> None:
         completed = subprocess.run(

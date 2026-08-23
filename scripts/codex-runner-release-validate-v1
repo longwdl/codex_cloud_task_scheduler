@@ -1,0 +1,41 @@
+#!/bin/sh
+
+# Run the reviewed release checks as codex-runner from an isolated directory.
+# A restrictive umask is part of the test contract: Publisher fixtures reject
+# group-writable Git mirrors, while the administrator account defaults to 0002.
+
+set -eu
+umask 077
+
+if [ "$#" -ne 1 ]; then
+    printf '%s\n' 'usage: codex-runner-release-validate-v1 VALIDATION_ROOT' >&2
+    exit 2
+fi
+
+validation_root=$1
+case "$validation_root" in
+    /srv/codex-runner/run/release-validation-*) ;;
+    *) printf '%s\n' 'validation root is outside the protected Runner path' >&2; exit 2 ;;
+esac
+validation_id=${validation_root#/srv/codex-runner/run/release-validation-}
+case "$validation_id" in
+    *[!0-9a-f]*|'') printf '%s\n' 'validation root has an invalid release identifier' >&2; exit 2 ;;
+esac
+[ "${#validation_id}" -eq 12 ] || {
+    printf '%s\n' 'validation root has an invalid release identifier' >&2
+    exit 2
+}
+[ -d "$validation_root" ] && [ ! -L "$validation_root" ] || {
+    printf '%s\n' 'validation root is unavailable or is a symlink' >&2
+    exit 1
+}
+[ "$(/usr/bin/stat -c %u "$validation_root")" = "$(/usr/bin/id -u)" ] && \
+    [ "$(/usr/bin/stat -c %a "$validation_root")" = 700 ] || {
+        printf '%s\n' 'validation root must be owned and protected' >&2
+        exit 1
+    }
+
+cd "$validation_root"
+/usr/bin/python3 -P -s -m unittest discover -s tests -q
+/usr/bin/python3 -P -s -m compileall -q src tests
+/bin/sh -n scripts/codex-runner-v1 scripts/codex-runner-capacity-v1
