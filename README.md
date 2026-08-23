@@ -11,8 +11,8 @@ reconciliation through restricted SSH.
 
 ## Current status
 
-The repository is migrating from an abandoned Codex Cloud design to a remote Linux Codex CLI
-executor. The environment-independent implementation now includes:
+The former Codex Cloud design is retained only as historical compatibility code. The deployed
+Fixture target is the remote Linux Codex CLI executor, and the implementation now includes:
 
 - strict configuration parsing;
 - the legacy run state machine and additive SQLite persistence;
@@ -63,6 +63,13 @@ executor. The environment-independent implementation now includes:
 - 15-minute health timers for Control lifecycle/systemd backlog and Runner capacity admission;
   Control durably deduplicates outbound-only Slack alert/recovery notifications, while neither
   monitor performs automated repair.
+- a transactional two-host release tool that validates one exact Git archive under both service
+  accounts, switches Runner before Control, preserves rollback anchors, and deliberately requires a
+  manually observed sweep before restarting timers;
+- a durable daily terminal-audit cursor plus bounded per-sweep GitHub command, latency, and
+  rate-limit evidence, so ordinary sweeps skip already-proved terminal WorkItems;
+- permanent open terminal Issues and exact-evidence task-branch reclamation after an explicitly
+  configured retention interval, with prepared/delete/absence receipts and health projection.
 
 The Runner path has now been exercised against the private Fixture through the real pinned SSH
 transport and Codex CLI 0.147.0 using ChatGPT login. A migrated Issue binding completed PREPARE,
@@ -79,6 +86,8 @@ TCP/DNS/UDP and private/metadata denial, metadata-only audit, fail-closed restar
 rotation. Container-visible routing, cross-container denial, per-WorkItem ENOSPC/remount behavior,
 and the fixed 8 GiB disk admission boundary have also been exercised. Higher-value repositories
 remain prohibited pending the explicit auth/recovery matrix in `deploy/runner/DOCKER.md`.
+The Fixture-only Dispatcher, backup, restore-drill, health, and Runner-capacity timers are enabled
+on the dedicated hosts. This activation does not admit another repository class.
 
 The write-enabled dependency assembly has now completed one bounded happy-path run against Fixture
 Issue `#2`: it claimed one SSH-labelled Issue, created one persistent Codex session, published the

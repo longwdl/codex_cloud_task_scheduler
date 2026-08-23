@@ -127,10 +127,11 @@ then deletes only validated excess files. A weekly credential-free job restores 
 temporary database, checks integrity, foreign keys, and migration identity, and removes the temporary
 copy without replacing the live database.
 
-The Control health timer may write only its dedicated schema-14 alert outbox and active-episode row.
-It excludes changing age counters from the episode fingerprint, persists exact bounded message text
-before sending, reuses the existing deterministic Slack `client_msg_id` transport, and clears an
-episode only after the threaded recovery receipt is durable. Slack remains output-only.
+The Control health timer may write only its dedicated migration-14 alert outbox and active-episode
+row. It excludes changing age counters from the episode fingerprint, persists exact bounded message
+text before sending, reuses the existing deterministic Slack `client_msg_id` transport, and clears
+an episode only after the threaded recovery receipt is durable. Its only Runner interaction is the
+fixed read-only protocol-v2 capacity request; Slack remains output-only.
 
 ## Input and output channels
 

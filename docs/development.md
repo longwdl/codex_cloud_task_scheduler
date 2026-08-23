@@ -156,10 +156,10 @@ or activate themselves. A separate `systemd --user` variant remains only a fallb
 unavailable and is not the production deployment profile.
 
 The system deployment also includes 15-minute health timers. Control reports bounded lifecycle,
-retention, archive, and fixed-unit failures and uses a dedicated schema-14 outbox plus deterministic
-Slack provider keys to deliver one alert per stable episode and one threaded recovery; Runner reports
-whether the fixed reserve and one additional bounded image remain admissible. Health mutates only its
-outbox/active-alert rows, emits bounded JSON to journald, and never repairs WorkItems or Runner state.
+retention, archive, fixed-unit, and Runner-capacity failures and uses the dedicated migration-14
+outbox plus deterministic Slack provider keys to deliver one alert per stable episode and one
+threaded recovery. Health mutates only its outbox/active-alert rows, emits bounded JSON to journald,
+and never repairs WorkItems or Runner state.
 
 ## Architecture constraints for offline code
 

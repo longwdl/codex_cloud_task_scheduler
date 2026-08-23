@@ -260,7 +260,8 @@ original direct-execution boundary for configured Fixture work, but it does not 
 higher-value repositories: the remaining attack and recovery gates, operational exceptions, and
 rollback rules are documented in [DOCKER.md](DOCKER.md).
 
-The next candidate keeps the Runner-wide `auth.json` only as an unmounted host seed. Each WorkItem
+The deployed Runner keeps the Runner-wide `auth.json` only as an unmounted host seed. Each WorkItem
 receives a protected writable copy inside its own session home plus a host-only binding sidecar, so
-Codex can atomically refresh without sharing writable authentication state across WorkItems. That
-candidate requires a new dedicated Fixture before timer activation.
+Codex can atomically refresh without sharing writable authentication state across WorkItems. Issue
+`#26` proved the binding and exact START/RESUME reuse before Fixture-only timer activation. A natural
+version-specific token refresh remains an admission gate for higher-value repositories.

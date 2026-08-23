@@ -3,6 +3,31 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Transactional release, sweep budget, terminal retention, and capacity canary — 2026-08-23
+
+Commit `bce452a0a7be79de0fbf6e03da0dea0268b6af12` is deployed on both Control and Runner. Its exact
+archive passed 560 tests under each real service account, compilation and wrapper syntax checks,
+and systemd unit verification before the Runner-first/Control-second atomic switch. The
+transaction created a fresh Online Backup, preserved the previous two-host release links, left all
+four Control timers stopped, and required a manually observed sweep before reactivation. The only
+unit diagnostics came from unrelated pre-existing `snapd` and `cloudmonitor` units.
+
+The first schema-16 sweep completed the daily terminal GitHub audit with 77 read-only commands,
+zero writes, and 55,366 milliseconds elapsed. It persisted the `terminal_github_audit` cursor; an
+ordinary follow-up used four read-only commands and approximately three to four seconds. Terminal
+Issues remain open. The configured branch retention is 2,592,000 seconds, and no branch was old
+enough for deletion, so the exact delete/lost-receipt path still requires a dedicated Fixture
+canary rather than a global retention reduction.
+
+The Runner capacity canary stopped the Dispatcher timer and raised only the protected
+`work_item_disk.host_reserve_bytes` above observed availability. Runner reported both Turn and
+provision admission false, and Control opened one deduplicated Slack episode containing
+`systemd_timer_not_active`, `runner_turn_capacity_low`, and `runner_provision_capacity_low`.
+Restoring the exact Runner configuration and timer produced one threaded recovery; a third healthy
+check emitted no duplicate. Final read-back found schema migrations 1 through 16, integrity `ok`,
+zero foreign-key violations, all five timers active, approximately 70 GiB Runner space available,
+and both capacity admissions true.
+
 ## Slack health alerts, bounded backup retention, and restore drill — 2026-08-23
 
 Commit `88e25f2514f59ee0f68377d1045a55a2e00e75e5` added schema 14, the durable health-alert

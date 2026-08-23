@@ -20,10 +20,12 @@ configured SSH operation timeout plus five minutes, a WorkItem blocked for more 
 archive pending for more than 15 minutes, an ambiguous/blocked archive, or an overdue disposition
 or completed-retention archive. With `--systemd`, the fixed wrapper also requires all four timers
 to be loaded, enabled, and active and rejects a failed dispatcher, backup, or restore-drill service
-result. It writes only the schema-14 health outbox and active-episode row, sends one deduplicated
-Slack alert per stable episode plus one threaded recovery, and never contacts GitHub or the Runner.
-The health command does not run migrations; activate schema 14 through the normal recovery-first
-Dispatcher path before enabling Slack health delivery.
+result. It also sends one fixed protocol-v2 read-only capacity request through the pinned Runner SSH
+endpoint and reports unavailable, Turn-low, or provision-low capacity. It writes only the
+migration-14 health outbox and active-episode row, sends one deduplicated Slack alert per stable
+episode plus one threaded recovery, and never contacts GitHub or repairs remote state. The health
+command does not run migrations; activate the complete shipped migration ledger through the normal
+recovery-first Dispatcher path before enabling Slack health delivery.
 
 The files are deployment artifacts, not an installer. Copying them into `/etc/systemd/system` or
 enabling the timer changes a real host and can trigger GitHub, SSH, Publisher, and optional Slack

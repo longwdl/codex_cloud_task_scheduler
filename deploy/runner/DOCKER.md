@@ -4,10 +4,11 @@ This document records the Runner isolation boundary. The repository contains a f
 explicit `rootless_docker` configuration path, fixed-argv planner, per-WorkItem session binding, and
 offline fake-Docker integration tests. The dedicated Fixture Runner has been switched to this mode,
 and a dedicated private Fixture has now passed one successful container RESUME Turn plus independent
-SQLite, Runner, GitHub, Slack, Actions, and repeated-idle read-back. The Dispatcher timer remains
-disabled and higher-value repositories remain prohibited until the remaining attack and recovery
-acceptance is complete. The offline example configuration is deliberately non-deployable until its
-zero digest is replaced by an independently reviewed image digest.
+SQLite, Runner, GitHub, Slack, Actions, and repeated-idle read-back. The Fixture-only Dispatcher
+timer is enabled after those proofs; higher-value repositories remain prohibited until the
+remaining attack and recovery acceptance is complete. The offline example configuration is
+deliberately non-deployable until its zero digest is replaced by an independently reviewed image
+digest.
 
 Rootless Docker is preferred over a rootful daemon because both the daemon and containers run in a
 user namespace without host root privileges. The target account must never join a `docker` group or
@@ -188,25 +189,25 @@ Before the first container Turn:
 7. keep higher-value repositories prohibited until attack and recovery acceptance is complete.
 
 Items 1 through 6 have passed for the dedicated private Fixture, including the successful Issue
-`#24` RESUME recorded in `docs/live-test-evidence.md`. Item 7 remains in force. The Dispatcher timer
-is intentionally disabled while the operator reviews this checkpoint; successful Fixture admission
-does not authorize unattended use for another repository class.
+`#24` container RESUME and Issue `#26` per-WorkItem authentication START/RESUME recorded in
+`docs/live-test-evidence.md`. Item 7 remains in force. The Fixture-only Dispatcher timer is enabled;
+successful Fixture admission does not authorize unattended use for another repository class.
 
 ### Remaining admission matrix
 
 | Gate | Fixture-only unattended status | Higher-value repository status |
 |---|---|---|
 | Rootless daemon, image, mounts, cgroups, proxy and per-WorkItem disk | Live-proved; repeat after any relevant asset change | Requires the same exact target read-back |
-| Per-WorkItem writable auth plus host-only binding | Offline candidate; one new START/RESUME Fixture and seed/file digest comparison required | Blocked until that live proof passes |
+| Per-WorkItem writable auth plus host-only binding | Live-proved by Issue `#26`; seed and bindings stayed protected and stable across START/RESUME | Requires the same exact target read-back |
 | Natural token refresh | The layout permits isolated atomic replacement; never force expiry by editing a credential | Blocked until a version-specific refresh/rotation procedure preserves the seed and other WorkItems |
 | Runner/client timeout or process loss | Durable `executing` becomes unknown and blind replay is forbidden | Blocked until operator recovery/abandonment semantics are explicitly accepted for the repository |
-| Docker/host restart with no active Turn | Credential-free restart/remount probes passed | Must be repeated after the final auth/runtime release |
+| Docker/host restart with no active Turn | Credential-free restart/remount probes passed before the latest auth/runtime release; repeat pending | Must be repeated after the final auth/runtime release |
 | Backup publication | Integrity and atomic publication passed; temporary SQLite sidecars must also be absent | Same requirement plus a restore drill |
 
-Fixture-only timer activation may proceed only after the offline candidate is independently deployed,
-one dedicated Fixture proves the WorkItem auth binding without exposing its contents, the backup
-sidecar fix is live-verified, temporary administrative access is removed, and preflight plus a
-repeated sweep are idle. It does not satisfy the higher-value column.
+Fixture-only timer activation completed only after the auth candidate was independently deployed,
+Issue `#26` proved the WorkItem auth binding without exposing its contents, the backup sidecar fix
+was live-verified, temporary administrative access was removed, and preflight plus repeated sweeps
+were idle. It does not satisfy the higher-value column.
 
 Rollback keeps the Dispatcher timer disabled, stops the rootless user daemon, restores the previous
 Runner release/config/account binding, and uses read-only STATUS reconciliation. Preserve every
