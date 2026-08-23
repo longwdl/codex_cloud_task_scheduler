@@ -681,6 +681,12 @@ def docker_image_assets_from_json(
             or labels.get("org.opencontainers.image.title") != _RUNNER_IMAGE_TITLE
         ):
             continue
+        repo_digests = tuple(sorted(set(payload.get("RepoDigests") or ())))
+        repo_tags = tuple(sorted(set(payload.get("RepoTags") or ())))
+        if not repo_digests and not repo_tags:
+            # Build intermediates can inherit final-image labels, but Docker gives
+            # them no stable reference suitable for an exact deletion receipt.
+            continue
         source_commit = labels.get("org.opencontainers.image.revision")
         provenance_kind = "oci_revision"
         if not isinstance(source_commit, str):
@@ -700,8 +706,8 @@ def docker_image_assets_from_json(
         assets.append(
             DockerImageAsset(
                 image_id=image_id,
-                repo_digests=tuple(sorted(set(payload.get("RepoDigests") or ()))),
-                repo_tags=tuple(sorted(set(payload.get("RepoTags") or ()))),
+                repo_digests=repo_digests,
+                repo_tags=repo_tags,
                 source_commit=source_commit,
                 provenance_kind=provenance_kind,
                 size_bytes=size,

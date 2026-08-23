@@ -260,6 +260,43 @@ class RunnerAssetReclamationTests(unittest.TestCase):
 
         self.assertEqual(900, assets[0].unique_size_bytes)
 
+    def test_docker_parser_ignores_unaddressable_labeled_build_intermediate(
+        self,
+    ) -> None:
+        intermediate_id = "sha256:" + "a" * 64
+        assets = docker_image_assets_from_json(
+            inspections=(
+                {
+                    "Id": intermediate_id,
+                    "RepoDigests": [],
+                    "RepoTags": [],
+                    "Size": 1000,
+                    "Config": {
+                        "Labels": {
+                            "org.opencontainers.image.source": (
+                                "https://github.com/longwdl/codex_cloud_task_scheduler"
+                            ),
+                            "org.opencontainers.image.title": (
+                                "codex-cloud-task-scheduler-runner"
+                            ),
+                        }
+                    },
+                },
+            ),
+            disk_usage={
+                "Images": [
+                    {
+                        "ID": "a" * 12,
+                        "UniqueSize": "900B",
+                        "Containers": "0",
+                    }
+                ]
+            },
+            provenance={},
+        )
+
+        self.assertEqual((), assets)
+
 
 if __name__ == "__main__":
     unittest.main()
