@@ -35,6 +35,7 @@ class ReleaseDeploymentTests(unittest.TestCase):
         self.assertIn('"timers_started":false', text)
         self.assertIn('"requires_manual_sweep":true', text)
         self.assertNotIn("eval ", text)
+        self.assertNotIn("release'/.'", text)
         self.assertNotIn("--force", text)
 
     def test_release_tool_rejects_unstructured_invocations_before_sudo(self) -> None:
