@@ -180,9 +180,11 @@ starting the timers.
 Before that first sweep only, `--rollback --commit <commit> --apply` may restore the recorded links,
 units, and optional configuration. It rejects rollback if a Control timer/service is active, the
 Dispatcher `InvocationID` changed, either current link drifted, or the installed configuration no
-longer has the recorded candidate digest. After any sweep begins, external state or schema may have
-changed and automatic binary-only rollback is forbidden; use the matching database backup and the
-documented recovery-first rollback instead.
+longer has the recorded candidate digest. The rollback-bound `InvocationID` is sampled only after
+all timers are stopped, active services have finished naturally, and both host locks have been
+acquired; sampling it before quiescence creates a false post-activation drift window. After any
+sweep begins, external state or schema may have changed and automatic binary-only rollback is
+forbidden; use the matching database backup and the documented recovery-first rollback instead.
 
 Treat receipt states as operational state, not progress text:
 
