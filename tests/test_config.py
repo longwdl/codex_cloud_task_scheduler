@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from codex_dispatcher.config import load_config
@@ -50,6 +51,8 @@ runner_root = "/srv/codex-runner/work-items"
 connect_timeout_seconds = 10
 operation_timeout_seconds = 3900
 completed_retention_seconds = 604800
+terminal_branch_retention_seconds = 2592000
+terminal_branch_retention_cutover_at = "2026-08-23T19:29:16.047801Z"
 '''
 
 SLACK_RUNTIME = '''
@@ -154,6 +157,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual("/srv/codex-runner/work-items", runtime.runner_root)
         self.assertIsNone(runtime.assh_proxy_path)
         self.assertEqual(604800, runtime.completed_retention_seconds)
+        self.assertEqual(2592000, runtime.terminal_branch_retention_seconds)
+        self.assertEqual(
+            datetime(2026, 8, 23, 19, 29, 16, 47801, tzinfo=timezone.utc),
+            runtime.terminal_branch_retention_cutover_at,
+        )
 
         without_retention = self._load(
             (configured + SSH_RUNTIME).replace(
@@ -162,6 +170,17 @@ class ConfigTests(unittest.TestCase):
         ).ssh_runtime
         assert without_retention is not None
         self.assertIsNone(without_retention.completed_retention_seconds)
+        without_branch_retention = self._load(
+            (configured + SSH_RUNTIME)
+            .replace("terminal_branch_retention_seconds = 2592000\n", "")
+            .replace(
+                'terminal_branch_retention_cutover_at = "2026-08-23T19:29:16.047801Z"\n',
+                "",
+            )
+        ).ssh_runtime
+        assert without_branch_retention is not None
+        self.assertIsNone(without_branch_retention.terminal_branch_retention_seconds)
+        self.assertIsNone(without_branch_retention.terminal_branch_retention_cutover_at)
         with self.assertRaisesRegex(ValueError, "positive integer"):
             self._load(
                 (configured + SSH_RUNTIME).replace(
@@ -174,6 +193,19 @@ class ConfigTests(unittest.TestCase):
                 (configured + SSH_RUNTIME).replace(
                     "completed_retention_seconds = 604800",
                     "completed_retention_seconds = 9999999999",
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "requires"):
+            self._load(
+                (configured + SSH_RUNTIME).replace(
+                    "terminal_branch_retention_seconds = 2592000\n", ""
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "RFC 3339 UTC"):
+            self._load(
+                (configured + SSH_RUNTIME).replace(
+                    "2026-08-23T19:29:16.047801Z",
+                    "2026-08-23T20:29:16+01:00",
                 )
             )
 

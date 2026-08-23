@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import tomllib
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -66,6 +67,7 @@ class SshRuntimeConfig:
     assh_home: Path | None = None
     completed_retention_seconds: int | None = None
     terminal_branch_retention_seconds: int | None = None
+    terminal_branch_retention_cutover_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +139,22 @@ def _retention_seconds(value: Any, path: str) -> int:
     if parsed > 10 * 366 * 24 * 60 * 60:
         raise ValueError(f"{path} must not exceed ten years")
     return parsed
+
+
+def _utc_timestamp(value: Any, path: str) -> datetime:
+    raw = _string(value, path)
+    if re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)",
+        raw,
+    ) is None:
+        raise ValueError(f"{path} must be an RFC 3339 UTC timestamp string")
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{path} must be an RFC 3339 UTC timestamp string") from exc
+    if parsed.utcoffset() != timedelta(0):
+        raise ValueError(f"{path} must be an RFC 3339 UTC timestamp string")
+    return parsed.astimezone(timezone.utc)
 
 
 def _terminal_scan_interval(value: Any, path: str) -> int:
@@ -377,6 +395,7 @@ def _parse_ssh_runtime(value: Any) -> SshRuntimeConfig:
             "assh_home",
             "completed_retention_seconds",
             "terminal_branch_retention_seconds",
+            "terminal_branch_retention_cutover_at",
         }
     )
     unknown = set(table) - required - optional
@@ -388,6 +407,14 @@ def _parse_ssh_runtime(value: Any) -> SshRuntimeConfig:
     if missing:
         raise ValueError(
             f"ssh_runtime is missing required field(s): {', '.join(sorted(missing))}"
+        )
+    if (
+        "terminal_branch_retention_cutover_at" in table
+        and "terminal_branch_retention_seconds" not in table
+    ):
+        raise ValueError(
+            "ssh_runtime.terminal_branch_retention_cutover_at requires "
+            "ssh_runtime.terminal_branch_retention_seconds"
         )
     proxy_present = "assh_proxy_path" in table
     home_present = "assh_home" in table
@@ -463,6 +490,14 @@ def _parse_ssh_runtime(value: Any) -> SshRuntimeConfig:
                 "ssh_runtime.terminal_branch_retention_seconds",
             )
             if "terminal_branch_retention_seconds" in table
+            else None
+        ),
+        terminal_branch_retention_cutover_at=(
+            _utc_timestamp(
+                table["terminal_branch_retention_cutover_at"],
+                "ssh_runtime.terminal_branch_retention_cutover_at",
+            )
+            if "terminal_branch_retention_cutover_at" in table
             else None
         ),
     )

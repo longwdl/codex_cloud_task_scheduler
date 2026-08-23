@@ -714,6 +714,11 @@ def _plan_terminal_branch_cleanup(
     )
     if retention_seconds is None:
         return None
+    cutover_at = (
+        None
+        if fixture_target is not None or runtime is None
+        else getattr(runtime, "terminal_branch_retention_cutover_at", None)
+    )
     for work_item in store.list_work_items():
         if (
             fixture_target is not None
@@ -740,6 +745,8 @@ def _plan_terminal_branch_cleanup(
             continue
         terminal_at = _terminal_runner_evidence_at(store, work_item)
         if terminal_at is None:
+            continue
+        if cutover_at is not None and terminal_at < cutover_at:
             continue
         eligible = terminal_at + timedelta(
             seconds=retention_seconds

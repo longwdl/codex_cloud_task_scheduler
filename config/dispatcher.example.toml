@@ -35,6 +35,9 @@ completed_retention_seconds = 604800
 # Terminal Issues remain OPEN indefinitely as the durable audit entry point.
 # Only exact terminal task branches become deletion candidates after this delay.
 terminal_branch_retention_seconds = 2592000
+# Optional rollout boundary. When present, terminal evidence older than this
+# quoted RFC 3339 UTC timestamp is never selected by configured branch retention.
+# terminal_branch_retention_cutover_at = "2026-08-23T19:29:16.047801Z"
 
 # Protocol v2 session generations are disabled when this table is absent.
 # Keep it commented until the matching Control Host and Runner v2 runtime wiring

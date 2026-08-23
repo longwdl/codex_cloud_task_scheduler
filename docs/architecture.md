@@ -432,6 +432,12 @@ while the per-WorkItem `repo/`, `runner-state/`, generation homes, and auth copy
 Runner-wide policy, tools, shared auth seed, and Control evidence are never part of this deletion.
 `blocked`, `waiting_input`, or `review` WorkItems are not eligible unless a trusted disposition has
 made them terminal. Active, dirty, moved-HEAD, or externally ambiguous WorkItems remain ineligible.
+Task-branch retention is separately configured by `terminal_branch_retention_seconds`. Its optional
+`terminal_branch_retention_cutover_at` is an inclusive UTC rollout boundary over the immutable
+Runner terminal-evidence time: evidence before the boundary is skipped, while evidence at or after
+it remains eligible after the configured delay. This prevents a first enablement or temporary
+retention reduction from silently sweeping legacy branches; it does not weaken the exact Issue,
+Pull Request, HEAD, deletion-receipt, or absence-readback gates.
 If registry, workspace, image, and tombstone were already removed outside the protocol, normal
 archive never guesses success. An explicitly applied `ssh-reconcile-absence` operation first
 persists the normal ARCHIVE request, then sends protocol-v2 `PROVE_ABSENCE` under both Control and

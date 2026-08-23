@@ -396,10 +396,31 @@ class SshRecoveryTests(unittest.TestCase):
             ssh_runtime=SimpleNamespace(
                 completed_retention_seconds=None,
                 terminal_branch_retention_seconds=3600,
+                terminal_branch_retention_cutover_at=datetime(
+                    2026, 8, 20, 0, 0, 2, tzinfo=timezone.utc
+                ),
             ),
         )
         self.tracker.branches[(completed.repository, completed.task_branch)] = "d" * 40
 
+        before_cutover = plan_ssh_recovery(
+            configured,
+            self.store,
+            self.tracker,
+            now=datetime(2026, 8, 21, tzinfo=timezone.utc),
+        )
+        self.assertIs(SshRecoveryAction.IDLE, before_cutover.action)
+
+        configured = replace(
+            configured,
+            ssh_runtime=SimpleNamespace(
+                completed_retention_seconds=None,
+                terminal_branch_retention_seconds=3600,
+                terminal_branch_retention_cutover_at=datetime(
+                    2026, 8, 20, 0, 0, 1, tzinfo=timezone.utc
+                ),
+            ),
+        )
         planned = plan_ssh_recovery(
             configured,
             self.store,

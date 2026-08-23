@@ -230,6 +230,11 @@ merged/closed PR identity, immutable Runner evidence, and exact branch HEAD; it 
 deletion receipt before the GitHub write and confirms branch absence afterward. A lost write receipt
 is reconciled as absent on the next sweep. A changed HEAD or identity blocks cleanup and is surfaced
 by lifecycle health. Restoring a deleted branch means pushing only the persisted exact terminal SHA.
+An optional quoted RFC 3339 UTC `ssh_runtime.terminal_branch_retention_cutover_at` excludes WorkItems
+whose terminal Runner evidence predates the boundary. Use it when first enabling or temporarily
+shortening retention so a configuration rollout cannot make historical branches eligible at once.
+It requires `terminal_branch_retention_seconds`; removing it deliberately restores the unbounded
+historical scan.
 
 The health service also sends a strict protocol-v2 `capacity` read to the forced Runner endpoint.
 It reports `runner_capacity_unavailable`, `runner_turn_capacity_low`, or
