@@ -96,6 +96,10 @@ class ReleaseDeploymentTests(unittest.TestCase):
         self.assertIn('/var/tmp/codex-dispatcher-config-$commit.toml', text)
         self.assertNotIn('"PYTHONPATH=$previous_control/src:$previous_control"', text)
         self.assertIn("tomllib.loads", text)
+        self.assertIn(
+            "/usr/bin/sudo -n /opt/codex-python/current/bin/python3 -P -s -c",
+            text,
+        )
         self.assertIn('"PYTHONPATH=$control_release/src:$control_release"', text)
         self.assertLess(
             text.index("record_phase config_validate"),

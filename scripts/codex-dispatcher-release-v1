@@ -406,7 +406,7 @@ if [ "$seen_config" -eq 1 ]; then
     # The active release cannot semantically validate forward-only configuration
     # fields. Plan proves safe bytes and TOML syntax; apply performs strict
     # validation with the extracted candidate before either live symlink moves.
-    /usr/bin/sudo -n /usr/bin/python3 -P -s -c \
+    /usr/bin/sudo -n /opt/codex-python/current/bin/python3 -P -s -c \
         'import pathlib, sys, tomllib; tomllib.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))' \
         "$candidate_config"
 fi
