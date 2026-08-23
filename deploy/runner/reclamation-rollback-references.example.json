@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "kind": "runner_reclamation_rollback_references",
+  "current_release_commit": "REPLACE_WITH_40_LOWERCASE_HEX",
+  "protected_release_commits": [
+    "REPLACE_WITH_CURRENT_40_LOWERCASE_HEX",
+    "REPLACE_WITH_PREVIOUS_40_LOWERCASE_HEX"
+  ],
+  "protected_image_refs": [
+    "ghcr.io/longwdl/codex-cloud-task-scheduler-runner@sha256:REPLACE_WITH_64_LOWERCASE_HEX"
+  ]
+}

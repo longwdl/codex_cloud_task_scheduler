@@ -123,6 +123,7 @@ class RunnerImageTests(unittest.TestCase):
             "--security-opt=no-new-privileges=true",
             "--pull=never",
             "deploy/runner/image/Dockerfile",
+            "--label=org.opencontainers.image.revision=$GITHUB_SHA",
             "node -p '\\''require(\"/usr/local/lib/node_modules/npm/",
         ):
             self.assertIn(required, workflow)
@@ -149,6 +150,7 @@ class RunnerImageTests(unittest.TestCase):
             "persist-credentials: false",
             "ghcr.io/longwdl/codex-cloud-task-scheduler-runner",
             'image_ref="$IMAGE_REPOSITORY:sha-$ACTUAL_COMMIT"',
+            '--label="org.opencontainers.image.revision=$ACTUAL_COMMIT"',
             "GHCR_TOKEN: ${{ github.token }}",
             "--password-stdin",
             'docker push "$image_ref"',

@@ -223,6 +223,23 @@ class SlackWebApiPublisher:
                 "Slack permalink conflicts with the posted message"
             ) from exc
 
+    def verify_receipt(self, receipt: SlackDeliveryReceipt) -> SlackDeliveryReceipt:
+        """Read back one exact delivered message without creating or changing Slack state."""
+        if not isinstance(receipt, SlackDeliveryReceipt):
+            raise TypeError("receipt must be a SlackDeliveryReceipt")
+        result = self._get_permalink(
+            channel_id=receipt.channel_id,
+            message_ts=receipt.message_ts,
+        )
+        if (
+            result.get("channel") != receipt.channel_id
+            or result.get("permalink") != receipt.permalink
+        ):
+            raise SlackPublishAmbiguous(
+                "Slack receipt read-back conflicts with durable state"
+            )
+        return receipt
+
     def _post_message(
         self, report: SlackReport | SlackOutboundMessage
     ) -> dict[str, object]:

@@ -5,6 +5,7 @@ import unittest
 from collections.abc import Mapping
 
 from codex_dispatcher.slack_reporting import (
+    SlackDeliveryReceipt,
     SlackOutboundMessage,
     SlackReport,
     SlackReportKind,
@@ -83,6 +84,37 @@ def _post_success(*, message_ts: str, thread_ts: str | None = None) -> dict[str,
 
 
 class SlackWebApiPublisherTests(unittest.TestCase):
+    def test_receipt_readback_is_get_only_and_requires_exact_permalink(self) -> None:
+        permalink = (
+            f"https://fixture.slack.com/archives/{CHANNEL}/"
+            f"p{ROOT_TS.replace('.', '')}"
+        )
+        transport = _ScriptedTransport(
+            [
+                (
+                    200,
+                    {"ok": True, "channel": CHANNEL, "permalink": permalink},
+                    None,
+                )
+            ]
+        )
+        publisher = SlackWebApiPublisher(
+            bot_token=TOKEN,
+            timeout_seconds=10,
+            transport=transport,
+        )
+        receipt = SlackDeliveryReceipt(
+            f"slack:{WORK_ITEM}:root",
+            CHANNEL,
+            ROOT_TS,
+            ROOT_TS,
+            permalink,
+        )
+
+        self.assertEqual(receipt, publisher.verify_receipt(receipt))
+        self.assertEqual("GET", transport.calls[0]["method"])
+        self.assertIsNone(transport.calls[0]["body"])
+
     def test_root_publish_uses_exact_safe_requests_and_returns_receipt(self) -> None:
         report = _root_report()
         permalink = (

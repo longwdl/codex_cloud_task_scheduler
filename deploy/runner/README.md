@@ -23,9 +23,14 @@ Install immutable inputs as root-owned and non-group/world-writable:
 /srv/codex-runner/tools/codex/0.147.0/bin/codex-code-mode-host root:root 0755
 /srv/codex-runner/bin/                    root:root             0755
 /srv/codex-runner/bin/codex-runner-v1     root:root             0755
+/srv/codex-runner/bin/codex-runner-maintenance-v1 root:root     0755
 /srv/codex-runner/etc/                    root:codex-runner     0750
 /srv/codex-runner/etc/config.json         root:codex-runner     0640
 /srv/codex-runner/etc/agent-result.schema.json root:root        0644
+/srv/codex-runner/etc/image-provenance.json root:root           0600
+/srv/codex-runner/etc/reclamation-rollback-references.json root:root 0600
+/srv/codex-runner/reclamation-plans/      root:root             0700
+/srv/codex-runner/reclamation-receipts/   root:root             0700
 /etc/ssh/authorized_keys/                 root:root             0755
 /etc/ssh/authorized_keys/codex-runner     root:codex-runner     0640
 /etc/ssh/sshd_config.d/60-codex-runner.conf root:root           0644
@@ -184,6 +189,12 @@ journalctl -u codex-runner-capacity.service -n 20
 Legacy directories are eligible only when the exact registry/workspace exists and the disk
 classifier proves final, provisioning-staging, archive-staging, and mount state contain no image.
 The v2 tombstone binds `bounded_image` or `legacy_directory`; retries may not switch kind.
+
+Host-wide old release/image reclamation is a separate root-only workflow. It does not alter
+per-WorkItem archive receipts and never infers targets from age, tags, or free-space pressure. Use
+the exact inventory, recheck, and permanent-receipt sequence in
+[`docs/schema18-disaster-recovery-and-runner-reclamation.md`](../../docs/schema18-disaster-recovery-and-runner-reclamation.md).
+Never use a Docker prune command for this purpose.
 
 If old state was already manually removed, ordinary `ARCHIVE` must continue to fail closed. Schema
 13 keeps a separate absence-reconciliation ledger. After stopping the dispatcher timer, an operator

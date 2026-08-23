@@ -74,6 +74,10 @@ Keep the current `codex-universal` digest throughout credential-free probes, the
 Fixture Turn, STATUS/recovery, SQLite/GitHub/Runner/Slack/Actions readback, and repeated idle sweep.
 Only after those checks pass may an explicitly approved `docker image rm` target the exact old
 RepoDigest. Never use `docker system prune`, `docker image prune`, a name pattern, or a bulk delete.
+The root-only maintenance workflow additionally protects the configured digest, every active
+WorkItem session digest, and every rollback-receipt digest; it writes a permanent intent receipt
+before exact deletion. See
+[`docs/schema18-disaster-recovery-and-runner-reclamation.md`](../../../docs/schema18-disaster-recovery-and-runner-reclamation.md).
 
 Projects that require native npm modules or Python packages without compatible wheels must fail
 closed. Add a narrowly reviewed build-tool variant later instead of installing compilers at runtime

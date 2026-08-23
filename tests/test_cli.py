@@ -284,6 +284,88 @@ class CliTests(unittest.TestCase):
         self.assertTrue(payload["temporary_restore_removed"])
         drill.assert_called_once_with(database, database.parent / "backups")
 
+    def test_schema18_disaster_recovery_requires_gate_and_emits_receipt(self) -> None:
+        with self.assertRaises(SystemExit):
+            main(
+                [
+                    "schema18-disaster-recovery",
+                    "--config",
+                    "/etc/codex-dispatcher/config.toml",
+                    "--recovery-root",
+                    "/var/lib/codex-dispatcher/disaster-recovery/x",
+                    "--control-release",
+                    "/opt/codex-dispatcher/releases/" + "a" * 40,
+                    "--release-receipt",
+                    "/var/lib/codex-dispatcher/recovery-input/receipt.json",
+                    "--runner-snapshot",
+                    "/var/lib/codex-dispatcher/recovery-input/runner.json",
+                ]
+            )
+
+        database = Path("/var/lib/codex-dispatcher/state.db")
+        base = make_config()
+        config = replace(
+            base,
+            scheduler=replace(base.scheduler, database_path=database),
+            ssh_runtime=SimpleNamespace(
+                gh_path=Path("/usr/bin/gh"), operation_timeout_seconds=30
+            ),
+            slack_runtime=None,
+        )
+        result = SimpleNamespace(
+            receipt_path=Path("/var/lib/codex-dispatcher/disaster-recovery/x/receipt.json"),
+            to_mapping=lambda: {
+                "schema_version": 1,
+                "kind": "schema18_disaster_recovery_drill",
+                "status": "passed",
+                "release_commit": "a" * 40,
+                "rto_milliseconds": 1234,
+            },
+        )
+        stdout = io.StringIO()
+        with (
+            patch.dict(
+                "os.environ", {"GITHUB_TOKEN": "github_pat_dr_fixture"}, clear=True
+            ),
+            patch(
+                "codex_dispatcher.ssh_runtime.load_protected_ssh_config",
+                return_value=config,
+            ),
+            patch("codex_dispatcher.ssh_runtime.validate_runtime_state_path"),
+            patch(
+                "codex_dispatcher.disaster_recovery.load_runner_recovery_snapshot",
+                return_value={"kind": "runner_recovery_snapshot"},
+            ),
+            patch(
+                "codex_dispatcher.disaster_recovery.run_schema18_disaster_recovery_drill",
+                return_value=result,
+            ) as drill,
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = main(
+                [
+                    "schema18-disaster-recovery",
+                    "--config",
+                    "/etc/codex-dispatcher/config.toml",
+                    "--recovery-root",
+                    "/var/lib/codex-dispatcher/disaster-recovery/x",
+                    "--control-release",
+                    "/opt/codex-dispatcher/releases/" + "a" * 40,
+                    "--release-receipt",
+                    "/var/lib/codex-dispatcher/recovery-input/receipt.json",
+                    "--runner-snapshot",
+                    "/var/lib/codex-dispatcher/recovery-input/runner.json",
+                    "--execute-isolated",
+                    "--json",
+                ]
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(0, exit_code)
+        self.assertTrue(payload["schema18_disaster_recovery"])
+        self.assertEqual(1234, payload["rto_milliseconds"])
+        drill.assert_called_once()
+
     def test_run_once_requires_explicit_dry_run(self) -> None:
         with self.assertRaises(SystemExit):
             main(["run-once", "--config", "config.toml"])

@@ -97,6 +97,25 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Emit machine-readable output."
     )
 
+    disaster_recovery = subparsers.add_parser(
+        "schema18-disaster-recovery",
+        help="Restore schema 18 in isolation and reconcile exact external receipts.",
+    )
+    disaster_recovery.add_argument("--config", required=True, type=Path)
+    disaster_recovery.add_argument("--recovery-root", required=True, type=Path)
+    disaster_recovery.add_argument("--control-release", required=True, type=Path)
+    disaster_recovery.add_argument("--release-receipt", required=True, type=Path)
+    disaster_recovery.add_argument("--runner-snapshot", required=True, type=Path)
+    disaster_recovery.add_argument(
+        "--execute-isolated",
+        action="store_true",
+        required=True,
+        help="Required acknowledgement of local isolated writes and provider read-backs.",
+    )
+    disaster_recovery.add_argument(
+        "--json", action="store_true", help="Emit machine-readable output."
+    )
+
     run_once = subparsers.add_parser(
         "run-once", help="Plan one scheduler sweep without external writes."
     )
@@ -571,6 +590,82 @@ def _slack_bot_token() -> str | None:
     return None
 
 
+def _schema18_disaster_recovery(
+    *,
+    config_path: Path,
+    recovery_root: Path,
+    control_release: Path,
+    release_receipt: Path,
+    runner_snapshot_path: Path,
+) -> tuple[int, dict[str, object]]:
+    from codex_dispatcher.redaction import redact_text
+
+    github_token = _github_token()
+    slack_token = _slack_bot_token()
+    secrets = tuple(
+        value for value in (github_token, slack_token) if value is not None
+    )
+    if github_token is None:
+        return 1, {
+            "ok": False,
+            "schema18_disaster_recovery": True,
+            "error": "a recognized explicit GitHub token is required",
+        }
+    try:
+        from codex_dispatcher.disaster_recovery import (
+            load_runner_recovery_snapshot,
+            run_schema18_disaster_recovery_drill,
+        )
+        from codex_dispatcher.slack_web_api import SlackWebApiPublisher
+        from codex_dispatcher.ssh_runtime import (
+            load_protected_ssh_config,
+            validate_runtime_state_path,
+        )
+        from codex_dispatcher.trackers.github_cli import GitHubCliTracker
+
+        config = load_protected_ssh_config(config_path)
+        validate_runtime_state_path(config.scheduler.database_path)
+        runtime = config.ssh_runtime
+        if runtime is None:
+            raise RuntimeError("schema-18 disaster recovery requires ssh_runtime")
+        slack_verifier = None
+        if config.slack_runtime is not None:
+            if slack_token is None:
+                raise RuntimeError("configured Slack runtime requires an explicit bot token")
+            slack_verifier = SlackWebApiPublisher(
+                bot_token=slack_token,
+                timeout_seconds=config.slack_runtime.request_timeout_seconds,
+            )
+        result = run_schema18_disaster_recovery_drill(
+            database_path=config.scheduler.database_path,
+            backup_directory=config.scheduler.database_path.parent / "backups",
+            recovery_root=recovery_root,
+            control_release_path=control_release,
+            control_config_path=config_path,
+            release_receipt_path=release_receipt,
+            runner_snapshot=load_runner_recovery_snapshot(runner_snapshot_path),
+            tracker=GitHubCliTracker(
+                gh_path=runtime.gh_path,
+                token=github_token,
+                timeout_seconds=runtime.operation_timeout_seconds,
+            ),
+            slack_verifier=slack_verifier,
+        )
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        return 1, {
+            "ok": False,
+            "schema18_disaster_recovery": True,
+            "error": redact_text(str(exc), secrets),
+        }
+    payload = result.to_mapping()
+    payload.update(
+        ok=True,
+        schema18_disaster_recovery=True,
+        receipt_path=str(result.receipt_path),
+    )
+    return 0, payload
+
+
 def _ssh_run_once(config_path: Path) -> tuple[int, dict[str, object]]:
     if os.environ.get("CODEX_DISPATCHER_ENABLE_SSH_WRITES") != "1":
         return 1, {
@@ -937,6 +1032,10 @@ def _emit(payload: dict[str, object], as_json: bool) -> None:
         print(f"integrity: {payload.get('integrity')}")
         print(f"foreign_key_violations: {payload.get('foreign_key_violations')}")
         print(f"source_age_seconds: {payload.get('source_age_seconds')}")
+    if payload.get("schema18_disaster_recovery") is True and payload.get("ok") is True:
+        print(f"receipt_path: {payload.get('receipt_path')}")
+        print(f"rto_milliseconds: {payload.get('rto_milliseconds')}")
+        print(f"release_commit: {payload.get('release_commit')}")
     if payload.get("runner_capacity") is True:
         print(f"capacity_bytes: {payload.get('capacity_bytes')}")
         print(f"available_bytes: {payload.get('available_bytes')}")
@@ -984,6 +1083,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return code
     if args.command == "state-restore-drill":
         code, payload = _state_restore_drill(args.config)
+        _emit(payload, args.json)
+        return code
+    if args.command == "schema18-disaster-recovery":
+        code, payload = _schema18_disaster_recovery(
+            config_path=args.config,
+            recovery_root=args.recovery_root,
+            control_release=args.control_release,
+            release_receipt=args.release_receipt,
+            runner_snapshot_path=args.runner_snapshot,
+        )
         _emit(payload, args.json)
         return code
     if args.command == "run-once":

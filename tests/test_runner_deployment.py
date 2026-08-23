@@ -11,6 +11,7 @@ DOCUMENTATION = DEPLOYMENT / "README.md"
 DOCKER_DOCUMENTATION = DEPLOYMENT / "DOCKER.md"
 WRAPPER = ROOT / "scripts" / "codex-runner-v1"
 CAPACITY_WRAPPER = ROOT / "scripts" / "codex-runner-capacity-v1"
+MAINTENANCE_WRAPPER = ROOT / "scripts" / "codex-runner-maintenance-v1"
 CAPACITY_SERVICE = DEPLOYMENT / "codex-runner-capacity.service"
 CAPACITY_TIMER = DEPLOYMENT / "codex-runner-capacity.timer"
 
@@ -112,6 +113,19 @@ class RunnerDeploymentTests(unittest.TestCase):
         self.assertIn("OnBootSec=5min", timer)
         self.assertIn("OnUnitInactiveSec=15min", timer)
         self.assertIn("Persistent=false", timer)
+
+    def test_maintenance_wrapper_accepts_only_exact_admin_command_shapes(self) -> None:
+        wrapper = MAINTENANCE_WRAPPER.read_text(encoding="utf-8")
+
+        self.assertNotEqual(0, MAINTENANCE_WRAPPER.stat().st_mode & 0o111)
+        self.assertIn("root is required", wrapper)
+        self.assertIn("2:reclamation-plan", wrapper)
+        self.assertIn("3:recovery-snapshot", wrapper)
+        self.assertIn("3:reclamation-recheck", wrapper)
+        self.assertIn("4:reclamation-apply", wrapper)
+        self.assertIn("codex_dispatcher.runner_maintenance", wrapper)
+        self.assertNotIn("docker image prune", wrapper)
+        self.assertNotIn("docker system prune", wrapper)
 
 
 if __name__ == "__main__":

@@ -510,6 +510,26 @@ class StateStore:
         ).fetchone()
         return self._row_to_work_item_archive(row) if row is not None else None
 
+    def list_work_item_archives(self) -> tuple[WorkItemArchive, ...]:
+        """Return every durable Runner archive receipt in stable identity order."""
+        return tuple(
+            self._row_to_work_item_archive(row)
+            for row in self._connection.execute(
+                "SELECT * FROM work_item_archives ORDER BY work_item_id"
+            )
+        )
+
+    def list_work_item_absence_reconciliations(
+        self,
+    ) -> tuple[WorkItemAbsenceReconciliation, ...]:
+        """Return permanent Runner absence receipts in stable identity order."""
+        return tuple(
+            self._row_to_work_item_absence_reconciliation(row)
+            for row in self._connection.execute(
+                "SELECT * FROM work_item_absence_reconciliations ORDER BY work_item_id"
+            )
+        )
+
     def get_work_item_disposition(
         self, work_item_id: str
     ) -> WorkItemDisposition | None:
@@ -3391,6 +3411,15 @@ class StateStore:
             (deduplication_key,),
         ).fetchone()
         return self._row_to_slack_delivery(row) if row is not None else None
+
+    def list_slack_deliveries(self) -> tuple[SlackDeliveryRecord, ...]:
+        """Return the complete bounded Slack outbox in stable provider-key order."""
+        return tuple(
+            self._row_to_slack_delivery(row)
+            for row in self._connection.execute(
+                "SELECT * FROM slack_deliveries ORDER BY deduplication_key"
+            )
+        )
 
     def complete_slack_delivery(
         self,

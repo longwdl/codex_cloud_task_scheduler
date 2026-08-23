@@ -74,6 +74,11 @@ Fixture target is the remote Linux Codex CLI executor, and the implementation no
   never invokes Docker stop, kill, or remove;
 - permanent open terminal Issues and exact-evidence task-branch reclamation after an explicitly
   configured retention interval, with prepared/delete/absence receipts and health projection.
+- an isolated schema-18 disaster-recovery drill that restores the newest backup, validates the
+  exact two-host release receipt and Runner tombstones, reads back GitHub/Slack receipts, rebuilds
+  an empty Control application root, and records a scoped measured RTO without replacing live state;
+- exact Runner release/image inventory and two-stage reclamation with current/config/WorkItem/
+  rollback-reference protection, immutable plans, pre-delete reinspection, and permanent receipts;
 - a dedicated exact-target Fixture canary for terminal-branch delete receipt loss and absence
   reconciliation without lowering the runtime retention policy.
 
@@ -238,6 +243,7 @@ approved; they are not needed for the offline core.
 - [Development notes](docs/development.md)
 - [Architecture baseline](docs/architecture.md)
 - [Live fixture test evidence](docs/live-test-evidence.md)
+- [Schema-18 disaster recovery and Runner reclamation](docs/schema18-disaster-recovery-and-runner-reclamation.md)
 - [Linux Control Host system service](deploy/systemd/README.md)
 - [Rootless Fixture Control Host user service](deploy/systemd-user/README.md)
 - [Linux Runner production ownership and SSH boundary](deploy/runner/README.md)

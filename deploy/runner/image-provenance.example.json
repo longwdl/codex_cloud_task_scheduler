@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "kind": "runner_image_provenance",
+  "images": [
+    {
+      "identity": "sha256:REPLACE_WITH_64_LOWERCASE_HEX",
+      "source_commit": "REPLACE_WITH_40_LOWERCASE_HEX",
+      "provenance_kind": "publication_run"
+    },
+    {
+      "identity": "ghcr.io/longwdl/codex-cloud-task-scheduler-runner@sha256:REPLACE_WITH_64_LOWERCASE_HEX",
+      "source_commit": "REPLACE_WITH_40_LOWERCASE_HEX",
+      "provenance_kind": "tree_equivalent"
+    }
+  ]
+}

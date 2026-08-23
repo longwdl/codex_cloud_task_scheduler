@@ -30,6 +30,7 @@ jobs:
         run: >-
           docker build
           --platform=linux/amd64
+          --label=org.opencontainers.image.revision=$GITHUB_SHA
           --tag=codex-cloud-task-scheduler-runner:candidate
           --file=deploy/runner/image/Dockerfile
           deploy/runner/image
@@ -113,6 +114,7 @@ jobs:
           image_ref="$IMAGE_REPOSITORY:sha-$ACTUAL_COMMIT"
           docker build \
             --platform=linux/amd64 \
+            --label="org.opencontainers.image.revision=$ACTUAL_COMMIT" \
             --tag="$image_ref" \
             --file=deploy/runner/image/Dockerfile \
             deploy/runner/image

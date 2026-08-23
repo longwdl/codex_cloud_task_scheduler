@@ -686,7 +686,7 @@ record_phase validate_control
 /usr/bin/sudo -n /usr/bin/cp -a "$control_release"/. "$control_validation"/
 /usr/bin/sudo -n /usr/bin/chown -R codex-dispatcher:codex-dispatcher "$control_validation"
 /usr/bin/sudo -n -u codex-dispatcher /bin/sh -c \
-    'set -eu; umask 077; cd "$1"; PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:. /opt/codex-python/current/bin/python3 -P -s -m unittest discover -s tests -q; PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:. /opt/codex-python/current/bin/python3 -P -s -m compileall -q src tests; /bin/sh -n scripts/codex-dispatcher-v1 scripts/codex-dispatcher-health-v1 scripts/codex-dispatcher-backup-v1 scripts/codex-dispatcher-restore-drill-v1 scripts/codex-dispatcher-release-v1' \
+    'set -eu; umask 077; cd "$1"; PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:. /opt/codex-python/current/bin/python3 -P -s -m unittest discover -s tests -q; PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:. /opt/codex-python/current/bin/python3 -P -s -m compileall -q src tests; /bin/sh -n scripts/codex-dispatcher-v1 scripts/codex-dispatcher-health-v1 scripts/codex-dispatcher-backup-v1 scripts/codex-dispatcher-restore-drill-v1 scripts/codex-dispatcher-release-v1 scripts/codex-runner-maintenance-v1' \
     release-validation "$control_validation"
 
 record_phase validate_runner
@@ -751,7 +751,7 @@ for unit in $control_units; do
         "$control_release/deploy/systemd/$unit" "/etc/systemd/system/$unit"
 done
 /usr/bin/ssh -o BatchMode=yes codex-runner \
-    "/usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$runner_release/scripts/codex-runner-v1' /srv/codex-runner/bin/codex-runner-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$runner_release/scripts/codex-runner-capacity-v1' /srv/codex-runner/bin/codex-runner-capacity-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$runner_release/deploy/runner/codex-runner-capacity.service' /etc/systemd/system/codex-runner-capacity.service && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$runner_release/deploy/runner/codex-runner-capacity.timer' /etc/systemd/system/codex-runner-capacity.timer"
+    "/usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$runner_release/scripts/codex-runner-v1' /srv/codex-runner/bin/codex-runner-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$runner_release/scripts/codex-runner-capacity-v1' /srv/codex-runner/bin/codex-runner-capacity-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$runner_release/scripts/codex-runner-maintenance-v1' /srv/codex-runner/bin/codex-runner-maintenance-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$runner_release/deploy/runner/codex-runner-capacity.service' /etc/systemd/system/codex-runner-capacity.service && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$runner_release/deploy/runner/codex-runner-capacity.timer' /etc/systemd/system/codex-runner-capacity.timer"
 /usr/bin/sudo -n /usr/bin/systemctl daemon-reload
 /usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n /usr/bin/systemctl daemon-reload
 /usr/bin/sudo -n /usr/bin/systemd-analyze verify \
