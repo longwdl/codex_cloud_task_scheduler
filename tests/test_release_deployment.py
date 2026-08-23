@@ -22,6 +22,7 @@ class ReleaseDeploymentTests(unittest.TestCase):
         self.assertIn("tarfile.open", text)
         self.assertIn("member.isdir() or member.isfile()", text)
         self.assertIn("release-validation-", text)
+        self.assertIn("-m 0700 /run/codex-dispatcher", text)
         self.assertIn("PYTHONDONTWRITEBYTECODE=1", text)
         self.assertIn("umask 077; cd", text)
         self.assertIn("codex-runner", text)

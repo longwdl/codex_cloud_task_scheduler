@@ -145,6 +145,11 @@ for service in \
 do
     [ "$(/usr/bin/systemctl is-active "$service" || true)" = inactive ]
 done
+# RuntimeDirectory is ephemeral and may disappear when the oneshot Dispatcher
+# exits. Recreate the exact systemd-owned boundary before checking the lock;
+# never let flock create a root-owned lock file.
+/usr/bin/sudo -n /usr/bin/install -d \
+    -o codex-dispatcher -g codex-dispatcher -m 0700 /run/codex-dispatcher
 /usr/bin/sudo -n -u codex-dispatcher /usr/bin/flock -n /run/codex-dispatcher/dispatcher.lock /usr/bin/true
 /usr/bin/ssh -o BatchMode=yes codex-runner \
     /usr/bin/sudo -n -u codex-runner /usr/bin/flock -n /srv/codex-runner/run/active.lock /usr/bin/true
