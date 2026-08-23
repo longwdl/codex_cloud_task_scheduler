@@ -11,6 +11,7 @@ from codex_dispatcher.runner_protocol import (
     NEXT_PROTOCOL_VERSION,
     RunnerOperation,
     RunnerProtocolError,
+    agent_result_to_json,
     parse_agent_result,
 )
 from codex_dispatcher.runner_transport import (
@@ -44,11 +45,15 @@ def agent_result():
     return parse_agent_result(
         json.dumps(
             {
+                "schema_version": 2,
                 "status": "completed",
                 "summary": "Implemented",
+                "acceptance": [],
+                "remaining_work": [],
                 "needs_input": [],
                 "tests": [{"name": "unit", "status": "passed"}],
                 "changed_paths": ["src/main.py"],
+                "blocker_code": None,
                 "next_step": "Publish checkpoint",
             }
         )
@@ -102,18 +107,7 @@ class RunnerTransportContractTests(unittest.TestCase):
         self.assertEqual(ack, parse_runner_ack(ack.to_json()))
 
         result = agent_result()
-        result_json = json.dumps(
-            {
-                "changed_paths": ["src/main.py"],
-                "needs_input": [],
-                "next_step": "Publish checkpoint",
-                "status": "completed",
-                "summary": "Implemented",
-                "tests": [{"name": "unit", "status": "passed"}],
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        result_json = agent_result_to_json(result)
         reply = RunnerTurnReply(
             operation=RunnerOperation.START,
             work_item_id=WORK_ITEM,
@@ -169,18 +163,7 @@ class RunnerTransportContractTests(unittest.TestCase):
             "agent_policy_digest": POLICY_DIGEST,
         }
         result = agent_result()
-        result_json = json.dumps(
-            {
-                "changed_paths": ["src/main.py"],
-                "needs_input": [],
-                "next_step": "Publish checkpoint",
-                "status": "completed",
-                "summary": "Implemented",
-                "tests": [{"name": "unit", "status": "passed"}],
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        result_json = agent_result_to_json(result)
         replies = (
             RunnerTurnReply(
                 operation=RunnerOperation.STATUS,
@@ -232,13 +215,7 @@ class RunnerTransportContractTests(unittest.TestCase):
             "session_generation": 1,
             "agent_policy_digest": POLICY_DIGEST,
         }
-        result_json = json.dumps(
-            {
-                "changed_paths": ["src/main.py"], "needs_input": [],
-                "next_step": "Publish checkpoint", "status": "completed",
-                "summary": "Implemented", "tests": [{"name": "unit", "status": "passed"}],
-            }, sort_keys=True, separators=(",", ":")
-        )
+        result_json = agent_result_to_json(result)
         reply = RunnerTurnReply(
             operation=RunnerOperation.START, work_item_id=WORK_ITEM, turn_id=TURN,
             state=RunnerTurnRemoteState.FINISHED, session_id=SESSION, head_sha="c" * 40,

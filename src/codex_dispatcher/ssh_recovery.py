@@ -47,6 +47,7 @@ class SshRecoveryAction(StrEnum):
     RESUME_PUBLICATION = "resume_publication"
     RESUME_PREPARATION = "resume_preparation"
     START_CLAIMED_TURN = "start_claimed_turn"
+    START_AUTONOMOUS_TURN = "start_autonomous_turn"
     START_FRESH_FINAL_AUDIT = "start_fresh_final_audit"
     RECOVER_ORPHAN_CLAIM = "recover_orphan_claim"
     SYNC_TRACKER_STATE = "sync_tracker_state"
@@ -175,6 +176,30 @@ def plan_ssh_recovery(
         if error is not None:
             return _blocked(error, task=task, work_item=work_item)
         assert task is not None
+        followup = store.get_planned_work_item_followup(work_item.work_item_id)
+        if followup is not None:
+            source_turn = store.get_turn(followup.source_turn_id)
+            expected_head = work_item.last_published_sha or work_item.base_sha
+            if (
+                work_item.state is not WorkItemState.READY
+                or task.state is not TaskState.RUNNING
+                or source_turn is None
+                or source_turn.state
+                not in {TurnState.FINISHED, TurnState.BLOCKED}
+                or followup.head_sha != expected_head
+            ):
+                return _blocked(
+                    "planned_followup_state_conflict",
+                    task=task,
+                    work_item=work_item,
+                    turn=source_turn,
+                )
+            return SshRecoveryPlan(
+                SshRecoveryAction.START_AUTONOMOUS_TURN,
+                task,
+                work_item,
+                source_turn,
+            )
         if work_item.state is WorkItemState.RUNNING:
             return _blocked("running_work_item_has_no_active_turn", task=task, work_item=work_item)
         if task.state is not TaskState.DISPATCHING:
@@ -516,7 +541,11 @@ def _plan_fresh_final_audit(
             or gate is None
             or gate.status.value != "passed"
             or generation is None
-            or generation.role is not SessionGenerationRole.IMPLEMENTATION
+            or generation.role
+            not in {
+                SessionGenerationRole.IMPLEMENTATION,
+                SessionGenerationRole.CI_REPAIR,
+            }
         ):
             continue
         task = tracker.get_task(work_item.repository, str(work_item.issue_number))

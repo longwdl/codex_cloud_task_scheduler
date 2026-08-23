@@ -48,6 +48,7 @@ class FakeRunnerCall:
     session_generation_id: str | None = None
     session_generation: int | None = None
     agent_policy_digest: str | None = None
+    session_role: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +151,7 @@ class FakeSshRunnerTransport:
                 request.session_generation_id,
                 request.session_generation,
                 request.agent_policy_digest,
+                request.session_role,
             )
         )
 

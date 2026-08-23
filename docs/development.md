@@ -86,6 +86,11 @@ The environment-independent core now additionally contains:
 - a durable protocol-v2 completion gate that holds `completed` Turns at `published` until exact-HEAD
   configured Actions checks, structured acceptance predicates, and verified publication evidence
   reach a trusted verdict;
+- schema-19 immutable follow-up intents that recover Agent checkpoints, route only
+  code-attributable Actions `failure` conclusions into CI_REPAIR, and force Audit gaps through
+  Repair then a new fresh read-only Audit;
+- explicit repair, Audit, total-token, WorkItem-age, total-Turn, generation, and no-progress budgets
+  whose exhaustion is persisted before the Issue is blocked;
 - a configured fresh final-Audit generation with a role-bound prompt contract and crash-recoverable
   Implementation-to-Audit Handoff;
 - bounded context/compaction failure classification with Runner checkpoint evidence, atomic clean

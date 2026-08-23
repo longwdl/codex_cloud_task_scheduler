@@ -92,6 +92,10 @@ Turn
   issue_revision, included_comment_ids, issue_allowed_paths, prompt_sha256, input_head_sha
   started_at, finished_at, status
   output_sha256, output_head_sha, result_status, result_summary, error_code
+
+TurnFollowupIntent
+  source_turn_id, cause, target_role, exact_head_sha
+  canonical_context_sha256, lifecycle_state, target_generation_id, target_turn_id
 ```
 
 Only one turn may be active globally. A single dispatcher process and an operating-system startup
@@ -209,22 +213,36 @@ Older persisted v2 replies without the additive receipt remain readable for reco
 completed v2 Turn from the updated Runner emits one, including an empty receipt when Sol worked
 directly.
 
+A protocol-v2 AgentResult uses schema version 2 only; pre-launch result JSON is intentionally not
+parsed through a compatibility path. `checkpoint` means autonomous work remains, while
+`needs_input` is reserved for a human decision and `blocked` requires a machine blocker code. Every
+autonomous continuation is first persisted as an immutable `TurnFollowupIntent`; the next Turn must
+consume that intent atomically, so a Control Host crash cannot lose or duplicate the decision.
+
 A protocol-v2 `completed` result is only a completion candidate. After checkpoint publication, the
 Turn remains `published` and the WorkItem remains `running`. The Control Host then imports configured
 or recovers the single Draft PR before importing GitHub Actions runs, so repositories whose required
 checks are triggered by `pull_request` can produce exact-head evidence without prematurely moving the
 Issue to review. It imports only runs for the exact remote task-branch HEAD and combines them with
 the structured Issue acceptance predicates and complete publication ledger. Pending checks remain recoverable and are
-polled without replaying Codex or Publisher. A trusted failure or unverifiable/ambiguous identity
-blocks; only a passed durable gate atomically finishes the Turn and advances the WorkItem.
+polled without replaying Codex or Publisher. Only an exact completed Actions conclusion of
+`failure`, with no unrelated acceptance failure or unverifiable evidence, is classified as
+code-attributable and routed through a fresh `ci_repair` generation. Cancelled, timed-out, stale,
+startup, neutral, skipped, or otherwise ambiguous outcomes block. Only a passed durable gate
+atomically finishes the Turn and advances the WorkItem.
 
-When `rotate_before_final_audit=true`, a passed Implementation gate is not yet review. Recovery
+When `rotate_before_final_audit=true`, a passed Implementation or CI_REPAIR gate is not yet review. Recovery
 creates one new generation with role `audit`, a `completion_candidate` Handoff, fresh exact-HEAD CI
 evidence, and an explicit independent-audit prompt contract while the Issue remains `agent:running`.
-Only that planned Audit generation may accept the running Issue state; ordinary implementation
-planning still requires the claimed `agent:dispatching` state. The Audit may make bounded in-scope
-fixes, but its completed candidate must pass the same completion gate. Generation-budget exhaustion
-or ambiguous audit preparation blocks instead of degrading to an implementation-only review. If an
+Only planned Audit and durable follow-up generations may accept the running Issue state; ordinary
+implementation planning still requires the claimed `agent:dispatching` state. Audit is read-only:
+its prompt forbids mutation, the v2 Runner request carries the exact role, Docker bind-mounts the
+repository read-only, and the Runner rejects a moved HEAD, dirty worktree, or any reported changed
+path. A fixable Audit gap becomes an `audit_gap` intent for a
+fresh `ci_repair` generation; a successful repair must pass the completion gate and then enter a
+new fresh Audit. `audit:` acceptance predicates are deferred in implementation/repair generations
+and can pass only from the fresh Audit AgentResult receipt. Generation, repair, audit, total-Turn,
+token, wall-clock, and repeated-no-progress budgets block durably instead of looping. If an
 operator explicitly reactivates such a blocked WorkItem, the persisted passed gate routes the retry
 back into fresh-Audit preparation rather than resuming the implementation session.
 

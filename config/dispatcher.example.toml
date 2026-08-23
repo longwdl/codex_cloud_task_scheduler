@@ -53,6 +53,10 @@ terminal_branch_retention_seconds = 2592000
 # max_session_generations = 3
 # max_total_turns = 10
 # max_no_progress_turns = 2
+# max_repair_cycles = 3
+# max_audit_cycles = 3
+# max_total_tokens = 1000000
+# max_work_item_age_seconds = 604800
 
 # Do not uncomment this table until a controlled live fixture proves that the
 # target Slack app/workspace returns the original receipt for an exact retry.

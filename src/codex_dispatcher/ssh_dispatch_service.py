@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Iterable
 from uuid import uuid4
 
@@ -10,15 +11,27 @@ from codex_dispatcher.ci_evidence import CiEvidenceError, CiEvidenceImporter
 from codex_dispatcher.completion_gate import (
     CompletionGateStatus,
     build_completion_gate_snapshot,
+    repairable_ci_failures,
 )
 from codex_dispatcher.config import Config, RepositoryConfig
 from codex_dispatcher.git_bundle_verifier import GitBundleVerificationError
+from codex_dispatcher.followup_intents import (
+    FollowupCause,
+    TurnFollowupIntent,
+    build_agent_followup_intent,
+    build_ci_followup_intent,
+)
 from codex_dispatcher.git_publisher import (
     GitPublicationInterrupted,
     GitPublicationRejected,
 )
 from codex_dispatcher.publisher import PublicationError
-from codex_dispatcher.runner_protocol import RunnerProtocolError
+from codex_dispatcher.runner_protocol import (
+    AcceptanceAssertionStatus,
+    AgentResultStatus,
+    RunnerProtocolError,
+    agent_result_to_json,
+)
 from codex_dispatcher.runner_transport import (
     RunnerTransportInterrupted,
     RunnerTransportRejected,
@@ -200,8 +213,22 @@ class OfflineSshDispatchService:
         if work_item is None:
             raise SshDispatchPlanningError("Issue does not have a persisted WorkItem")
         turn_number = self._store.next_turn_number(work_item.work_item_id)
+        followup_intent = self._store.get_planned_work_item_followup(
+            work_item.work_item_id
+        )
         session_runtime = self._config.session_runtime
         if session_runtime is not None:
+            if followup_intent is not None:
+                budget_error = self._followup_budget_error(
+                    work_item,
+                    followup_intent=followup_intent,
+                )
+                if budget_error is not None:
+                    blocked, _ = self._store.exhaust_followup_intent(
+                        followup_intent.source_turn_id,
+                        error_code=budget_error,
+                    )
+                    raise AutonomyBudgetError(budget_error, blocked)
             generations = self._store.list_session_generations(work_item.work_item_id)
             if len(generations) >= session_runtime.max_session_generations and not any(
                 generation.is_live for generation in generations
@@ -226,7 +253,11 @@ class OfflineSshDispatchService:
                     )
                 generation = self._store.plan_session_generation(
                     work_item.work_item_id,
-                    role=SessionGenerationRole.IMPLEMENTATION,
+                    role=(
+                        followup_intent.target_role
+                        if followup_intent is not None
+                        else SessionGenerationRole.IMPLEMENTATION
+                    ),
                     policy_sha256=session_runtime.agent_policy_digest,
                     rotation_reason=(
                         PRE_SESSION_RETRY_ROTATION_REASON
@@ -328,6 +359,7 @@ class OfflineSshDispatchService:
                         comments=comments,
                         delivered_comment_ids=delivered_comment_ids,
                         delivered_context_sha256=delivered_context_sha256,
+                        allow_running=followup_intent is not None,
                     )
 
                 if generation.policy_sha256 != session_runtime.agent_policy_digest:
@@ -339,6 +371,11 @@ class OfflineSshDispatchService:
                         generation=generation,
                         generation_turns=generation_turns,
                     )
+                if (
+                    followup_intent is not None
+                    and followup_intent.target_role is not generation.role
+                ):
+                    rotation_reason = followup_intent.cause.value
                 if rotation_reason is not None:
                     if len(generations) >= session_runtime.max_session_generations:
                         raise SshDispatchPlanningError(
@@ -399,7 +436,11 @@ class OfflineSshDispatchService:
                         current_generation_number=generation.generation_number,
                         expected_current_policy_sha256=generation.policy_sha256,
                         new_policy_sha256=session_runtime.agent_policy_digest,
-                        new_role=generation.role,
+                        new_role=(
+                            followup_intent.target_role
+                            if followup_intent is not None
+                            else generation.role
+                        ),
                         rotation_reason=rotation_reason,
                         new_session_generation_id=next_session_generation_id,
                         handoff=handoff,
@@ -410,10 +451,19 @@ class OfflineSshDispatchService:
                     delivered_context_sha256 = None
                     prior_status = None
                     prior_summary = None
-            else:
-                raise SshDispatchPlanningError(
-                    "live session generation is not eligible for a new Turn"
+            if followup_intent is not None:
+                followup_intent = self._store.bind_followup_generation(
+                    followup_intent.source_turn_id,
+                    session_generation_id=generation.session_generation_id,
                 )
+            else:
+                if generation.state not in {
+                    SessionGenerationState.PLANNED,
+                    SessionGenerationState.ACTIVE,
+                }:
+                    raise SshDispatchPlanningError(
+                        "live session generation is not eligible for a new Turn"
+                    )
             generation_plan = build_ssh_generation_turn_plan(
                 task=task,
                 repository=repository,
@@ -427,6 +477,7 @@ class OfflineSshDispatchService:
                 prior_status=prior_status,
                 prior_summary=prior_summary,
                 handoff=handoff,
+                followup_intent=followup_intent,
                 pre_session_retry_without_handoff=(
                     pre_session_retry_without_handoff
                 ),
@@ -442,6 +493,11 @@ class OfflineSshDispatchService:
                 handoff_id=(
                     generation_plan.handoff.handoff_id
                     if generation_plan.handoff is not None
+                    else None
+                ),
+                followup_source_turn_id=(
+                    followup_intent.source_turn_id
+                    if followup_intent is not None
                     else None
                 ),
                 pre_session_retry_without_handoff=(
@@ -465,6 +521,113 @@ class OfflineSshDispatchService:
             expected_turn_number=plan.turn_number,
             turn_id=turn_id,
         )
+
+    def _followup_budget_error(
+        self,
+        work_item: WorkItem,
+        *,
+        followup_intent: TurnFollowupIntent,
+    ) -> str | None:
+        runtime = self._config.session_runtime
+        assert runtime is not None
+        intents = self._store.list_work_item_followups(work_item.work_item_id)
+        if (
+            not intents
+            or intents[-1].source_turn_id != followup_intent.source_turn_id
+        ):
+            return "followup_history_invalid"
+        repair_cycles = sum(
+            item.cause in {FollowupCause.CI_FAILURE, FollowupCause.AUDIT_GAP}
+            for item in intents
+        )
+        if repair_cycles > runtime.max_repair_cycles:
+            return "repair_cycle_budget_exhausted"
+        generations = self._store.list_session_generations(work_item.work_item_id)
+        if sum(
+            item.role is SessionGenerationRole.AUDIT for item in generations
+        ) > runtime.max_audit_cycles:
+            return "audit_cycle_budget_exhausted"
+        total_tokens = 0
+        for turn in self._store.list_turns(work_item.work_item_id):
+            usage = self._store.get_turn_usage(turn.turn_id)
+            if usage is not None:
+                total_tokens += usage.input_tokens + usage.output_tokens
+        if total_tokens >= runtime.max_total_tokens:
+            return "total_token_budget_exhausted"
+        try:
+            created = datetime.fromisoformat(
+                work_item.created_at.replace("Z", "+00:00")
+            )
+        except ValueError:
+            return "work_item_age_invalid"
+        age_seconds = (
+            datetime.now(timezone.utc) - created
+        ).total_seconds() if created.tzinfo is not None else -1
+        if age_seconds < 0:
+            return "work_item_age_invalid"
+        if age_seconds >= runtime.max_work_item_age_seconds:
+            return "work_item_age_budget_exhausted"
+        trailing_same_head = 0
+        for item in reversed(intents):
+            if item.head_sha != followup_intent.head_sha:
+                break
+            trailing_same_head += 1
+        if trailing_same_head >= runtime.max_no_progress_turns:
+            return "no_progress_budget_exhausted"
+        return None
+
+    def plan_checkpoint_followup(
+        self, task: TrackerTask, turn_id: str
+    ) -> TurnProgress:
+        """Persist one Agent checkpoint continuation before any next Turn starts."""
+        turn = self._store.get_turn(turn_id)
+        if turn is None:
+            raise KeyError(f"turn not found: {turn_id}")
+        work_item = self._store.get_work_item(turn.work_item_id)
+        generation = self._store.get_turn_session_generation(turn_id)
+        agent_result = self._store.get_turn_agent_result(turn_id)
+        if work_item is None or generation is None or agent_result is None:
+            raise SshDispatchPlanningError("checkpoint continuation evidence is incomplete")
+        if (
+            turn.state is not TurnState.PUBLISHED
+            or turn.output_head_sha is None
+            or agent_result.status is not AgentResultStatus.CHECKPOINT
+        ):
+            raise SshDispatchPlanningError("Turn is not an eligible Agent checkpoint")
+        if task.repository != work_item.repository or task.issue_number != work_item.issue_number:
+            raise SshDispatchPlanningError("checkpoint Issue identity conflicts")
+        try:
+            task_spec = parse_task_spec(task.body)
+        except TaskSpecError as exc:
+            raise SshDispatchPlanningError("checkpoint TaskSpec is invalid") from exc
+        if tuple(
+            item.criterion_id for item in agent_result.acceptance
+        ) != tuple(item.criterion_id for item in task_spec.acceptance_items):
+            raise SshDispatchPlanningError(
+                "checkpoint acceptance assertions are incomplete"
+            )
+        cause = (
+            FollowupCause.AUDIT_GAP
+            if generation.role is SessionGenerationRole.AUDIT
+            else FollowupCause.AGENT_CHECKPOINT
+        )
+        target_role = (
+            SessionGenerationRole.CI_REPAIR
+            if generation.role is SessionGenerationRole.AUDIT
+            else generation.role
+        )
+        created_at = datetime.now(timezone.utc).isoformat()
+        intent = build_agent_followup_intent(
+            source_turn_id=turn.turn_id,
+            work_item_id=work_item.work_item_id,
+            head_sha=turn.output_head_sha,
+            cause=cause,
+            target_role=target_role,
+            agent_result=agent_result,
+            created_at=created_at,
+        )
+        work_item, turn, _ = self._store.record_agent_followup_intent(intent)
+        return TurnProgress(work_item, turn)
 
     def _pre_session_rejection_history_is_retryable(
         self,
@@ -638,6 +801,11 @@ class OfflineSshDispatchService:
             return self._orchestrator.reject_completion_candidate(
                 turn_id, error_code="completion_candidate_identity_invalid"
             )
+        agent_result = self._store.get_turn_agent_result(turn_id)
+        if agent_result is None or agent_result.status is not AgentResultStatus.COMPLETED:
+            return self._orchestrator.reject_completion_candidate(
+                turn_id, error_code="completion_candidate_result_invalid"
+            )
         generation = self._store.get_turn_session_generation(turn_id)
         prompt_input = self._store.get_turn_prompt_input(turn_id)
         if (
@@ -667,6 +835,20 @@ class OfflineSshDispatchService:
         except (TaskSpecError, ValueError):
             return self._orchestrator.reject_completion_candidate(
                 turn_id, error_code="completion_task_spec_invalid"
+            )
+        expected_criteria = tuple(
+            criterion.criterion_id for criterion in task_spec.acceptance_items
+        )
+        if (
+            tuple(item.criterion_id for item in agent_result.acceptance)
+            != expected_criteria
+            or any(
+                item.status is AcceptanceAssertionStatus.FAILED
+                for item in agent_result.acceptance
+            )
+        ):
+            return self._orchestrator.reject_completion_candidate(
+                turn_id, error_code="completion_acceptance_assertions_invalid"
             )
         if (
             inputs.task_spec_sha256 != prompt_input.task_spec_sha256
@@ -718,8 +900,32 @@ class OfflineSshDispatchService:
                 publication=publication,
                 actions_evidence=actions_evidence,
                 observed_at=observed_at,
+                session_role=generation.role,
+                audit_assertions=agent_result.acceptance,
+                agent_result_evidence_ref=(
+                    "agent-result-sha256:"
+                    + sha256(
+                        agent_result_to_json(agent_result).encode("utf-8")
+                    ).hexdigest()
+                ),
             )
-            work_item, turn, _ = self._store.record_turn_completion_gate(snapshot)
+            failed_checks = repairable_ci_failures(snapshot, actions_evidence)
+            followup_intent = (
+                build_ci_followup_intent(
+                    source_turn_id=turn.turn_id,
+                    work_item_id=work_item.work_item_id,
+                    head_sha=turn.output_head_sha,
+                    gate_evidence_sha256=snapshot.evidence_sha256,
+                    failed_checks=failed_checks,
+                    created_at=observed_at,
+                )
+                if failed_checks
+                else None
+            )
+            work_item, turn, _ = self._store.record_turn_completion_gate(
+                snapshot,
+                followup_intent=followup_intent,
+            )
         except (TypeError, ValueError):
             return self._orchestrator.reject_completion_candidate(
                 turn_id, error_code="completion_evidence_invalid"
@@ -737,7 +943,11 @@ class OfflineSshDispatchService:
             gate is not None
             and gate.status is CompletionGateStatus.PASSED
             and generation is not None
-            and generation.role is SessionGenerationRole.IMPLEMENTATION
+            and generation.role
+            in {
+                SessionGenerationRole.IMPLEMENTATION,
+                SessionGenerationRole.CI_REPAIR,
+            }
         )
 
     def run_fresh_final_audit(
@@ -769,10 +979,17 @@ class OfflineSshDispatchService:
             return self.run_claimed_turn(
                 task, comments=comments, turn_id=turn_id
             )
-        if live.role is not SessionGenerationRole.IMPLEMENTATION:
+        if live.role not in {
+            SessionGenerationRole.IMPLEMENTATION,
+            SessionGenerationRole.CI_REPAIR,
+        }:
             raise FinalAuditPreparationError("final_audit_source_role_invalid")
         if len(generations) >= runtime.max_session_generations:
             raise FinalAuditPreparationError("final_audit_generation_budget_exhausted")
+        if sum(
+            item.role is SessionGenerationRole.AUDIT for item in generations
+        ) >= runtime.max_audit_cycles:
+            raise FinalAuditPreparationError("final_audit_cycle_budget_exhausted")
         turns = self._store.list_turns(work_item.work_item_id)
         if not turns:
             raise FinalAuditPreparationError("final_audit_source_turn_missing")
@@ -874,3 +1091,12 @@ class FinalAuditPreparationError(RuntimeError):
     def __init__(self, error_code: str) -> None:
         super().__init__(error_code)
         self.error_code = error_code
+
+
+class AutonomyBudgetError(RuntimeError):
+    """A planned autonomous continuation crossed a durable policy boundary."""
+
+    def __init__(self, error_code: str, work_item: WorkItem) -> None:
+        super().__init__(error_code)
+        self.error_code = error_code
+        self.work_item = work_item

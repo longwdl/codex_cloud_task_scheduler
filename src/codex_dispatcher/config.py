@@ -89,6 +89,10 @@ class SessionRuntimeConfig:
     max_session_generations: int
     max_total_turns: int
     max_no_progress_turns: int
+    max_repair_cycles: int
+    max_audit_cycles: int
+    max_total_tokens: int
+    max_work_item_age_seconds: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -519,6 +523,10 @@ def _parse_session_runtime(value: Any) -> SessionRuntimeConfig:
             "max_session_generations",
             "max_total_turns",
             "max_no_progress_turns",
+            "max_repair_cycles",
+            "max_audit_cycles",
+            "max_total_tokens",
+            "max_work_item_age_seconds",
         }
     )
     _check_keys(table, fields, "session_runtime")
@@ -563,5 +571,21 @@ def _parse_session_runtime(value: Any) -> SessionRuntimeConfig:
         max_no_progress_turns=_positive_int(
             table["max_no_progress_turns"],
             "session_runtime.max_no_progress_turns",
+        ),
+        max_repair_cycles=_positive_int(
+            table["max_repair_cycles"],
+            "session_runtime.max_repair_cycles",
+        ),
+        max_audit_cycles=_positive_int(
+            table["max_audit_cycles"],
+            "session_runtime.max_audit_cycles",
+        ),
+        max_total_tokens=_positive_int(
+            table["max_total_tokens"],
+            "session_runtime.max_total_tokens",
+        ),
+        max_work_item_age_seconds=_positive_int(
+            table["max_work_item_age_seconds"],
+            "session_runtime.max_work_item_age_seconds",
         ),
     )

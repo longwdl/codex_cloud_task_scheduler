@@ -13,6 +13,7 @@ from codex_dispatcher.github_delivery import GitHubDeliveryCoordinator
 from codex_dispatcher.slack_delivery import SlackDeliveryCoordinator
 from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_dispatch_service import (
+    AutonomyBudgetError,
     CheckpointPublicationInterrupted,
     FinalAuditPreparationError,
     OfflineSshDispatchService,
@@ -605,6 +606,13 @@ class SshControlSweep:
         if recovery.action is SshRecoveryAction.START_CLAIMED_TURN:
             assert recovery.task is not None
             return self._run_claimed(recovery.task, turn_id=turn_id)
+        if recovery.action is SshRecoveryAction.START_AUTONOMOUS_TURN:
+            assert recovery.task is not None
+            return self._run_claimed(
+                recovery.task,
+                turn_id=turn_id,
+                allowed_states=frozenset({TaskState.RUNNING}),
+            )
         if recovery.action is SshRecoveryAction.START_FRESH_FINAL_AUDIT:
             assert recovery.task is not None
             return self._run_fresh_final_audit(
@@ -683,8 +691,13 @@ class SshControlSweep:
         task: TrackerTask,
         *,
         turn_id: str | None,
+        allowed_states: frozenset[TaskState] = frozenset(
+            {TaskState.DISPATCHING}
+        ),
     ) -> ControlSweepResult:
-        stable_task, comments = self._stable_claimed_snapshot(task)
+        stable_task, comments = self._stable_claimed_snapshot(
+            task, allowed_states=allowed_states
+        )
         if stable_task is None:
             return _task_result(
                 ControlSweepStatus.RETRY,
@@ -711,11 +724,26 @@ class SshControlSweep:
                     work_item=slack_root.work_item,
                     slack_permalink=slack_root.root_permalink,
                 )
-        progress = self._dispatch.run_claimed_turn(
-            stable_task,
-            comments=comments,
-            turn_id=turn_id,
-        )
+        try:
+            progress = self._dispatch.run_claimed_turn(
+                stable_task,
+                comments=comments,
+                turn_id=turn_id,
+            )
+        except AutonomyBudgetError as exc:
+            work_item = self._deliver_terminal(
+                stable_task,
+                work_item=exc.work_item,
+                desired_task_state=TaskState.BLOCKED,
+                turn=None,
+            )
+            updated = self._set_task_state(stable_task, TaskState.BLOCKED)
+            return _task_result(
+                ControlSweepStatus.BLOCKED,
+                updated,
+                work_item=work_item,
+                reason=exc.error_code,
+            )
         return self._after_turn(stable_task, progress)
 
     def _stable_claimed_snapshot(
@@ -766,14 +794,51 @@ class SshControlSweep:
     ) -> ControlSweepResult:
         if progress.turn.state is TurnState.CHECKPOINTING and self._publisher is not None:
             return self._publish_checkpoint(task, progress.turn.turn_id)
+        agent_result = (
+            self._store.get_turn_agent_result(progress.turn.turn_id)
+            if progress.turn.state is TurnState.PUBLISHED
+            else None
+        )
+        if (
+            progress.turn.state is TurnState.PUBLISHED
+            and agent_result is not None
+            and agent_result.status.value == "checkpoint"
+        ):
+            progress = self._deliver_published_checkpoint(task, progress)
+            progress = self._dispatch.plan_checkpoint_followup(
+                task, progress.turn.turn_id
+            )
+            updated = self._set_task_state(task, TaskState.RUNNING)
+            return _task_result(
+                ControlSweepStatus.RETRY,
+                updated,
+                work_item=progress.work_item,
+                turn_id=progress.turn.turn_id,
+                reason="agent_checkpoint_followup_planned",
+            )
         if (
             progress.turn.state is TurnState.PUBLISHED
             and progress.turn.result_status == "completed"
+            and (
+                agent_result is not None
+                and agent_result.status.value == "completed"
+            )
         ):
             progress = self._deliver_published_checkpoint(task, progress)
             progress = self._dispatch.evaluate_completion_gate(
                 task, progress.turn.turn_id
             )
+            if self._store.get_planned_work_item_followup(
+                progress.work_item.work_item_id
+            ) is not None:
+                updated = self._set_task_state(task, TaskState.RUNNING)
+                return _task_result(
+                    ControlSweepStatus.RETRY,
+                    updated,
+                    work_item=progress.work_item,
+                    turn_id=progress.turn.turn_id,
+                    reason="ci_repair_followup_planned",
+                )
         elif (
             progress.turn.state is TurnState.PUBLISHED
             and self._publisher is not None

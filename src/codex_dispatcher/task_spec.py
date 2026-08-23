@@ -34,6 +34,8 @@ _STRUCTURED_ACCEPTANCE_PREFIX_RE = re.compile(
 _SUPPORTED_ACCEPTANCE_PREDICATES = frozenset(
     {
         "changed-paths-within-allowed",
+        "audit",
+        "manual",
         "required-check",
         "task-head-published",
     }
@@ -186,6 +188,8 @@ def parse_acceptance_criteria(content: str) -> tuple[AcceptanceCriterion, ...]:
         - [AC-1] required-check: unit-tests
         - [AC-2] changed-paths-within-allowed
         - [AC-3] task-head-published
+        - [AC-4] audit: reviewer verifies the behavioral edge cases
+        - [AC-5] manual: maintainer verifies the external system
 
     Every other non-empty line remains an explicit ``manual`` criterion. A line that
     starts like a structured directive but is malformed is rejected so a typo cannot
@@ -209,10 +213,10 @@ def parse_acceptance_criteria(content: str) -> tuple[AcceptanceCriterion, ...]:
                     f"unsupported acceptance predicate on line {line_number}: {predicate}"
                 )
             argument = raw_argument.strip() if raw_argument is not None else None
-            if predicate == "required-check":
+            if predicate in {"required-check", "audit", "manual"}:
                 if argument is None or not _bounded_acceptance_text(argument, maximum=256):
                     raise TaskSpecError(
-                        f"required-check on line {line_number} needs a bounded check name"
+                        f"{predicate} on line {line_number} needs a bounded argument"
                     )
             elif argument is not None:
                 raise TaskSpecError(

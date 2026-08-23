@@ -19,7 +19,11 @@ from codex_dispatcher.ci_evidence import (
     ActionsRunEvidence,
     RequiredCheckStatus,
 )
-from codex_dispatcher.runner_protocol import AgentResult, agent_result_to_mapping
+from codex_dispatcher.runner_protocol import (
+    AgentResult,
+    agent_result_to_mapping,
+    agent_result_turn_status,
+)
 from codex_dispatcher.task_spec import (
     AcceptanceCriterion,
     normalize_repo_path,
@@ -354,7 +358,7 @@ def build_session_handoff_snapshot(
     if source_agent_result is not None:
         if (
             source_turn_id is None
-            or source_result_status != source_agent_result.status.value
+            or source_result_status != agent_result_turn_status(source_agent_result)
             or source_result_summary != source_agent_result.summary
         ):
             raise ValueError("source Agent result conflicts with its Turn receipt")
@@ -992,6 +996,7 @@ def _validate_trusted_facts_v2(value: dict[str, Any]) -> None:
             or not item["description"]
             or item["predicate"]
             not in {
+                "audit",
                 "manual",
                 "required-check",
                 "changed-paths-within-allowed",

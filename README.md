@@ -35,7 +35,10 @@ Fixture target is the remote Linux Codex CLI executor, and the implementation no
   publication ledger, and structured Issue acceptance predicates before a completed Turn can enter
   review;
 - mandatory fresh Audit generations when configured, with an independent audit contract and the
-  same trusted completion gate after any bounded audit fixes;
+  same trusted completion gate after a read-only Audit gap is repaired by a separate CI_REPAIR
+  generation;
+- immutable crash-recoverable follow-up intents for Agent checkpoints, exact code-attributable CI
+  failures, and Audit gaps, bounded by repair/audit/token/age/no-progress budgets;
 - fail-closed context/compaction failure handling that rotates only after the Runner proves a clean
   worktree at the unchanged input HEAD, while dirty or moved-HEAD failures block the generation;
 - strict same-repository Draft PR lookup/creation, branch read-back, SQLite binding, and ordered

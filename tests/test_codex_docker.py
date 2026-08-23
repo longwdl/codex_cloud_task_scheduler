@@ -192,6 +192,26 @@ class DockerCodexPlanTests(unittest.TestCase):
         self.assertFalse(any("source=/srv/codex-runner/app,target=" in item for item in mounts))
         self.assertFalse(any("source=/srv/codex-runner/work-items,target=" in item for item in mounts))
 
+        audit_plan = build_docker_codex_plan(
+            runtime=runtime(),
+            work_item_id=WORK_ITEM,
+            turn_id=TURN,
+            codex_path=CODEX_PATH,
+            repository=repository,
+            codex_home=codex_home,
+            auth_file=auth_file,
+            output_schema=schema,
+            session_id=None,
+            repository_readonly=True,
+        )
+        audit_mounts = tuple(
+            item for item in audit_plan.argv if item.startswith("--mount=")
+        )
+        self.assertEqual(
+            f"--mount=type=bind,source={repository},target=/workspace,readonly",
+            audit_mounts[2],
+        )
+
     def test_policy_bundle_mounts_exact_three_readonly_targets(self) -> None:
         policy_root = ROOT / "config" / "runner-codex-policy"
         manifest = json.loads((policy_root / "manifest.json").read_text(encoding="utf-8"))

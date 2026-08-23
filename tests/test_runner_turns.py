@@ -14,6 +14,7 @@ from codex_dispatcher.runner_protocol import (
     NEXT_PROTOCOL_VERSION,
     RunnerOperation,
     RunnerRequest,
+    parse_agent_result,
 )
 from codex_dispatcher.runner_service import LinuxRunnerService, serve_one
 from codex_dispatcher.runner_transport import (
@@ -28,7 +29,11 @@ from codex_dispatcher.runner_transport import (
     parse_runner_capacity_reply,
     parse_runner_turn_reply,
 )
-from codex_dispatcher.runner_turns import RunnerTurnError, RunnerTurnExecutor
+from codex_dispatcher.runner_turns import (
+    RunnerTurnError,
+    RunnerTurnExecutor,
+    audit_mutation_is_forbidden,
+)
 from codex_dispatcher.runner_wire import (
     decode_runner_output,
     encode_runner_input,
@@ -91,11 +96,15 @@ if "change" in prompt:
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     changed = ["result.txt"]
 result = {{
+    "schema_version": 2,
     "status": "completed",
     "summary": "fixture complete",
+    "acceptance": [],
+    "remaining_work": [],
     "needs_input": [],
     "tests": [{{"name": "fixture", "status": "passed"}}],
     "changed_paths": changed,
+    "blocker_code": None,
     "next_step": "review",
 }}
 events = [
@@ -123,6 +132,57 @@ def start_request(turn_id: str, prompt: bytes, input_head: str) -> RunnerRequest
 
 
 class RunnerTurnExecutorTests(unittest.TestCase):
+    def test_audit_role_rejects_head_or_reported_path_mutation(self) -> None:
+        request = RunnerRequest(
+            RunnerOperation.START,
+            WORK_ITEM,
+            version=NEXT_PROTOCOL_VERSION,
+            turn_id=TURN_ONE,
+            prompt_sha256="a" * 64,
+            input_head_sha="b" * 40,
+            session_generation_id=GENERATION_ID,
+            session_generation=1,
+            agent_policy_digest=POLICY_DIGEST,
+            session_role="audit",
+        )
+        result = parse_agent_result(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "status": "completed",
+                    "summary": "read-only audit",
+                    "acceptance": [],
+                    "remaining_work": [],
+                    "needs_input": [],
+                    "tests": [{"name": "audit", "status": "passed"}],
+                    "changed_paths": [],
+                    "blocker_code": None,
+                    "next_step": "review",
+                }
+            )
+        )
+        self.assertFalse(audit_mutation_is_forbidden(request, result, "b" * 40))
+        self.assertTrue(audit_mutation_is_forbidden(request, result, "c" * 40))
+        changed = parse_agent_result(
+            json.dumps(
+                {
+                    **json.loads(json.dumps({
+                        "schema_version": 2,
+                        "status": "completed",
+                        "summary": "audit changed a file",
+                        "acceptance": [],
+                        "remaining_work": [],
+                        "needs_input": [],
+                        "tests": [],
+                        "changed_paths": ["src/module.py"],
+                        "blocker_code": None,
+                        "next_step": "reject",
+                    }))
+                }
+            )
+        )
+        self.assertTrue(audit_mutation_is_forbidden(request, changed, "b" * 40))
+
     def setUpRunner(
         self,
         root: Path,

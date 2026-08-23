@@ -21,7 +21,9 @@ from codex_dispatcher.ci_evidence import (
 )
 from codex_dispatcher.handoffs import PublicationEvidence
 from codex_dispatcher.task_spec import TaskSpec
+from codex_dispatcher.runner_protocol import AcceptanceAssertion
 from codex_dispatcher.work_items import (
+    SessionGenerationRole,
     Turn,
     WorkItem,
     validate_git_sha,
@@ -79,6 +81,53 @@ class CompletionGateSnapshot:
         return _canonical_object(self.evidence_json)
 
 
+def repairable_ci_failures(
+    snapshot: CompletionGateSnapshot,
+    actions_evidence: ActionsEvidenceSnapshot,
+) -> tuple[dict[str, str], ...]:
+    """Return exact code-attributable CI failures, never ambiguous infrastructure exits."""
+    if (
+        not isinstance(snapshot, CompletionGateSnapshot)
+        or not isinstance(actions_evidence, ActionsEvidenceSnapshot)
+        or snapshot.status is not CompletionGateStatus.FAILED
+    ):
+        return ()
+    acceptance_items = snapshot.evidence["acceptance"].get("criteria")
+    if not isinstance(acceptance_items, list) or any(
+        not isinstance(item, dict)
+        or item.get("status")
+        in {
+            AcceptanceStatus.UNVERIFIED.value,
+            AcceptanceStatus.PENDING.value,
+        }
+        or (
+            item.get("status") == AcceptanceStatus.FAILED.value
+            and item.get("predicate") != "required-check"
+        )
+        for item in acceptance_items
+    ):
+        return ()
+    failed = tuple(
+        item
+        for item in actions_evidence.required_checks
+        if item.status is RequiredCheckStatus.FAILED
+    )
+    if not failed or any(
+        item.run is None or item.run.conclusion != "failure" for item in failed
+    ):
+        return ()
+    return tuple(
+        {
+            "name": item.name,
+            "conclusion": item.run.conclusion,
+            "url": item.run.html_url,
+            "evidence_ref": item.run.evidence_ref,
+        }
+        for item in failed
+        if item.run is not None
+    )
+
+
 def build_completion_gate_snapshot(
     *,
     work_item: WorkItem,
@@ -89,6 +138,9 @@ def build_completion_gate_snapshot(
     publication: PublicationEvidence,
     actions_evidence: ActionsEvidenceSnapshot,
     observed_at: str,
+    session_role: SessionGenerationRole = SessionGenerationRole.IMPLEMENTATION,
+    audit_assertions: tuple[AcceptanceAssertion, ...] = (),
+    agent_result_evidence_ref: str | None = None,
     created_at: str | None = None,
 ) -> CompletionGateSnapshot:
     """Evaluate a completion candidate from Dispatcher/Git/Actions facts only."""
@@ -136,6 +188,9 @@ def build_completion_gate_snapshot(
         verified_changed_paths=publication.verified_changed_paths,
         head_was_published=publication.head_was_published,
         actions_evidence=actions_evidence,
+        session_role=session_role,
+        audit_assertions=audit_assertions,
+        agent_result_evidence_ref=agent_result_evidence_ref,
     )
     gate_status, gate_reason = _gate_outcome(acceptance, actions_evidence)
     criteria_sha256 = sha256(

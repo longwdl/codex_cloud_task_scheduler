@@ -53,11 +53,15 @@ def result(status: str, *, path: str, summary: str):
     return parse_agent_result(
         json.dumps(
             {
+                "schema_version": 2,
                 "status": status,
                 "summary": summary,
+                "acceptance": [],
+                "remaining_work": [],
                 "needs_input": questions,
                 "tests": [{"name": "unit", "status": "passed"}],
                 "changed_paths": [path],
+                "blocker_code": "test_blocked" if status == "blocked" else None,
                 "next_step": "Continue from the Issue",
             }
         )

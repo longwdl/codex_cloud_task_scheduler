@@ -10,6 +10,11 @@ from codex_dispatcher.ci_evidence import (
     RequiredCheckStatus,
 )
 from codex_dispatcher.task_spec import AcceptanceCriterion, is_path_allowed
+from codex_dispatcher.runner_protocol import (
+    AcceptanceAssertion,
+    AcceptanceAssertionStatus,
+)
+from codex_dispatcher.work_items import SessionGenerationRole
 
 
 class AcceptanceStatus(StrEnum):
@@ -17,6 +22,7 @@ class AcceptanceStatus(StrEnum):
     FAILED = "failed"
     PENDING = "pending"
     UNVERIFIED = "unverified"
+    DEFERRED = "deferred"
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +69,9 @@ def evaluate_acceptance(
     verified_changed_paths: tuple[str, ...],
     head_was_published: bool,
     actions_evidence: ActionsEvidenceSnapshot | None,
+    session_role: SessionGenerationRole = SessionGenerationRole.IMPLEMENTATION,
+    audit_assertions: tuple[AcceptanceAssertion, ...] = (),
+    agent_result_evidence_ref: str | None = None,
 ) -> AcceptanceEvaluation:
     """Evaluate only predicates backed by Dispatcher, Git, or exact Actions facts."""
     if (
@@ -78,8 +87,57 @@ def evaluate_acceptance(
             "changed-paths-within-allowed requires a non-empty Issue path allowlist"
         )
     configured = frozenset(configured_required_checks)
+    if not isinstance(session_role, SessionGenerationRole):
+        raise TypeError("session_role must be a SessionGenerationRole")
+    assertions = {item.criterion_id: item for item in audit_assertions}
+    if len(assertions) != len(audit_assertions):
+        raise ValueError("audit assertion ids must be unique")
     results: list[CriterionEvaluation] = []
     for criterion in criteria:
+        if criterion.predicate == "audit":
+            if session_role is not SessionGenerationRole.AUDIT:
+                results.append(
+                    _result(
+                        criterion,
+                        AcceptanceStatus.DEFERRED,
+                        "fresh_audit_required",
+                    )
+                )
+                continue
+            assertion = assertions.get(criterion.criterion_id)
+            refs = (
+                (agent_result_evidence_ref,)
+                if agent_result_evidence_ref is not None
+                else ()
+            )
+            if assertion is None or assertion.status is AcceptanceAssertionStatus.NOT_VERIFIED:
+                results.append(
+                    _result(
+                        criterion,
+                        AcceptanceStatus.UNVERIFIED,
+                        "audit_assertion_not_verified",
+                        refs,
+                    )
+                )
+            elif assertion.status is AcceptanceAssertionStatus.FAILED:
+                results.append(
+                    _result(
+                        criterion,
+                        AcceptanceStatus.FAILED,
+                        "audit_assertion_failed",
+                        refs,
+                    )
+                )
+            else:
+                results.append(
+                    _result(
+                        criterion,
+                        AcceptanceStatus.PASSED,
+                        "fresh_audit_attested",
+                        refs,
+                    )
+                )
+            continue
         if criterion.predicate == "manual":
             results.append(
                 _result(

@@ -9,6 +9,7 @@ from typing import Iterable
 
 from codex_dispatcher.ci_evidence import ActionsEvidenceSnapshot
 from codex_dispatcher.config import RepositoryConfig
+from codex_dispatcher.followup_intents import FollowupIntentState, TurnFollowupIntent
 from codex_dispatcher.handoffs import (
     PublishedCheckpoint,
     SessionHandoffSnapshot,
@@ -223,6 +224,7 @@ def build_ssh_generation_turn_plan(
     prior_status: str | None = None,
     prior_summary: str | None = None,
     handoff: SessionHandoffSnapshot | None = None,
+    followup_intent: TurnFollowupIntent | None = None,
     pre_session_retry_without_handoff: bool = False,
 ) -> SshGenerationTurnPlan:
     """Freeze a fail-closed full or incremental protocol-v2 Turn."""
@@ -230,8 +232,13 @@ def build_ssh_generation_turn_plan(
         task,
         repository,
         allow_running=(
-            session_generation.role is SessionGenerationRole.AUDIT
-            and session_generation.state is SessionGenerationState.PLANNED
+            session_generation.state is SessionGenerationState.PLANNED
+            and session_generation.role
+            in {SessionGenerationRole.AUDIT, SessionGenerationRole.CI_REPAIR}
+        )
+        or (
+            followup_intent is not None
+            and followup_intent.state is FollowupIntentState.PLANNED
         ),
     )
     _validate_existing_binding(
@@ -255,6 +262,15 @@ def build_ssh_generation_turn_plan(
         raise SshDispatchPlanningError("turn_number must be a positive integer")
     if type(pre_session_retry_without_handoff) is not bool:
         raise TypeError("pre_session_retry_without_handoff must be a bool")
+    if followup_intent is not None and (
+        not isinstance(followup_intent, TurnFollowupIntent)
+        or followup_intent.state is not FollowupIntentState.PLANNED
+        or followup_intent.work_item_id != work_item.work_item_id
+        or followup_intent.target_role is not session_generation.role
+        or followup_intent.target_session_generation_id
+        not in {None, session_generation.session_generation_id}
+    ):
+        raise SshDispatchPlanningError("follow-up intent conflicts with the generation")
     input_head_sha = work_item.last_published_sha or work_item.base_sha
     generation_head_sha = (
         session_generation.last_published_sha or session_generation.start_head_sha
@@ -316,6 +332,7 @@ def build_ssh_generation_turn_plan(
                 pre_session_retry_without_handoff=(
                     pre_session_retry_without_handoff
                 ),
+                followup_intent=followup_intent,
             )
         except (TypeError, ValueError) as exc:
             raise SshDispatchPlanningError(str(exc)) from exc
@@ -344,7 +361,7 @@ def build_ssh_generation_turn_plan(
         new_items: tuple[ApprovedContextItem, ...] = tuple(
             item for item in inputs.approved_items if item.comment_id not in delivered
         )
-        if not new_items:
+        if not new_items and followup_intent is None:
             raise SshDispatchPlanningError(
                 "same-generation resume requires new approved context"
             )
@@ -354,6 +371,7 @@ def build_ssh_generation_turn_plan(
             prior_status=prior_status,
             prior_summary=prior_summary,
             new_approved_items=new_items,
+            followup_intent=followup_intent,
         )
     else:
         raise SshDispatchPlanningError(
@@ -461,9 +479,12 @@ def validate_ssh_active_generation_continuity(
     comments: Iterable[object],
     delivered_comment_ids: tuple[str, ...],
     delivered_context_sha256: str,
+    allow_running: bool = False,
 ) -> None:
     """Reject semantic or delivered-context drift before any session rotation."""
-    task_spec, _ = _validate_claimed_task(task, repository)
+    task_spec, _ = _validate_claimed_task(
+        task, repository, allow_running=allow_running
+    )
     _validate_existing_binding(
         task,
         repository,

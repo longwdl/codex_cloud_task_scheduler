@@ -39,8 +39,15 @@ from codex_dispatcher.github_api_metrics import (
     GitHubApiSweepMetric,
     GitHubApiSweepOutcome,
 )
+from codex_dispatcher.followup_intents import (
+    FollowupCause,
+    FollowupIntentState,
+    TurnFollowupIntent,
+)
 from codex_dispatcher.runner_protocol import (
     AgentResult,
+    AgentResultStatus,
+    agent_result_turn_status,
     agent_result_to_json,
     parse_agent_result,
 )
@@ -1452,6 +1459,7 @@ class StateStore:
         issue_allowed_paths: tuple[str, ...],
         input_head_sha: str,
         handoff_id: str | None = None,
+        followup_source_turn_id: str | None = None,
         pre_session_retry_without_handoff: bool = False,
         expected_turn_number: int | None = None,
         turn_id: str | None = None,
@@ -1476,6 +1484,24 @@ class StateStore:
             work_item = self._row_to_work_item(work_item_row)
             if work_item.state is not WorkItemState.READY:
                 raise ValueError("work item must be ready before beginning a generation Turn")
+            planned_followup_row = connection.execute(
+                "SELECT * FROM turn_followup_intents "
+                "WHERE work_item_id = ? AND state = 'planned'",
+                (work_item_id,),
+            ).fetchone()
+            planned_followup = (
+                self._row_to_followup_intent(planned_followup_row)
+                if planned_followup_row is not None
+                else None
+            )
+            if planned_followup is None and followup_source_turn_id is not None:
+                raise ValueError("follow-up intent is not planned")
+            if planned_followup is not None and (
+                followup_source_turn_id is None
+                or planned_followup.source_turn_id != followup_source_turn_id
+                or planned_followup.head_sha != input_head_sha
+            ):
+                raise ValueError("planned follow-up must be consumed by the next Turn")
             generation = self._require_generation_identity(
                 connection,
                 session_generation_id=session_generation_id,
@@ -1483,6 +1509,12 @@ class StateStore:
                 generation_number=generation_number,
                 policy_sha256=policy_sha256,
             )
+            if planned_followup is not None and (
+                planned_followup.target_role is not generation.role
+                or planned_followup.target_session_generation_id
+                not in {None, generation.session_generation_id}
+            ):
+                raise ValueError("planned follow-up conflicts with the target generation")
             anchor = generation.last_published_sha or generation.start_head_sha
             work_item_anchor = work_item.last_published_sha or work_item.base_sha
             if input_head_sha != anchor or input_head_sha != work_item_anchor:
@@ -1675,6 +1707,29 @@ class StateStore:
                 (turn.turn_id, session_generation_id),
             )
             self._insert_turn_prompt_input(connection, prompt_input)
+            if planned_followup is not None:
+                started_followup = planned_followup.start(
+                    session_generation_id=session_generation_id,
+                    turn_id=turn.turn_id,
+                    at=now,
+                )
+                cursor = connection.execute(
+                    "UPDATE turn_followup_intents SET state = ?, "
+                    "target_session_generation_id = ?, target_turn_id = ?, updated_at = ? "
+                    "WHERE source_turn_id = ? AND state = 'planned' "
+                    "AND (target_session_generation_id IS NULL "
+                    "OR target_session_generation_id = ?)",
+                    (
+                        started_followup.state.value,
+                        session_generation_id,
+                        turn.turn_id,
+                        now,
+                        planned_followup.source_turn_id,
+                        session_generation_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("concurrent follow-up Turn start detected")
             if handoff_id is not None:
                 connection.execute(
                     "INSERT INTO turn_handoff_bindings(turn_id, handoff_id) VALUES (?, ?)",
@@ -1695,6 +1750,7 @@ class StateStore:
                 {
                     "generation_number": generation.generation_number,
                     "handoff_id": handoff_id,
+                    "followup_source_turn_id": followup_source_turn_id,
                     "pre_session_retry_without_handoff": (
                         pre_session_retry_without_handoff
                     ),
@@ -1704,6 +1760,19 @@ class StateStore:
                 },
                 now,
             )
+            if planned_followup is not None:
+                self._insert_work_item_event(
+                    connection,
+                    work_item_id,
+                    turn.turn_id,
+                    "turn_followup_started",
+                    {
+                        "cause": planned_followup.cause.value,
+                        "source_turn_id": planned_followup.source_turn_id,
+                        "target_role": planned_followup.target_role.value,
+                    },
+                    now,
+                )
         return work_item.transition_to(WorkItemState.RUNNING, at=now), generation, turn, prompt_input
 
     def _require_pre_session_rejection_retry(
@@ -2498,7 +2567,7 @@ class StateStore:
         if not isinstance(agent_result, AgentResult):
             raise TypeError("agent_result must be an AgentResult")
         if (
-            agent_result.status.value != result_status
+            agent_result_turn_status(agent_result) != result_status
             or agent_result.summary != result_summary
         ):
             raise ValueError("Agent result conflicts with the terminal Turn fields")
@@ -2769,15 +2838,267 @@ class StateStore:
         ).fetchone()
         return self._row_to_completion_gate(row) if row is not None else None
 
+    def get_turn_followup_intent(
+        self, source_turn_id: str
+    ) -> TurnFollowupIntent | None:
+        row = self._connection.execute(
+            "SELECT * FROM turn_followup_intents WHERE source_turn_id = ?",
+            (source_turn_id,),
+        ).fetchone()
+        return self._row_to_followup_intent(row) if row is not None else None
+
+    def get_planned_work_item_followup(
+        self, work_item_id: str
+    ) -> TurnFollowupIntent | None:
+        row = self._connection.execute(
+            "SELECT * FROM turn_followup_intents "
+            "WHERE work_item_id = ? AND state = 'planned'",
+            (work_item_id,),
+        ).fetchone()
+        return self._row_to_followup_intent(row) if row is not None else None
+
+    def list_work_item_followups(
+        self, work_item_id: str
+    ) -> tuple[TurnFollowupIntent, ...]:
+        return tuple(
+            self._row_to_followup_intent(row)
+            for row in self._connection.execute(
+                "SELECT intent.* FROM turn_followup_intents AS intent "
+                "JOIN turns AS source ON source.turn_id = intent.source_turn_id "
+                "WHERE intent.work_item_id = ? ORDER BY source.turn_number",
+                (work_item_id,),
+            )
+        )
+
+    def record_agent_followup_intent(
+        self,
+        intent: TurnFollowupIntent,
+        *,
+        updated_at: str | None = None,
+    ) -> tuple[WorkItem, Turn, TurnFollowupIntent]:
+        """Atomically finish a checkpoint Turn and keep its WorkItem autonomous."""
+        if not isinstance(intent, TurnFollowupIntent):
+            raise TypeError("intent must be a TurnFollowupIntent")
+        if intent.cause not in {
+            FollowupCause.AGENT_CHECKPOINT,
+            FollowupCause.AUDIT_GAP,
+        }:
+            raise ValueError("Agent result cannot create this follow-up cause")
+        now = updated_at or intent.created_at
+        with self._transaction() as connection:
+            turn = self._require_turn(connection, intent.source_turn_id)
+            work_item = self._require_work_item(connection, turn.work_item_id)
+            existing = connection.execute(
+                "SELECT * FROM turn_followup_intents WHERE source_turn_id = ?",
+                (turn.turn_id,),
+            ).fetchone()
+            if existing is not None:
+                persisted = self._row_to_followup_intent(existing)
+                if persisted != intent:
+                    raise ValueError("checkpoint already has a different follow-up intent")
+                return work_item, turn, persisted
+            generation = self._require_bound_generation_turn_by_turn(
+                connection, turn.turn_id
+            )[0]
+            result_row = connection.execute(
+                "SELECT result_json, result_sha256 FROM turn_agent_results WHERE turn_id = ?",
+                (turn.turn_id,),
+            ).fetchone()
+            if result_row is None:
+                raise ValueError("follow-up source Agent result is missing")
+            result_json = str(result_row["result_json"])
+            if sha256(result_json.encode("utf-8")).hexdigest() != result_row["result_sha256"]:
+                raise ValueError("follow-up source Agent result digest is invalid")
+            agent_result = parse_agent_result(result_json)
+            if (
+                intent.work_item_id != work_item.work_item_id
+                or intent.head_sha != turn.output_head_sha
+                or turn.state is not TurnState.PUBLISHED
+                or turn.result_status != "completed"
+                or work_item.state is not WorkItemState.RUNNING
+                or agent_result.status is not AgentResultStatus.CHECKPOINT
+            ):
+                raise ValueError("follow-up source is not an eligible checkpoint")
+            expected_cause = (
+                FollowupCause.AUDIT_GAP
+                if generation.role is SessionGenerationRole.AUDIT
+                else FollowupCause.AGENT_CHECKPOINT
+            )
+            expected_role = (
+                SessionGenerationRole.CI_REPAIR
+                if generation.role is SessionGenerationRole.AUDIT
+                else generation.role
+            )
+            if intent.cause is not expected_cause or intent.target_role is not expected_role:
+                raise ValueError("follow-up cause or target role conflicts with source role")
+            connection.execute(
+                "INSERT INTO turn_followup_intents "
+                "(source_turn_id, work_item_id, cause, target_role, state, head_sha, "
+                "context_json, context_sha256, target_session_generation_id, target_turn_id, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    intent.source_turn_id,
+                    intent.work_item_id,
+                    intent.cause.value,
+                    intent.target_role.value,
+                    intent.state.value,
+                    intent.head_sha,
+                    intent.context_json,
+                    intent.context_sha256,
+                    intent.target_session_generation_id,
+                    intent.target_turn_id,
+                    intent.created_at,
+                    intent.updated_at,
+                ),
+            )
+            next_turn = turn.transition_to(TurnState.FINISHED, at=now)
+            next_work_item = work_item.transition_to(WorkItemState.READY, at=now)
+            connection.execute(
+                "UPDATE turns SET state = ?, finished_at = ?, updated_at = ? "
+                "WHERE turn_id = ? AND state = 'published'",
+                (next_turn.state.value, next_turn.finished_at, now, turn.turn_id),
+            )
+            connection.execute(
+                "UPDATE work_items SET state = ?, updated_at = ? "
+                "WHERE work_item_id = ? AND state = 'running'",
+                (next_work_item.state.value, now, work_item.work_item_id),
+            )
+            self._insert_work_item_event(
+                connection,
+                work_item.work_item_id,
+                turn.turn_id,
+                "turn_followup_planned",
+                {
+                    "cause": intent.cause.value,
+                    "context_sha256": intent.context_sha256,
+                    "head_sha": intent.head_sha,
+                    "target_role": intent.target_role.value,
+                },
+                now,
+            )
+        return next_work_item, next_turn, intent
+
+    def bind_followup_generation(
+        self,
+        source_turn_id: str,
+        *,
+        session_generation_id: str,
+        updated_at: str | None = None,
+    ) -> TurnFollowupIntent:
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM turn_followup_intents WHERE source_turn_id = ?",
+                (source_turn_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"follow-up intent not found: {source_turn_id}")
+            intent = self._row_to_followup_intent(row)
+            generation_row = connection.execute(
+                "SELECT * FROM session_generations WHERE session_generation_id = ?",
+                (session_generation_id,),
+            ).fetchone()
+            if generation_row is None:
+                raise KeyError(f"session generation not found: {session_generation_id}")
+            generation = self._row_to_session_generation(generation_row)
+            if generation.work_item_id != intent.work_item_id:
+                raise ValueError("follow-up target generation belongs to another WorkItem")
+            if generation.role is not intent.target_role:
+                raise ValueError("follow-up target generation role conflicts")
+            updated = intent.bind_generation(session_generation_id, at=now)
+            cursor = connection.execute(
+                "UPDATE turn_followup_intents SET target_session_generation_id = ?, "
+                "updated_at = ? WHERE source_turn_id = ? AND state = 'planned' "
+                "AND (target_session_generation_id IS NULL OR target_session_generation_id = ?)",
+                (session_generation_id, now, source_turn_id, session_generation_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("concurrent follow-up generation binding detected")
+        return updated
+
+    def exhaust_followup_intent(
+        self,
+        source_turn_id: str,
+        *,
+        error_code: str,
+        updated_at: str | None = None,
+    ) -> tuple[WorkItem, TurnFollowupIntent]:
+        """Atomically stop one autonomous loop at a durable budget boundary."""
+        if (
+            not isinstance(error_code, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]{0,127}", error_code)
+        ):
+            raise ValueError("follow-up exhaustion error_code is invalid")
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM turn_followup_intents WHERE source_turn_id = ?",
+                (source_turn_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"follow-up intent not found: {source_turn_id}")
+            intent = self._row_to_followup_intent(row)
+            work_item = self._require_work_item(connection, intent.work_item_id)
+            if intent.state is FollowupIntentState.EXHAUSTED:
+                if work_item.state is WorkItemState.BLOCKED:
+                    return work_item, intent
+                raise ValueError("exhausted follow-up has inconsistent WorkItem state")
+            if (
+                intent.state is not FollowupIntentState.PLANNED
+                or work_item.state is not WorkItemState.READY
+            ):
+                raise ValueError("follow-up is not eligible for exhaustion")
+            cursor = connection.execute(
+                "UPDATE turn_followup_intents SET state = 'exhausted', updated_at = ? "
+                "WHERE source_turn_id = ? AND state = 'planned'",
+                (now, source_turn_id),
+            )
+            work_cursor = connection.execute(
+                "UPDATE work_items SET state = 'blocked', updated_at = ? "
+                "WHERE work_item_id = ? AND state = 'ready'",
+                (now, work_item.work_item_id),
+            )
+            if cursor.rowcount != 1 or work_cursor.rowcount != 1:
+                raise RuntimeError("concurrent follow-up exhaustion detected")
+            exhausted = replace(
+                intent,
+                state=FollowupIntentState.EXHAUSTED,
+                updated_at=now,
+            )
+            blocked = work_item.transition_to(WorkItemState.BLOCKED, at=now)
+            self._insert_work_item_event(
+                connection,
+                work_item.work_item_id,
+                source_turn_id,
+                "turn_followup_exhausted",
+                {"cause": intent.cause.value, "error_code": error_code},
+                now,
+            )
+        return blocked, exhausted
+
     def record_turn_completion_gate(
         self,
         snapshot: CompletionGateSnapshot,
         *,
+        followup_intent: TurnFollowupIntent | None = None,
         updated_at: str | None = None,
     ) -> tuple[WorkItem, Turn, CompletionGateSnapshot]:
         """Persist one gate observation and atomically apply a terminal verdict."""
         if not isinstance(snapshot, CompletionGateSnapshot):
             raise TypeError("snapshot must be a CompletionGateSnapshot")
+        if followup_intent is not None and (
+            not isinstance(followup_intent, TurnFollowupIntent)
+            or followup_intent.cause is not FollowupCause.CI_FAILURE
+            or followup_intent.target_role is not SessionGenerationRole.CI_REPAIR
+            or followup_intent.state is not FollowupIntentState.PLANNED
+            or followup_intent.source_turn_id != snapshot.turn_id
+            or followup_intent.work_item_id != snapshot.work_item_id
+            or followup_intent.head_sha != snapshot.head_sha
+            or followup_intent.context["payload"].get("gate_evidence_sha256")
+            != snapshot.evidence_sha256
+            or snapshot.status is not CompletionGateStatus.FAILED
+        ):
+            raise ValueError("CI repair intent conflicts with completion evidence")
         now = updated_at or snapshot.observed_at
         with self._transaction() as connection:
             turn = self._require_turn(connection, snapshot.turn_id)
@@ -2798,6 +3119,7 @@ class StateStore:
             ):
                 raise ValueError("completion gate target is already bound differently")
             if existing is not None and existing.status is not CompletionGateStatus.PENDING:
+                persisted_followup = self.get_turn_followup_intent(snapshot.turn_id)
                 if (
                     existing.status is CompletionGateStatus.PASSED
                     and turn.state is TurnState.FINISHED
@@ -2807,6 +3129,14 @@ class StateStore:
                     in {CompletionGateStatus.FAILED, CompletionGateStatus.UNVERIFIED}
                     and turn.state is TurnState.BLOCKED
                     and work_item.state is WorkItemState.BLOCKED
+                ):
+                    return work_item, turn, existing
+                if (
+                    existing.status is CompletionGateStatus.FAILED
+                    and followup_intent is not None
+                    and persisted_followup == followup_intent
+                    and turn.state is TurnState.BLOCKED
+                    and work_item.state is WorkItemState.READY
                 ):
                     return work_item, turn, existing
                 raise ValueError("terminal completion gate state is inconsistent")
@@ -2870,12 +3200,42 @@ class StateStore:
                 now,
             )
             if persisted.status is CompletionGateStatus.PENDING:
+                if followup_intent is not None:
+                    raise ValueError("pending completion evidence cannot plan repair")
                 return work_item, turn, persisted
 
             if persisted.status is CompletionGateStatus.PASSED:
+                if followup_intent is not None:
+                    raise ValueError("passed completion evidence cannot plan repair")
                 next_turn = turn.transition_to(TurnState.FINISHED, at=now)
                 next_work_item = work_item.transition_to(WorkItemState.REVIEW, at=now)
                 error_code = None
+            elif followup_intent is not None:
+                connection.execute(
+                    "INSERT INTO turn_followup_intents "
+                    "(source_turn_id, work_item_id, cause, target_role, state, head_sha, "
+                    "context_json, context_sha256, target_session_generation_id, target_turn_id, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        followup_intent.source_turn_id,
+                        followup_intent.work_item_id,
+                        followup_intent.cause.value,
+                        followup_intent.target_role.value,
+                        followup_intent.state.value,
+                        followup_intent.head_sha,
+                        followup_intent.context_json,
+                        followup_intent.context_sha256,
+                        followup_intent.target_session_generation_id,
+                        followup_intent.target_turn_id,
+                        followup_intent.created_at,
+                        followup_intent.updated_at,
+                    ),
+                )
+                error_code = "completion_gate_repair_planned"
+                next_turn = replace(turn, error_code=error_code).transition_to(
+                    TurnState.BLOCKED, at=now
+                )
+                next_work_item = work_item.transition_to(WorkItemState.READY, at=now)
             else:
                 error_code = (
                     "completion_gate_failed"
@@ -2920,6 +3280,20 @@ class StateStore:
                 },
                 now,
             )
+            if followup_intent is not None:
+                self._insert_work_item_event(
+                    connection,
+                    work_item.work_item_id,
+                    turn.turn_id,
+                    "turn_followup_planned",
+                    {
+                        "cause": followup_intent.cause.value,
+                        "context_sha256": followup_intent.context_sha256,
+                        "head_sha": followup_intent.head_sha,
+                        "target_role": followup_intent.target_role.value,
+                    },
+                    now,
+                )
         return next_work_item, next_turn, persisted
 
     def record_generation_publication(
@@ -4999,6 +5373,14 @@ class StateStore:
         values = dict(row)
         values["status"] = CompletionGateStatus(values["status"])
         return CompletionGateSnapshot(**values)
+
+    @staticmethod
+    def _row_to_followup_intent(row: sqlite3.Row) -> TurnFollowupIntent:
+        values = dict(row)
+        values["cause"] = FollowupCause(values["cause"])
+        values["target_role"] = SessionGenerationRole(values["target_role"])
+        values["state"] = FollowupIntentState(values["state"])
+        return TurnFollowupIntent(**values)
 
     @staticmethod
     def _row_to_session_handoff(row: sqlite3.Row) -> SessionHandoffSnapshot:

@@ -79,11 +79,15 @@ def _blocked_result():
     return parse_agent_result(
         json.dumps(
             {
+                "schema_version": 2,
                 "status": "blocked",
                 "summary": "Fixture stopped at a reviewed boundary",
+                "acceptance": [],
+                "remaining_work": [],
                 "needs_input": [],
                 "tests": [{"name": "fixture", "status": "passed"}],
                 "changed_paths": [],
+                "blocker_code": "fixture_blocked",
                 "next_step": "Record the bounded result",
             }
         )
@@ -94,11 +98,15 @@ def _completed_result():
     return parse_agent_result(
         json.dumps(
             {
+                "schema_version": 2,
                 "status": "completed",
                 "summary": "Fixture checkpoint completed",
+                "acceptance": [],
+                "remaining_work": [],
                 "needs_input": [],
                 "tests": [{"name": "fixture", "status": "passed"}],
                 "changed_paths": ["src/codex_dispatcher/main.py"],
+                "blocker_code": None,
                 "next_step": "Review the published branch",
             }
         )
@@ -109,11 +117,15 @@ def _needs_input_result():
     return parse_agent_result(
         json.dumps(
             {
+                "schema_version": 2,
                 "status": "needs_input",
                 "summary": "Fixture requires one reviewed maintainer decision",
+                "acceptance": [],
+                "remaining_work": ["Apply the maintainer decision"],
                 "needs_input": ["Which reviewed marker value should be used?"],
                 "tests": [{"name": "fixture", "status": "passed"}],
                 "changed_paths": [],
+                "blocker_code": None,
                 "next_step": "Resume after a maintainer adds /codex-context",
             }
         )
@@ -1546,7 +1558,12 @@ class SshControlSweepTests(unittest.TestCase):
             delivery=delivery,
         )
 
-        result = sweep._after_turn(task, TurnProgress(item, turn))
+        with patch.object(
+            self.store,
+            "get_turn_agent_result",
+            return_value=_completed_result(),
+        ):
+            result = sweep._after_turn(task, TurnProgress(item, turn))
 
         self.assertEqual(ControlSweepStatus.AWAITING_COMPLETION, result.status)
         self.assertEqual(TaskState.RUNNING, tracker.tasks[task.task_id].state)

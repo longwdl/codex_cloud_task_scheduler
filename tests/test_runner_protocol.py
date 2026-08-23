@@ -303,11 +303,17 @@ class RunnerProtocolTests(unittest.TestCase):
 
     def test_agent_result_is_strict_bounded_and_path_safe(self) -> None:
         payload = {
+            "schema_version": 2,
             "status": "needs_input",
             "summary": "Need one decision",
+            "acceptance": [
+                {"id": "AC-1", "status": "not_verified", "evidence": "Need a decision"}
+            ],
+            "remaining_work": ["Apply the reviewed decision"],
             "needs_input": ["Which format should be used?"],
             "tests": [{"name": "unit", "status": "not_run"}],
             "changed_paths": ["src/main.py"],
+            "blocker_code": None,
             "next_step": "Wait for the Issue update",
         }
         result = parse_agent_result(json.dumps(payload))
@@ -330,9 +336,100 @@ class RunnerProtocolTests(unittest.TestCase):
             {**payload, "unexpected": True},
             {**payload, "changed_paths": ["../secret"]},
             {**payload, "changed_paths": ["src/main.py", "src/main.py"]},
+            {**payload, "schema_version": 1},
             {**payload, "status": "completed"},
             {**payload, "tests": [{"name": "unit", "status": "unknown"}]},
             {**payload, "summary": "bad\u0001text"},
+        )
+        for item in invalid:
+            with self.subTest(item=item):
+                with self.assertRaises(RunnerProtocolError):
+                    parse_agent_result(json.dumps(item))
+
+    def test_agent_result_v2_enforces_checkpoint_completion_and_blocker_contracts(self) -> None:
+        base = {
+            "schema_version": 2,
+            "summary": "Bounded result",
+            "acceptance": [
+                {"id": "AC-1", "status": "passed", "evidence": "unit passed"}
+            ],
+            "remaining_work": [],
+            "needs_input": [],
+            "tests": [{"name": "unit", "status": "passed"}],
+            "changed_paths": [],
+            "blocker_code": None,
+            "next_step": "Wait for trusted evidence",
+        }
+        completed = parse_agent_result(json.dumps({**base, "status": "completed"}))
+        self.assertEqual(AgentResultStatus.COMPLETED, completed.status)
+        delegated = parse_agent_result(
+            json.dumps(
+                {
+                    **base,
+                    "status": "completed",
+                    "acceptance": [
+                        {
+                            "id": "AC-1",
+                            "status": "not_verified",
+                            "evidence": "Trusted completion gate will verify this fact",
+                        }
+                    ],
+                }
+            )
+        )
+        self.assertEqual(AgentResultStatus.COMPLETED, delegated.status)
+
+        checkpoint = parse_agent_result(
+            json.dumps(
+                {
+                    **base,
+                    "status": "checkpoint",
+                    "acceptance": [
+                        {
+                            "id": "AC-1",
+                            "status": "not_verified",
+                            "evidence": "More work remains",
+                        }
+                    ],
+                    "remaining_work": ["Finish AC-1"],
+                    "next_step": "Finish AC-1",
+                }
+            )
+        )
+        self.assertEqual(AgentResultStatus.CHECKPOINT, checkpoint.status)
+
+        blocked = parse_agent_result(
+            json.dumps(
+                {
+                    **base,
+                    "status": "blocked",
+                    "blocker_code": "environment_unavailable",
+                }
+            )
+        )
+        self.assertEqual(AgentResultStatus.BLOCKED, blocked.status)
+
+        invalid = (
+            {**base, "status": "checkpoint"},
+            {**base, "status": "completed", "remaining_work": ["unfinished"]},
+            {
+                **base,
+                "status": "completed",
+                "tests": [{"name": "unit", "status": "failed"}],
+            },
+            {
+                **base,
+                "status": "completed",
+                "acceptance": [
+                    {"id": "AC-1", "status": "failed", "evidence": "failed"}
+                ],
+            },
+            {**base, "status": "blocked"},
+            {
+                **base,
+                "status": "completed",
+                "blocker_code": "not_allowed_here",
+            },
         )
         for item in invalid:
             with self.subTest(item=item):

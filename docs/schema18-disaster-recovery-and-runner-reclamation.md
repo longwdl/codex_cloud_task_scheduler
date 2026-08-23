@@ -1,4 +1,7 @@
-# Schema-18 disaster recovery and exact Runner asset reclamation
+# Current-schema disaster recovery and exact Runner asset reclamation
+
+The command retains its historical `schema18-disaster-recovery` name, but the current release
+requires the exact schema-19 migration set (1 through 19).
 
 This runbook has two independent workflows. The disaster-recovery drill may write only below a new
 isolated recovery directory and may perform GitHub and Slack reads. Reclamation planning is
@@ -8,7 +11,7 @@ operation and must never follow automatically from a plan.
 ## Measured recovery boundary
 
 The receipt's `rto_milliseconds` measures one exact interval: selection of the newest validated
-backup through isolated schema-18 restore, release-receipt validation, Control/Runner version
+backup through isolated schema-19 restore, release-receipt validation, Control/Runner version
 agreement, Runner registry/archive/absence reconciliation, GitHub Issue/PR/branch read-back, Slack
 permalink read-back, and reconstruction of an empty Control application filesystem root. The
 receipt records the backup age as the observed recovery point.
@@ -19,13 +22,13 @@ unmeasured. The isolated empty root does not replace either live `current` symli
 a service. It contains the exact release, secret-free Control config, systemd units, and restored
 database needed to prove the application reconstruction path.
 
-## Schema-18 isolated drill
+## Schema-19 isolated drill
 
 Preconditions:
 
 - leave the current Control and Runner environments in place;
 - require a committed schema-v2 release receipt for the exact current commit;
-- require the newest retained backup to be mode `0600`, schema 18, integral, and free of foreign-key
+- require the newest retained backup to be mode `0600`, schema 19, integral, and free of foreign-key
   violations;
 - require no unfinished Slack outbox row;
 - place copied inputs in a `codex-dispatcher`-owned mode-`0700` directory and never print secrets.
@@ -75,7 +78,7 @@ sudo systemd-run --wait --collect --pipe \
   --execute-isolated --json
 ```
 
-Acceptance requires `status=passed`, `database_schema_migrations=[1,...,18]`, identical Control and
+Acceptance requires `status=passed`, `database_schema_migrations=[1,...,19]`, identical Control and
 Runner commits, all recorded external counts reconciled, `online_state_modified=false`, and a
 mode-protected `receipt.json`. A failure writes `failed-receipt.json`; retain it and the source
 backup, and remove only that exact recovery directory after investigation. Do not retry by reusing

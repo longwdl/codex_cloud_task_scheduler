@@ -15,6 +15,7 @@ from codex_dispatcher.publisher import (
 )
 from codex_dispatcher.runner_protocol import (
     AgentResultStatus,
+    agent_result_turn_status,
     NEXT_PROTOCOL_VERSION,
     RunnerOperation,
     RunnerProtocolError,
@@ -432,6 +433,7 @@ class OfflineTurnOrchestrator:
         inputs: CanonicalInputSnapshot,
         issue_allowed_paths: tuple[str, ...],
         handoff_id: str | None = None,
+        followup_source_turn_id: str | None = None,
         pre_session_retry_without_handoff: bool = False,
         expected_turn_number: int | None = None,
         turn_id: str | None = None,
@@ -474,6 +476,7 @@ class OfflineTurnOrchestrator:
                 issue_allowed_paths=issue_allowed_paths,
                 input_head_sha=input_head_sha,
                 handoff_id=handoff_id,
+                followup_source_turn_id=followup_source_turn_id,
                 pre_session_retry_without_handoff=(
                     pre_session_retry_without_handoff
                 ),
@@ -489,6 +492,7 @@ class OfflineTurnOrchestrator:
             "session_generation_id": generation.session_generation_id,
             "session_generation": generation.generation_number,
             "agent_policy_digest": generation.policy_sha256,
+            "session_role": generation.role.value,
         }
         if generation.codex_session_id is None:
             operation = RunnerOperation.START
@@ -575,6 +579,7 @@ class OfflineTurnOrchestrator:
                 session_generation_id=generation.session_generation_id,
                 session_generation=generation.generation_number,
                 agent_policy_digest=generation.policy_sha256,
+                session_role=generation.role.value,
             )
         try:
             output = self._transport.invoke(request)
@@ -623,6 +628,7 @@ class OfflineTurnOrchestrator:
             session_generation_id=generation.session_generation_id,
             session_generation=generation.generation_number,
             agent_policy_digest=generation.policy_sha256,
+            session_role=generation.role.value,
         )
         try:
             output = self._transport.invoke(request)
@@ -684,6 +690,7 @@ class OfflineTurnOrchestrator:
             session_generation_id=generation.session_generation_id,
             session_generation=generation.generation_number,
             agent_policy_digest=generation.policy_sha256,
+            session_role=generation.role.value,
         )
         try:
             output = self._transport.invoke(request)
@@ -1006,7 +1013,7 @@ class OfflineTurnOrchestrator:
             turn_id,
             output_sha256=reply.output_sha256,
             output_head_sha=reply.head_sha,
-            result_status=reply.result.status.value,
+            result_status=agent_result_turn_status(reply.result),
             result_summary=reply.result.summary,
         )
         if reply.head_sha != turn.input_head_sha:
@@ -1107,7 +1114,7 @@ class OfflineTurnOrchestrator:
             session_id=reply.session_id,
             output_sha256=reply.output_sha256,
             output_head_sha=reply.head_sha,
-            result_status=reply.result.status.value,
+            result_status=agent_result_turn_status(reply.result),
             result_summary=reply.result.summary,
             agent_result=reply.result,
             input_tokens=reply.usage.input_tokens,

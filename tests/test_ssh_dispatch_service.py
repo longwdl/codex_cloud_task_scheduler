@@ -16,13 +16,17 @@ from codex_dispatcher.ci_evidence import (
     RequiredCheckEvidence,
 )
 from codex_dispatcher.codex_jsonl import CodexTurnUsage
+from codex_dispatcher.completion_gate import repairable_ci_failures
 from codex_dispatcher.config import SessionRuntimeConfig
 from codex_dispatcher.publisher import VerifiedBundle
 from codex_dispatcher.runner_protocol import RunnerOperation, parse_agent_result
 from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_dispatch_planning import SshDispatchPlanningError
 from codex_dispatcher.ssh_recovery import SshRecoveryAction, plan_ssh_recovery
-from codex_dispatcher.ssh_dispatch_service import OfflineSshDispatchService
+from codex_dispatcher.ssh_dispatch_service import (
+    AutonomyBudgetError,
+    OfflineSshDispatchService,
+)
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.testing.fake_runner import (
     FakeBundleVerifier,
@@ -53,30 +57,91 @@ def blocked_result():
     return parse_agent_result(
         json.dumps(
             {
+                "schema_version": 2,
                 "status": "blocked",
                 "summary": "No repository changes were required",
+                "acceptance": [],
+                "remaining_work": [],
                 "needs_input": [],
                 "tests": [{"name": "inspection", "status": "passed"}],
                 "changed_paths": [],
+                "blocker_code": "fixture_blocked",
                 "next_step": "Record the blocker in the Issue",
             }
         )
     )
 
 
-def completed_result():
+def completed_result(
+    extra_acceptance: tuple[dict[str, str], ...] = (),
+):
     return parse_agent_result(
         json.dumps(
             {
+                "schema_version": 2,
                 "status": "completed",
                 "summary": "Completion candidate",
+                "acceptance": [
+                    {"id": "AC-1", "status": "passed", "evidence": "tests passed"},
+                    {"id": "AC-2", "status": "passed", "evidence": "paths verified"},
+                    {"id": "AC-3", "status": "passed", "evidence": "head published"},
+                    *extra_acceptance,
+                ],
+                "remaining_work": [],
                 "needs_input": [],
                 "tests": [{"name": "tests", "status": "passed"}],
                 "changed_paths": ["src/codex_dispatcher/parser.py"],
+                "blocker_code": None,
                 "next_step": "Wait for trusted completion evidence",
             }
         )
     )
+
+
+def checkpoint_result():
+    return parse_agent_result(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "status": "checkpoint",
+                "summary": "A bounded implementation step completed",
+                "acceptance": [
+                    {"id": "AC-1", "status": "not_verified", "evidence": "CI pending"},
+                    {"id": "AC-2", "status": "passed", "evidence": "paths inspected"},
+                    {"id": "AC-3", "status": "not_verified", "evidence": "publish pending"},
+                ],
+                "remaining_work": ["Complete the remaining implementation"],
+                "needs_input": [],
+                "tests": [{"name": "focused tests", "status": "passed"}],
+                "changed_paths": [],
+                "blocker_code": None,
+                "next_step": "Continue autonomously",
+            }
+        )
+    )
+
+
+def audit_completed_result(
+    extra_acceptance: tuple[dict[str, str], ...] = (),
+):
+    result = json.loads(json.dumps({
+        "schema_version": 2,
+        "status": "completed",
+        "summary": "Fresh read-only audit passed",
+        "acceptance": [
+            {"id": "AC-1", "status": "passed", "evidence": "exact Actions evidence"},
+            {"id": "AC-2", "status": "passed", "evidence": "publication ledger"},
+            {"id": "AC-3", "status": "passed", "evidence": "exact HEAD receipt"},
+            *extra_acceptance,
+        ],
+        "remaining_work": [],
+        "needs_input": [],
+        "tests": [{"name": "audit verification", "status": "passed"}],
+        "changed_paths": [],
+        "blocker_code": None,
+        "next_step": "Review the audited candidate",
+    }))
+    return parse_agent_result(json.dumps(result))
 
 
 def structured_claimed_task():
@@ -103,12 +168,362 @@ def session_runtime_config(**overrides: object) -> SessionRuntimeConfig:
         "max_session_generations": 3,
         "max_total_turns": 10,
         "max_no_progress_turns": 2,
+        "max_repair_cycles": 3,
+        "max_audit_cycles": 3,
+        "max_total_tokens": 1_000_000,
+        "max_work_item_age_seconds": 604_800,
     }
     values.update(overrides)
     return SessionRuntimeConfig(**values)  # type: ignore[arg-type]
 
 
 class OfflineSshDispatchServiceTests(unittest.TestCase):
+    def test_no_progress_budget_exhaustion_is_durable(self) -> None:
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(max_no_progress_turns=1),
+        )
+        service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+        task = structured_claimed_task()
+        item = service.resolve_and_prepare(
+            task, base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        source_turn_id = "turn_" + "8" * 32
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, checkpoint_result()),
+        )
+        service.run_claimed_turn(task, turn_id=source_turn_id)
+        service.plan_checkpoint_followup(task, source_turn_id)
+        running_task = replace(
+            task,
+            state=TaskState.RUNNING,
+            labels=("agent:running", "exec:ssh-cli", "priority:p1"),
+        )
+
+        with self.assertRaisesRegex(
+            AutonomyBudgetError, "no_progress_budget_exhausted"
+        ):
+            service.run_claimed_turn(
+                running_task, turn_id="turn_" + "9" * 32
+            )
+
+        intent = self.store.get_turn_followup_intent(source_turn_id)
+        blocked = self.store.get_work_item(item.work_item_id)
+        self.assertIsNotNone(intent)
+        self.assertIsNotNone(blocked)
+        assert intent is not None and blocked is not None
+        self.assertEqual("exhausted", intent.state.value)
+        self.assertIs(WorkItemState.BLOCKED, blocked.state)
+        self.assertEqual(2, len(self.transport.calls))  # PREPARE + first START only
+
+    def test_ci_failure_rotates_to_repair_then_requires_a_fresh_audit(self) -> None:
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(
+                rotate_before_final_audit=True,
+                max_session_generations=6,
+            ),
+        )
+        ci_state = {"conclusion": "failure", "run_id": 401}
+
+        def import_for_head(**kwargs: object) -> ActionsEvidenceSnapshot:
+            run = ActionsRunEvidence(
+                name="tests",
+                workflow_id=301,
+                run_id=int(ci_state["run_id"]),
+                run_attempt=1,
+                repository="owner/repo",
+                head_repository="owner/repo",
+                head_branch=str(kwargs["task_branch"]),
+                head_sha=str(kwargs["head_sha"]),
+                event="pull_request",
+                status="completed",
+                conclusion=str(ci_state["conclusion"]),
+                created_at="2026-01-01T00:00:00Z",
+                updated_at="2026-01-01T00:01:00Z",
+                html_url=(
+                    "https://github.com/owner/repo/actions/runs/"
+                    + str(ci_state["run_id"])
+                ),
+            )
+            return ActionsEvidenceSnapshot(
+                repository="owner/repo",
+                task_branch=str(kwargs["task_branch"]),
+                head_sha=str(kwargs["head_sha"]),
+                remote_ref_sha=str(kwargs["head_sha"]),
+                observed_at=str(kwargs["observed_at"]),
+                required_checks=(
+                    RequiredCheckEvidence("tests", run.check_status, run),
+                ),
+            )
+
+        service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+            ci_evidence_importer=SimpleNamespace(import_for_head=import_for_head),
+        )
+        task = structured_claimed_task()
+        item = service.resolve_and_prepare(
+            task, base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        first_head = "4" * 40
+        first_artifact = b"initial-completion"
+        self.verifier.register(
+            VerifiedBundle(
+                bundle_sha256=sha256(first_artifact).hexdigest(),
+                head_sha=first_head,
+                parent_anchor_sha=BASE_SHA,
+                changed_paths=("src/codex_dispatcher/parser.py",),
+                commit_count=1,
+                size_bytes=len(first_artifact),
+            )
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, first_head, completed_result(), first_artifact),
+        )
+        candidate = service.run_claimed_turn(task, turn_id="turn_" + "3" * 32)
+        candidate = service.publish_checkpoint(
+            candidate.turn.turn_id,
+            publisher=SimpleNamespace(
+                publish=lambda artifact, *, plan, work_item: SimpleNamespace(
+                    observed_remote_sha=plan.source_sha
+                )
+            ),
+        )
+        failed = service.evaluate_completion_gate(task, candidate.turn.turn_id)
+
+        self.assertEqual(WorkItemState.READY, failed.work_item.state)
+        self.assertEqual("completion_gate_repair_planned", failed.turn.error_code)
+        intent = self.store.get_planned_work_item_followup(item.work_item_id)
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual("ci_failure", intent.cause.value)
+        self.assertEqual("failure", intent.context["payload"]["failed_checks"][0]["conclusion"])
+        failed_gate = self.store.get_turn_completion_gate(candidate.turn.turn_id)
+        self.assertIsNotNone(failed_gate)
+        assert failed_gate is not None
+        for offset, conclusion in enumerate(("cancelled", "timed_out"), start=1):
+            with self.subTest(nonrepairable_conclusion=conclusion):
+                run_id = 410 + offset
+                nonrepairable_run = ActionsRunEvidence(
+                    name="tests",
+                    workflow_id=301,
+                    run_id=run_id,
+                    run_attempt=1,
+                    repository="owner/repo",
+                    head_repository="owner/repo",
+                    head_branch=item.task_branch,
+                    head_sha=first_head,
+                    event="pull_request",
+                    status="completed",
+                    conclusion=conclusion,
+                    created_at="2026-01-01T00:00:00Z",
+                    updated_at="2026-01-01T00:01:00Z",
+                    html_url=f"https://github.com/owner/repo/actions/runs/{run_id}",
+                )
+                nonrepairable = ActionsEvidenceSnapshot(
+                    repository="owner/repo",
+                    task_branch=item.task_branch,
+                    head_sha=first_head,
+                    remote_ref_sha=first_head,
+                    observed_at="2026-01-01T00:02:00Z",
+                    required_checks=(
+                        RequiredCheckEvidence(
+                            "tests", nonrepairable_run.check_status, nonrepairable_run
+                        ),
+                    ),
+                )
+                self.assertEqual(
+                    (), repairable_ci_failures(failed_gate, nonrepairable)
+                )
+
+        running_task = replace(
+            task,
+            state=TaskState.RUNNING,
+            labels=("agent:running", "exec:ssh-cli", "priority:p1"),
+        )
+        repair_head = "5" * 40
+        repair_artifact = b"ci-repair"
+        self.verifier.register(
+            VerifiedBundle(
+                bundle_sha256=sha256(repair_artifact).hexdigest(),
+                head_sha=repair_head,
+                parent_anchor_sha=first_head,
+                changed_paths=("src/codex_dispatcher/parser.py",),
+                commit_count=1,
+                size_bytes=len(repair_artifact),
+            )
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION_2, repair_head, completed_result(), repair_artifact),
+        )
+        repair = service.run_claimed_turn(
+            running_task, turn_id="turn_" + "4" * 32
+        )
+        self.assertEqual("ci_repair", self.transport.calls[-1].session_role)
+        repair = service.publish_checkpoint(
+            repair.turn.turn_id,
+            publisher=SimpleNamespace(
+                publish=lambda artifact, *, plan, work_item: SimpleNamespace(
+                    observed_remote_sha=plan.source_sha
+                )
+            ),
+        )
+        ci_state.update(conclusion="success", run_id=402)
+        repaired = service.evaluate_completion_gate(running_task, repair.turn.turn_id)
+        self.assertTrue(service.requires_fresh_final_audit(repaired.turn.turn_id))
+        crash_recovery_tracker = FakeTracker()
+        crash_recovery_tracker.tasks[task.task_id] = running_task
+        crash_recovery = plan_ssh_recovery(
+            config, self.store, crash_recovery_tracker
+        )
+        self.assertEqual(
+            SshRecoveryAction.START_FRESH_FINAL_AUDIT,
+            crash_recovery.action,
+        )
+        self.assertEqual(repair.turn.turn_id, crash_recovery.turn.turn_id)
+
+        session_3 = "323e4567-e89b-12d3-a456-426614174000"
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(session_3, repair_head, checkpoint_result()),
+        )
+        audit_gap = service.run_fresh_final_audit(
+            running_task, turn_id="turn_" + "5" * 32
+        )
+        self.assertEqual("audit", self.transport.calls[-1].session_role)
+        planned_gap = service.plan_checkpoint_followup(
+            running_task, audit_gap.turn.turn_id
+        )
+        self.assertEqual(WorkItemState.READY, planned_gap.work_item.state)
+        gap_intent = self.store.get_planned_work_item_followup(item.work_item_id)
+        self.assertIsNotNone(gap_intent)
+        assert gap_intent is not None
+        self.assertEqual("audit_gap", gap_intent.cause.value)
+        self.assertEqual("ci_repair", gap_intent.target_role.value)
+
+        second_repair_head = "6" * 40
+        second_repair_artifact = b"audit-gap-repair"
+        self.verifier.register(
+            VerifiedBundle(
+                bundle_sha256=sha256(second_repair_artifact).hexdigest(),
+                head_sha=second_repair_head,
+                parent_anchor_sha=repair_head,
+                changed_paths=("src/codex_dispatcher/parser.py",),
+                commit_count=1,
+                size_bytes=len(second_repair_artifact),
+            )
+        )
+        session_4 = "423e4567-e89b-12d3-a456-426614174000"
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(
+                session_4,
+                second_repair_head,
+                completed_result(),
+                second_repair_artifact,
+            ),
+        )
+        second_repair = service.run_claimed_turn(
+            running_task, turn_id="turn_" + "6" * 32
+        )
+        second_repair = service.publish_checkpoint(
+            second_repair.turn.turn_id,
+            publisher=SimpleNamespace(
+                publish=lambda artifact, *, plan, work_item: SimpleNamespace(
+                    observed_remote_sha=plan.source_sha
+                )
+            ),
+        )
+        ci_state.update(conclusion="success", run_id=403)
+        second_repaired = service.evaluate_completion_gate(
+            running_task, second_repair.turn.turn_id
+        )
+        self.assertTrue(
+            service.requires_fresh_final_audit(second_repaired.turn.turn_id)
+        )
+
+        session_5 = "523e4567-e89b-12d3-a456-426614174000"
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(
+                session_5, second_repair_head, audit_completed_result()
+            ),
+        )
+        final_audit = service.run_fresh_final_audit(
+            running_task, turn_id="turn_" + "7" * 32
+        )
+        self.assertEqual("audit", self.transport.calls[-1].session_role)
+        final = service.evaluate_completion_gate(
+            running_task, final_audit.turn.turn_id
+        )
+        self.assertEqual(TurnState.FINISHED, final.turn.state)
+        self.assertEqual(WorkItemState.REVIEW, final.work_item.state)
+        self.assertFalse(service.requires_fresh_final_audit(final.turn.turn_id))
+
+    def test_checkpoint_intent_is_durable_recoverable_and_atomically_consumed(self) -> None:
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(),
+        )
+        service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+        task = structured_claimed_task()
+        item = service.resolve_and_prepare(
+            task, base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        source_turn_id = "turn_" + "1" * 32
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, checkpoint_result()),
+        )
+
+        checkpoint = service.run_claimed_turn(task, turn_id=source_turn_id)
+        planned = service.plan_checkpoint_followup(task, source_turn_id)
+
+        self.assertEqual(TurnState.PUBLISHED, checkpoint.turn.state)
+        self.assertEqual(TurnState.FINISHED, planned.turn.state)
+        self.assertEqual(WorkItemState.READY, planned.work_item.state)
+        intent = self.store.get_planned_work_item_followup(item.work_item_id)
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        tracker = FakeTracker()
+        running_task = replace(
+            task,
+            state=TaskState.RUNNING,
+            labels=("agent:running", "exec:ssh-cli", "priority:p1"),
+        )
+        tracker.tasks[task.task_id] = running_task
+        recovery = plan_ssh_recovery(config, self.store, tracker)
+        self.assertIs(SshRecoveryAction.START_AUTONOMOUS_TURN, recovery.action)
+
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, blocked_result()),
+        )
+        continued = service.run_claimed_turn(
+            running_task, turn_id="turn_" + "2" * 32
+        )
+
+        consumed = self.store.get_turn_followup_intent(source_turn_id)
+        self.assertIsNotNone(consumed)
+        assert consumed is not None
+        self.assertEqual("started", consumed.state.value)
+        self.assertEqual(continued.turn.turn_id, consumed.target_turn_id)
+        self.assertIs(RunnerOperation.RESUME, self.transport.calls[-1].operation)
+        self.assertEqual("implementation", self.transport.calls[-1].session_role)
+
     def test_missing_completed_state_requires_runner_bound_absence_receipt(self) -> None:
         work_item = self.service.resolve_and_prepare(
             claimed_task(),
@@ -1219,7 +1634,14 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
             orchestrator=self.orchestrator,
             ci_evidence_importer=SimpleNamespace(import_for_head=import_for_head),
         )
-        task = structured_claimed_task()
+        task = replace(
+            structured_claimed_task(),
+            body=structured_claimed_task().body.replace(
+                "- [AC-3] task-head-published",
+                "- [AC-3] task-head-published\n"
+                "- [AC-4] audit: verify the behavioral edge cases",
+            ),
+        )
         item = service.resolve_and_prepare(
             task, base_sha=BASE_SHA, source_bundle=source_bundle()
         )
@@ -1237,7 +1659,20 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
         )
         self.transport.queue_turn(
             item.work_item_id,
-            FakeTurnFixture(SESSION, head_sha, completed_result(), artifact),
+            FakeTurnFixture(
+                SESSION,
+                head_sha,
+                completed_result(
+                    (
+                        {
+                            "id": "AC-4",
+                            "status": "not_verified",
+                            "evidence": "Fresh Audit has not run yet",
+                        },
+                    )
+                ),
+                artifact,
+            ),
         )
         implementation = service.run_claimed_turn(
             task, turn_id="turn_" + "e" * 32
@@ -1271,7 +1706,19 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
 
         self.transport.queue_turn(
             item.work_item_id,
-            FakeTurnFixture(SESSION_2, head_sha, completed_result()),
+            FakeTurnFixture(
+                SESSION_2,
+                head_sha,
+                audit_completed_result(
+                    (
+                        {
+                            "id": "AC-4",
+                            "status": "passed",
+                            "evidence": "Fresh read-only inspection passed",
+                        },
+                    )
+                ),
+            ),
         )
         audit = service.run_fresh_final_audit(
             running_task, turn_id="turn_" + "f" * 32

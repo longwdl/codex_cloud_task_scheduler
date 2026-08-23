@@ -191,11 +191,15 @@ if "change" in prompt:
     )
     changed = ["result.txt"]
 result = {{
+    "schema_version": 2,
     "status": "completed",
     "summary": "fixture complete",
+    "acceptance": [],
+    "remaining_work": [],
     "needs_input": [],
     "tests": [{{"name": "fixture", "status": "passed"}}],
     "changed_paths": changed,
+    "blocker_code": None,
     "next_step": "review",
 }}
 turn_completed = {{"type": "turn.completed"}}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 from codex_dispatcher.redaction import redact_text
 from codex_dispatcher.task_spec import normalize_repo_path
 from codex_dispatcher.work_items import (
+    SessionGenerationRole,
     validate_branch,
     validate_git_sha,
     validate_repository,
@@ -90,7 +92,12 @@ _V1_REQUEST_FIELDS = {
 
 
 _V2_GENERATION_FIELDS = frozenset(
-    {"session_generation_id", "session_generation", "agent_policy_digest"}
+    {
+        "session_generation_id",
+        "session_generation",
+        "agent_policy_digest",
+        "session_role",
+    }
 )
 _V2_REQUEST_FIELDS = {
     RunnerOperation.START: _V1_REQUEST_FIELDS[RunnerOperation.START]
@@ -141,6 +148,7 @@ class RunnerRequest:
     session_generation_id: str | None = None
     session_generation: int | None = None
     agent_policy_digest: str | None = None
+    session_role: str | None = None
     archive_request_sha256: str | None = None
     version: int = PROTOCOL_VERSION
 
@@ -152,6 +160,20 @@ class RunnerRequest:
             NEXT_PROTOCOL_VERSION,
         }:
             raise RunnerProtocolError("unsupported Runner protocol version")
+        if (
+            self.version == NEXT_PROTOCOL_VERSION
+            and self.operation
+            in {
+                RunnerOperation.START,
+                RunnerOperation.RESUME,
+                RunnerOperation.STATUS,
+                RunnerOperation.STOP,
+            }
+            and self.session_role is None
+        ):
+            object.__setattr__(
+                self, "session_role", SessionGenerationRole.IMPLEMENTATION.value
+            )
         validate_work_item_id(self.work_item_id)
         payload = self.to_mapping()
         expected = _request_fields(self.version, self.operation)
@@ -198,6 +220,11 @@ class RunnerRequest:
                 validate_sha256(self.agent_policy_digest, "agent_policy_digest")
             except ValueError as exc:
                 raise RunnerProtocolError(str(exc)) from exc
+        if self.session_role is not None:
+            try:
+                SessionGenerationRole(self.session_role)
+            except (TypeError, ValueError) as exc:
+                raise RunnerProtocolError("session_role is unsupported") from exc
         if self.archive_request_sha256 is not None:
             try:
                 validate_sha256(
@@ -227,6 +254,7 @@ class RunnerRequest:
             ("session_generation_id", self.session_generation_id),
             ("session_generation", self.session_generation),
             ("agent_policy_digest", self.agent_policy_digest),
+            ("session_role", self.session_role),
             ("archive_request_sha256", self.archive_request_sha256),
         )
         payload.update((name, value) for name, value in optional if value is not None)
@@ -270,6 +298,7 @@ def parse_runner_request(value: str | bytes) -> RunnerRequest:
             session_generation_id=payload.get("session_generation_id"),
             session_generation=payload.get("session_generation"),
             agent_policy_digest=payload.get("agent_policy_digest"),
+            session_role=payload.get("session_role"),
             archive_request_sha256=payload.get("archive_request_sha256"),
         )
     except (TypeError, ValueError) as exc:
@@ -290,6 +319,7 @@ def _request_fields(version: int, operation: RunnerOperation) -> frozenset[str]:
 
 
 class AgentResultStatus(StrEnum):
+    CHECKPOINT = "checkpoint"
     COMPLETED = "completed"
     NEEDS_INPUT = "needs_input"
     BLOCKED = "blocked"
@@ -301,6 +331,12 @@ class TestStatus(StrEnum):
     NOT_RUN = "not_run"
 
 
+class AcceptanceAssertionStatus(StrEnum):
+    PASSED = "passed"
+    FAILED = "failed"
+    NOT_VERIFIED = "not_verified"
+
+
 @dataclass(frozen=True, slots=True)
 class TestResult:
     name: str
@@ -308,26 +344,61 @@ class TestResult:
 
 
 @dataclass(frozen=True, slots=True)
+class AcceptanceAssertion:
+    criterion_id: str
+    status: AcceptanceAssertionStatus
+    evidence: str
+
+
+@dataclass(frozen=True, slots=True)
 class AgentResult:
     status: AgentResultStatus
     summary: str
+    acceptance: tuple[AcceptanceAssertion, ...]
+    remaining_work: tuple[str, ...]
     needs_input: tuple[str, ...]
     tests: tuple[TestResult, ...]
     changed_paths: tuple[str, ...]
+    blocker_code: str | None
     next_step: str
+
+
+def agent_result_turn_status(result: AgentResult) -> str:
+    """Project the V2 disposition into the legacy three-value Turn column.
+
+    The projection is never authoritative for protocol-v2 control decisions. A
+    checkpoint intentionally shares the historical ``completed`` storage value,
+    so every v2 decision must also require and inspect ``turn_agent_results``.
+    """
+    if not isinstance(result, AgentResult):
+        raise RunnerProtocolError("result must be an AgentResult")
+    if result.status is AgentResultStatus.CHECKPOINT:
+        return AgentResultStatus.COMPLETED.value
+    return result.status.value
 
 
 def agent_result_to_mapping(result: AgentResult) -> dict[str, object]:
     if not isinstance(result, AgentResult):
         raise RunnerProtocolError("result must be an AgentResult")
     return {
+        "schema_version": 2,
         "status": result.status.value,
         "summary": result.summary,
+        "acceptance": [
+            {
+                "id": assertion.criterion_id,
+                "status": assertion.status.value,
+                "evidence": assertion.evidence,
+            }
+            for assertion in result.acceptance
+        ],
+        "remaining_work": list(result.remaining_work),
         "needs_input": list(result.needs_input),
         "tests": [
             {"name": test.name, "status": test.status.value} for test in result.tests
         ],
         "changed_paths": list(result.changed_paths),
+        "blocker_code": result.blocker_code,
         "next_step": result.next_step,
     }
 
@@ -344,9 +415,22 @@ def parse_agent_result(
     value: str | bytes, *, explicit_secrets: tuple[str, ...] = ()
 ) -> AgentResult:
     payload = _load_object(value, maximum=MAX_RESULT_BYTES, description="Agent result")
-    required = {"status", "summary", "needs_input", "tests", "changed_paths", "next_step"}
+    required = {
+        "schema_version",
+        "status",
+        "summary",
+        "acceptance",
+        "remaining_work",
+        "needs_input",
+        "tests",
+        "changed_paths",
+        "blocker_code",
+        "next_step",
+    }
     if set(payload) != required:
         raise RunnerProtocolError("Agent result has unexpected or missing fields")
+    if payload["schema_version"] != 2:
+        raise RunnerProtocolError("Agent result schema version is unsupported")
     try:
         status = AgentResultStatus(payload["status"])
     except (TypeError, ValueError) as exc:
@@ -372,6 +456,52 @@ def parse_agent_result(
     if status is not AgentResultStatus.NEEDS_INPUT and needs_input:
         raise RunnerProtocolError("needs_input questions require needs_input status")
 
+    remaining_work = _string_array(
+        payload["remaining_work"],
+        "remaining_work",
+        maximum_items=100,
+        maximum_text=2_000,
+        explicit_secrets=explicit_secrets,
+    )
+    if status is AgentResultStatus.CHECKPOINT and not remaining_work:
+        raise RunnerProtocolError("checkpoint status requires remaining_work")
+    if status is AgentResultStatus.COMPLETED and remaining_work:
+        raise RunnerProtocolError("completed status forbids remaining_work")
+
+    raw_acceptance = payload["acceptance"]
+    if not isinstance(raw_acceptance, list) or len(raw_acceptance) > 100:
+        raise RunnerProtocolError("acceptance must be a bounded array")
+    acceptance: list[AcceptanceAssertion] = []
+    criterion_ids: set[str] = set()
+    for item in raw_acceptance:
+        if not isinstance(item, dict) or set(item) != {"id", "status", "evidence"}:
+            raise RunnerProtocolError(
+                "acceptance assertion has unexpected or missing fields"
+            )
+        criterion_id = _bounded_text(item["id"], "acceptance id", maximum=128)
+        if criterion_id in criterion_ids:
+            raise RunnerProtocolError("acceptance assertion ids must be unique")
+        criterion_ids.add(criterion_id)
+        try:
+            assertion_status = AcceptanceAssertionStatus(item["status"])
+        except (TypeError, ValueError) as exc:
+            raise RunnerProtocolError("acceptance assertion status is unsupported") from exc
+        evidence = _redacted_text(
+            item["evidence"],
+            "acceptance evidence",
+            maximum=4_096,
+            explicit_secrets=explicit_secrets,
+        )
+        acceptance.append(
+            AcceptanceAssertion(criterion_id, assertion_status, evidence)
+        )
+    if status is AgentResultStatus.COMPLETED and any(
+        item.status is AcceptanceAssertionStatus.FAILED for item in acceptance
+    ):
+        raise RunnerProtocolError(
+            "completed status cannot report a failed acceptance assertion"
+        )
+
     raw_tests = payload["tests"]
     if not isinstance(raw_tests, list) or len(raw_tests) > 100:
         raise RunnerProtocolError("tests must be a bounded array")
@@ -390,6 +520,10 @@ def parse_agent_result(
         except (TypeError, ValueError) as exc:
             raise RunnerProtocolError("test status is unsupported") from exc
         tests.append(TestResult(name, test_status))
+    if status is AgentResultStatus.COMPLETED and any(
+        item.status is TestStatus.FAILED for item in tests
+    ):
+        raise RunnerProtocolError("completed status cannot report a failed test")
 
     raw_paths = payload["changed_paths"]
     if not isinstance(raw_paths, list) or len(raw_paths) > 1_000:
@@ -400,7 +534,26 @@ def parse_agent_result(
         raise RunnerProtocolError("changed_paths contains an unsafe path") from exc
     if len(set(changed_paths)) != len(changed_paths):
         raise RunnerProtocolError("changed_paths must not contain duplicates")
-    return AgentResult(status, summary, needs_input, tuple(tests), changed_paths, next_step)
+    blocker_code = payload["blocker_code"]
+    if status is AgentResultStatus.BLOCKED:
+        if (
+            not isinstance(blocker_code, str)
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", blocker_code) is None
+        ):
+            raise RunnerProtocolError("blocked status requires a machine blocker_code")
+    elif blocker_code is not None:
+        raise RunnerProtocolError("blocker_code is only valid for blocked status")
+    return AgentResult(
+        status,
+        summary,
+        tuple(acceptance),
+        remaining_work,
+        needs_input,
+        tuple(tests),
+        changed_paths,
+        blocker_code,
+        next_step,
+    )
 
 
 def _load_object(value: str | bytes, *, maximum: int, description: str) -> dict[str, Any]:

@@ -467,7 +467,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 ).fetchall()
                 legacy_runs = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
                 self.assertEqual(
-                [(version,) for version in range(1, 19)],
+                [(version,) for version in range(1, 20)],
                     versions,
                 )
             self.assertEqual(0, legacy_runs)
@@ -536,7 +536,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
                 self.assertEqual(
-                [(version,) for version in range(1, 19)],
+                [(version,) for version in range(1, 20)],
                     versions,
                 )
 
@@ -984,12 +984,15 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     ),
                 )
                 result = AgentResult(
-                    AgentResultStatus.COMPLETED,
-                    "complete",
-                    (),
-                    (TestResult("unit", TestStatus.PASSED),),
-                    (),
-                    "review",
+                    status=AgentResultStatus.COMPLETED,
+                    summary="complete",
+                    acceptance=(),
+                    remaining_work=(),
+                    needs_input=(),
+                    tests=(TestResult("unit", TestStatus.PASSED),),
+                    changed_paths=(),
+                    blocker_code=None,
+                    next_step="review",
                 )
 
                 reviewed, _, finished, _ = store.record_generation_turn_finished(

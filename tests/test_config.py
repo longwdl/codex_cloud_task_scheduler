@@ -73,6 +73,10 @@ use_incremental_resume_prompts = true
 max_session_generations = 3
 max_total_turns = 10
 max_no_progress_turns = 2
+max_repair_cycles = 3
+max_audit_cycles = 3
+max_total_tokens = 1000000
+max_work_item_age_seconds = 604800
 '''
 
 

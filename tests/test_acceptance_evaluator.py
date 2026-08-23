@@ -9,6 +9,11 @@ from codex_dispatcher.ci_evidence import (
     RequiredCheckEvidence,
 )
 from codex_dispatcher.task_spec import parse_acceptance_criteria
+from codex_dispatcher.runner_protocol import (
+    AcceptanceAssertion,
+    AcceptanceAssertionStatus,
+)
+from codex_dispatcher.work_items import SessionGenerationRole
 
 
 REPOSITORY = "owner/repo"
@@ -46,6 +51,47 @@ def evidence(*, conclusion: str = "success") -> ActionsEvidenceSnapshot:
 
 
 class AcceptanceEvaluatorTests(unittest.TestCase):
+    def test_audit_predicate_is_deferred_then_requires_fresh_audit_attestation(self) -> None:
+        criteria = parse_acceptance_criteria(
+            "- [AC-1] audit: verify the behavioral edge cases"
+        )
+        implementation = evaluate_acceptance(
+            criteria=criteria,
+            configured_required_checks=("tests",),
+            allowed_paths=("src",),
+            publication_evidence_complete=True,
+            verified_changed_paths=(),
+            head_was_published=True,
+            actions_evidence=evidence(),
+        )
+        audited = evaluate_acceptance(
+            criteria=criteria,
+            configured_required_checks=("tests",),
+            allowed_paths=("src",),
+            publication_evidence_complete=True,
+            verified_changed_paths=(),
+            head_was_published=True,
+            actions_evidence=evidence(),
+            session_role=SessionGenerationRole.AUDIT,
+            audit_assertions=(
+                AcceptanceAssertion(
+                    "AC-1",
+                    AcceptanceAssertionStatus.PASSED,
+                    "Inspected exact HEAD and edge-case tests",
+                ),
+            ),
+            agent_result_evidence_ref="agent-result-sha256:" + "a" * 64,
+        )
+
+        self.assertIs(AcceptanceStatus.PASSED, implementation.status)
+        self.assertIs(AcceptanceStatus.DEFERRED, implementation.criteria[0].status)
+        self.assertIs(AcceptanceStatus.PASSED, audited.status)
+        self.assertEqual("fresh_audit_attested", audited.criteria[0].reason)
+        self.assertEqual(
+            ("agent-result-sha256:" + "a" * 64,),
+            audited.criteria[0].evidence_refs,
+        )
+
     def test_all_supported_predicates_pass_from_trusted_evidence(self) -> None:
         result = evaluate_acceptance(
             criteria=parse_acceptance_criteria(

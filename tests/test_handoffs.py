@@ -54,11 +54,15 @@ class SessionHandoffTests(unittest.TestCase):
         self.result = parse_agent_result(
             json.dumps(
                 {
+                    "schema_version": 2,
                     "status": "completed",
                     "summary": "Unverified claim from the old session",
+                    "acceptance": [],
+                    "remaining_work": [],
                     "needs_input": [],
                     "tests": [{"name": "unit", "status": "passed"}],
                     "changed_paths": ["src/reported.py"],
+                    "blocker_code": None,
                     "next_step": "Inspect the integration fixture",
                 }
             )
@@ -87,7 +91,7 @@ class SessionHandoffTests(unittest.TestCase):
                 ),
             ),
             source_turn_id="turn_" + "3" * 32,
-            source_result_status=self.result.status.value,
+            source_result_status="completed",
             source_result_summary=self.result.summary,
             source_agent_result=self.result,
             created_at="2026-08-22T01:00:00Z",

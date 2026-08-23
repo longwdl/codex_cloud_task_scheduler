@@ -97,6 +97,20 @@ class TaskSpecTests(unittest.TestCase):
         self.assertEqual("人工检查错误信息", criteria[3].description)
         self.assertTrue(criteria[3].criterion_id.startswith("AC-TEXT-004-"))
 
+    def test_audit_and_explicit_manual_predicates_require_descriptions(self) -> None:
+        criteria = parse_acceptance_criteria(
+            "- [AC-1] audit: inspect edge-case behavior\n"
+            "- [AC-2] manual: verify the external approval"
+        )
+        self.assertEqual(["audit", "manual"], [item.predicate for item in criteria])
+        self.assertEqual(
+            ["inspect edge-case behavior", "verify the external approval"],
+            [item.argument for item in criteria],
+        )
+        for content in ("- [AC-1] audit", "- [AC-1] manual"):
+            with self.subTest(content=content):
+                with self.assertRaises(TaskSpecError):
+                    parse_acceptance_criteria(content)
     def test_acceptance_parser_rejects_typos_unknown_predicates_and_duplicate_ids(self) -> None:
         invalid = (
             "- [AC-0] required-check: tests",

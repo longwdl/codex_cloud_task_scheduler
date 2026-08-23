@@ -167,6 +167,7 @@ def build_docker_codex_plan(
     auth_file: Path,
     output_schema: Path,
     session_id: str | None,
+    repository_readonly: bool = False,
     timeout_seconds: float = 3600.0,
     policy_bundle: PolicyBundle | None = None,
     session_generation_id: str | None = None,
@@ -186,6 +187,8 @@ def build_docker_codex_plan(
     codex_home = _mount_source(codex_home, "codex_home")
     auth_file = _mount_source(auth_file, "auth_file")
     output_schema = _mount_source(output_schema, "output_schema")
+    if type(repository_readonly) is not bool:
+        raise TypeError("repository_readonly must be a bool")
     if (
         isinstance(timeout_seconds, bool)
         or not isinstance(timeout_seconds, (int, float))
@@ -230,7 +233,11 @@ def build_docker_codex_plan(
             CONTAINER_CODE_MODE_HOST_PATH,
             readonly=True,
         ),
-        _mount(repository, CONTAINER_REPOSITORY),
+        _mount(
+            repository,
+            CONTAINER_REPOSITORY,
+            readonly=repository_readonly,
+        ),
         _mount(codex_home, CONTAINER_CODEX_HOME),
         _mount(output_schema, CONTAINER_SCHEMA, readonly=True),
         *(

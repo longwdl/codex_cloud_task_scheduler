@@ -50,6 +50,7 @@ from codex_dispatcher.runner_docker import (
     validate_docker_command_boundary,
 )
 from codex_dispatcher.runner_protocol import (
+    AgentResult,
     NEXT_PROTOCOL_VERSION,
     PROTOCOL_VERSION,
     RunnerOperation,
@@ -75,7 +76,11 @@ from codex_dispatcher.runner_workspace import (
     RunnerWorkspaceError,
     RunnerWorkspacePaths,
 )
-from codex_dispatcher.work_items import validate_session_id
+from codex_dispatcher.work_items import (
+    SessionGenerationRole,
+    validate_git_sha,
+    validate_session_id,
+)
 
 
 _TURN_RECORD_VERSION = 1
@@ -460,6 +465,12 @@ class RunnerTurnExecutor:
                 "checkpoint_invalid",
                 session_id=summary.session_id,
             )
+        if audit_mutation_is_forbidden(request, result, head_sha):
+            return self._failed_reply(
+                request,
+                "audit_mutation_forbidden",
+                session_id=summary.session_id,
+            )
         canonical = agent_result_to_json(result)
         return RunnerTurnReply(
             request.operation,
@@ -529,6 +540,9 @@ class RunnerTurnExecutor:
                 auth_file=context.auth_file,
                 output_schema=self._output_schema,
                 session_id=request.session_id,
+                repository_readonly=(
+                    request.session_role == SessionGenerationRole.AUDIT.value
+                ),
                 timeout_seconds=self._timeout_seconds,
                 policy_bundle=active_policy,
                 session_generation_id=(
@@ -756,6 +770,12 @@ class RunnerTurnExecutor:
                 "checkpoint_invalid",
                 session_id=summary.session_id,
             )
+        if audit_mutation_is_forbidden(request, result, head_sha):
+            return self._failed_reply(
+                request,
+                "audit_mutation_forbidden",
+                session_id=summary.session_id,
+            )
         canonical = agent_result_to_json(result)
         assert request.turn_id is not None
         return RunnerTurnReply(
@@ -800,7 +820,6 @@ class RunnerTurnExecutor:
             failure_head_sha=checkpoint.head_sha,
             worktree_clean=checkpoint.worktree_clean,
         )
-
     def _docker_authentication_is_ready(
         self,
         request: RunnerRequest,
@@ -1082,6 +1101,20 @@ class _ThreadStartedReceiptHook:
             session_id=session_id,
         )
         self.session_id = session_id
+
+
+def audit_mutation_is_forbidden(
+    request: RunnerRequest,
+    result: AgentResult,
+    observed_head_sha: str,
+) -> bool:
+    """Enforce the Audit read-only boundary from trusted Git and result facts."""
+    if not isinstance(request, RunnerRequest) or not isinstance(result, AgentResult):
+        raise TypeError("audit mutation check requires protocol DTOs")
+    validate_git_sha(observed_head_sha, "observed_head_sha")
+    return request.session_role == SessionGenerationRole.AUDIT.value and (
+        observed_head_sha != request.input_head_sha or bool(result.changed_paths)
+    )
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
