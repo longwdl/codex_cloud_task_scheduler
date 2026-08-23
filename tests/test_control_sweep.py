@@ -7,6 +7,7 @@ from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from codex_dispatcher.control_sweep import (
     ControlSweepStatus,
@@ -1081,6 +1082,86 @@ class SshControlSweepTests(unittest.TestCase):
             ],
             source.calls,
         )
+
+    def test_operator_reactivation_resumes_pending_fresh_audit(self) -> None:
+        tracker = FakeTracker()
+        task = claimed_task()
+        tracker.tasks[task.task_id] = task
+        item = self.dispatch.resolve_and_prepare(
+            task,
+            base_sha=BASE_SHA,
+            source_bundle=_bundle(),
+        )
+        source_turn = Turn(
+            turn_id="turn_" + "8" * 32,
+            work_item_id=item.work_item_id,
+            turn_number=1,
+            state=TurnState.FINISHED,
+            issue_revision=task.updated_at,
+            prompt_sha256="8" * 64,
+            input_head_sha=BASE_SHA,
+            output_sha256="9" * 64,
+            output_head_sha=BASE_SHA,
+            result_status="completed",
+            result_summary="passed implementation candidate",
+            created_at="2026-08-13T00:00:00Z",
+            updated_at="2026-08-13T00:00:01Z",
+            finished_at="2026-08-13T00:00:01Z",
+        )
+        audit_turn = Turn(
+            turn_id="turn_" + "9" * 32,
+            work_item_id=item.work_item_id,
+            turn_number=2,
+            state=TurnState.NEEDS_INPUT,
+            issue_revision=task.updated_at,
+            prompt_sha256="a" * 64,
+            input_head_sha=BASE_SHA,
+            output_sha256="b" * 64,
+            output_head_sha=BASE_SHA,
+            result_status="needs_input",
+            result_summary="audit requested input",
+            created_at="2026-08-13T00:00:02Z",
+            updated_at="2026-08-13T00:00:03Z",
+            finished_at="2026-08-13T00:00:03Z",
+        )
+
+        class ReactivatingDispatch:
+            def __init__(inner_self):
+                inner_self.audit_calls = 0
+
+            def resolve_and_prepare(inner_self, *args, **kwargs):
+                return item
+
+            def requires_fresh_final_audit(inner_self, turn_id):
+                self.assertEqual(source_turn.turn_id, turn_id)
+                return True
+
+            def run_fresh_final_audit(inner_self, *args, **kwargs):
+                inner_self.audit_calls += 1
+                return TurnProgress(item, audit_turn)
+
+            def run_claimed_turn(inner_self, *args, **kwargs):
+                self.fail("implementation Turn must not resume after audit reactivation")
+
+        dispatch = ReactivatingDispatch()
+        sweep = SshControlSweep(
+            config=make_config(global_max_active=4),
+            store=self.store,
+            tracker=tracker,
+            dispatch=dispatch,  # type: ignore[arg-type]
+            source=_RecordingSource(),
+            process_lock=DispatcherProcessLock(self.lock_path),
+        )
+        with patch.object(self.store, "list_turns", return_value=(source_turn,)):
+            result = sweep._prepare_and_run(
+                task,
+                base_sha=BASE_SHA,
+                source_bundle=None,
+                turn_id=audit_turn.turn_id,
+            )
+
+        self.assertEqual(ControlSweepStatus.NEEDS_INPUT, result.status)
+        self.assertEqual(1, dispatch.audit_calls)
 
     def test_interrupted_start_is_reconciled_without_prompt_replay(self) -> None:
         tracker = FakeTracker()

@@ -208,7 +208,9 @@ evidence, and an explicit independent-audit prompt contract while the Issue rema
 Only that planned Audit generation may accept the running Issue state; ordinary implementation
 planning still requires the claimed `agent:dispatching` state. The Audit may make bounded in-scope
 fixes, but its completed candidate must pass the same completion gate. Generation-budget exhaustion
-or ambiguous audit preparation blocks instead of degrading to an implementation-only review.
+or ambiguous audit preparation blocks instead of degrading to an implementation-only review. If an
+operator explicitly reactivates such a blocked WorkItem, the persisted passed gate routes the retry
+back into fresh-Audit preparation rather than resuming the implementation session.
 
 Known context-window or compaction failures form a separate emergency rotation boundary. After the
 Codex process exits, the Runner records the exact Git HEAD and worktree cleanliness. Rotation is

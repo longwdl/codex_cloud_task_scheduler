@@ -478,6 +478,9 @@ class SshControlSweep:
                 work_item=work_item,
                 reason="prepared_work_item_state_invalid",
             )
+        turns = self._store.list_turns(work_item.work_item_id)
+        if turns and self._dispatch.requires_fresh_final_audit(turns[-1].turn_id):
+            return self._run_fresh_final_audit(task, turn_id=turn_id)
         return self._run_claimed(task, turn_id=turn_id)
 
     def _run_claimed(

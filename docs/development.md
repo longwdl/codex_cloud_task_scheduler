@@ -82,6 +82,7 @@ The environment-independent core now additionally contains:
 - pre-gate Draft PR binding for repositories whose exact-head Actions checks start on `pull_request`;
 - a narrowly scoped running-state allowance for the planned fresh-Audit generation, without
   weakening the normal implementation claim requirement;
+- passed-gate audit reactivation routing that cannot fall back to another implementation Turn;
 - a durable protocol-v2 completion gate that holds `completed` Turns at `published` until exact-HEAD
   configured Actions checks, structured acceptance predicates, and verified publication evidence
   reach a trusted verdict;
