@@ -11,10 +11,14 @@ BACKUP_SERVICE_PATH = ROOT / "deploy/systemd/codex-dispatcher-backup.service"
 BACKUP_TIMER_PATH = ROOT / "deploy/systemd/codex-dispatcher-backup.timer"
 HEALTH_SERVICE_PATH = ROOT / "deploy/systemd/codex-dispatcher-health.service"
 HEALTH_TIMER_PATH = ROOT / "deploy/systemd/codex-dispatcher-health.timer"
+RESTORE_SERVICE_PATH = ROOT / "deploy/systemd/codex-dispatcher-restore-drill.service"
+RESTORE_TIMER_PATH = ROOT / "deploy/systemd/codex-dispatcher-restore-drill.timer"
 ENVIRONMENT_EXAMPLE_PATH = ROOT / "deploy/systemd/dispatcher.env.example"
+HEALTH_ENVIRONMENT_EXAMPLE_PATH = ROOT / "deploy/systemd/health.env.example"
 WRAPPER_PATH = ROOT / "scripts/codex-dispatcher-v1"
 BACKUP_WRAPPER_PATH = ROOT / "scripts/codex-dispatcher-backup-v1"
 HEALTH_WRAPPER_PATH = ROOT / "scripts/codex-dispatcher-health-v1"
+RESTORE_WRAPPER_PATH = ROOT / "scripts/codex-dispatcher-restore-drill-v1"
 
 
 def _unit_sections(path: Path) -> dict[str, list[tuple[str, str]]]:
@@ -133,6 +137,12 @@ class ControlHostSystemdTests(unittest.TestCase):
         self.assertNotIn("xoxb-", environment)
         self.assertNotIn("export ", environment)
 
+        health_environment = HEALTH_ENVIRONMENT_EXAMPLE_PATH.read_text(encoding="utf-8")
+        self.assertIn("CODEX_DISPATCHER_ENABLE_SLACK_WRITES=1", health_environment)
+        self.assertIn("SLACK_BOT_TOKEN=replace-with-outbound-only-bot-token", health_environment)
+        self.assertNotIn("GITHUB_TOKEN", health_environment)
+        self.assertNotIn("xoxb-", health_environment)
+
     def test_backup_service_is_credential_free_and_network_isolated(self) -> None:
         sections = _unit_sections(BACKUP_SERVICE_PATH)
         self.assertEqual(["oneshot"], _values(sections, "Service", "Type"))
@@ -171,12 +181,18 @@ class ControlHostSystemdTests(unittest.TestCase):
         )
         self.assertEqual(["true"], _values(sections, "Timer", "Persistent"))
 
-    def test_health_service_is_credential_free_read_only_and_network_isolated(self) -> None:
+    def test_health_service_has_only_slack_credentials_and_bounded_state_write(self) -> None:
         sections = _unit_sections(HEALTH_SERVICE_PATH)
         self.assertEqual(["oneshot"], _values(sections, "Service", "Type"))
-        self.assertEqual([], _values(sections, "Service", "EnvironmentFile"))
-        self.assertEqual(["yes"], _values(sections, "Service", "PrivateNetwork"))
-        self.assertEqual([], _values(sections, "Service", "ReadWritePaths"))
+        self.assertEqual(
+            ["/etc/codex-dispatcher/health.env"],
+            _values(sections, "Service", "EnvironmentFile"),
+        )
+        self.assertEqual([], _values(sections, "Service", "PrivateNetwork"))
+        self.assertEqual(
+            ["/var/lib/codex-dispatcher"],
+            _values(sections, "Service", "ReadWritePaths"),
+        )
         self.assertEqual([""], _values(sections, "Service", "CapabilityBoundingSet"))
         self.assertEqual(
             ["/opt/codex-dispatcher/current/scripts/codex-dispatcher-health-v1"],
@@ -188,6 +204,7 @@ class ControlHostSystemdTests(unittest.TestCase):
         self.assertIn('if [ "$#" -ne 0 ]; then', wrapper)
         self.assertIn("lifecycle-health", wrapper)
         self.assertIn("--systemd", wrapper)
+        self.assertIn("--notify-slack", wrapper)
         self.assertNotIn("--apply", wrapper)
         self.assertNotIn('"$@"', wrapper)
 
@@ -202,6 +219,28 @@ class ControlHostSystemdTests(unittest.TestCase):
             ["15min"], _values(sections, "Timer", "OnUnitInactiveSec")
         )
         self.assertEqual(["false"], _values(sections, "Timer", "Persistent"))
+
+    def test_restore_drill_is_weekly_credential_free_and_network_isolated(self) -> None:
+        service = _unit_sections(RESTORE_SERVICE_PATH)
+        timer = _unit_sections(RESTORE_TIMER_PATH)
+        self.assertEqual(["oneshot"], _values(service, "Service", "Type"))
+        self.assertEqual([], _values(service, "Service", "EnvironmentFile"))
+        self.assertEqual(["yes"], _values(service, "Service", "PrivateNetwork"))
+        self.assertEqual(
+            ["/var/lib/codex-dispatcher"],
+            _values(service, "Service", "ReadWritePaths"),
+        )
+        self.assertEqual([""], _values(service, "Service", "CapabilityBoundingSet"))
+        self.assertEqual(
+            ["codex-dispatcher-restore-drill.service"],
+            _values(timer, "Timer", "Unit"),
+        )
+        self.assertEqual(["weekly"], _values(timer, "Timer", "OnCalendar"))
+        self.assertEqual(["true"], _values(timer, "Timer", "Persistent"))
+        wrapper = RESTORE_WRAPPER_PATH.read_text(encoding="utf-8")
+        self.assertNotEqual(0, RESTORE_WRAPPER_PATH.stat().st_mode & 0o111)
+        self.assertIn("state-restore-drill", wrapper)
+        self.assertNotIn("SLACK", wrapper)
 
 
 if __name__ == "__main__":

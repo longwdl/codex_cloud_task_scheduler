@@ -108,8 +108,10 @@ Before the first write-enabled service start:
 
 Only after that sweep and independent SQLite/GitHub/Runner/Actions checks pass may the Dispatcher
 timer be enabled. Start and verify the backup service separately before enabling its timer. The
-backup service receives no environment file, has a private network namespace, and never deletes an
-older backup automatically.
+backup service receives no environment file and has a private network namespace. The shared CLI
+validates all canonical backups, preserves the oldest anchor plus newest seven, and deletes no file
+if any candidate fails validation. This rootless profile does not install the system restore-drill
+timer; run `state-restore-drill` manually when using this fallback.
 
 ## Observation and rollback
 

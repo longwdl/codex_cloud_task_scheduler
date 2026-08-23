@@ -4,7 +4,12 @@ import json
 import unittest
 from collections.abc import Mapping
 
-from codex_dispatcher.slack_reporting import SlackReport, SlackReportKind, build_slack_report
+from codex_dispatcher.slack_reporting import (
+    SlackOutboundMessage,
+    SlackReport,
+    SlackReportKind,
+    build_slack_report,
+)
 from codex_dispatcher.slack_web_api import (
     SlackHttpResponse,
     SlackPublishAmbiguous,
@@ -193,6 +198,17 @@ class SlackWebApiPublisherTests(unittest.TestCase):
             slack_client_message_id(first),
             slack_client_message_id(turn),
         )
+
+        health = SlackOutboundMessage(
+            deduplication_key="slack-health:" + "c" * 64 + ":alert",
+            channel_id=CHANNEL,
+            text="health alert",
+        )
+        self.assertEqual(
+            slack_client_message_id(health),
+            slack_client_message_id(health),
+        )
+        self.assertNotEqual(slack_client_message_id(first), slack_client_message_id(health))
 
     def test_exact_retry_reuses_client_message_id_and_original_receipt(self) -> None:
         report = _root_report("stable payload")

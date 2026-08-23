@@ -1,11 +1,9 @@
 [Unit]
-Description=Codex dispatcher lifecycle health check and Slack alert projection
+Description=Codex dispatcher protected SQLite restore drill
 Documentation=file:///opt/codex-dispatcher/current/docs/implementation-deployment-test-plan.md
-Wants=network-online.target
-After=network-online.target
-ConditionFileIsExecutable=/opt/codex-dispatcher/current/scripts/codex-dispatcher-health-v1
+ConditionFileIsExecutable=/opt/codex-dispatcher/current/scripts/codex-dispatcher-restore-drill-v1
 ConditionPathIsDirectory=/etc/codex-dispatcher
-ConditionPathIsDirectory=/var/lib/codex-dispatcher
+ConditionPathIsDirectory=/var/lib/codex-dispatcher/backups
 
 [Service]
 Type=oneshot
@@ -13,25 +11,25 @@ User=codex-dispatcher
 Group=codex-dispatcher
 UMask=0077
 WorkingDirectory=/var/lib/codex-dispatcher
-EnvironmentFile=/etc/codex-dispatcher/health.env
-ExecStart=/opt/codex-dispatcher/current/scripts/codex-dispatcher-health-v1
+ExecStart=/opt/codex-dispatcher/current/scripts/codex-dispatcher-restore-drill-v1
 
 ReadWritePaths=/var/lib/codex-dispatcher
 
-TimeoutStartSec=30s
-TimeoutStopSec=10s
+TimeoutStartSec=5min
+TimeoutStopSec=30s
 KillMode=control-group
 SendSIGKILL=yes
 Restart=no
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=codex-dispatcher-health
+SyslogIdentifier=codex-dispatcher-restore-drill
 
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 PrivateDevices=yes
+PrivateNetwork=yes
 PrivateTmp=yes
 ProtectClock=yes
 ProtectControlGroups=yes
@@ -47,7 +45,7 @@ KeyringMode=private
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RemoveIPC=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

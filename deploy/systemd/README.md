@@ -7,15 +7,23 @@ constraints remain the authoritative concurrency controls.
 
 The separate daily backup timer invokes a credential-free, network-isolated oneshot. It uses the
 SQLite Online Backup API, verifies both source and backup integrity, publishes a mode-`0600` file
-without overwriting a same-name backup, and never deletes an older backup automatically.
+without overwriting a same-name backup, then validates all canonical copies and retains the oldest
+migration anchor plus the newest seven. It deletes no file if any candidate fails validation.
 
-The 15-minute health timer is also credential-free and network-isolated. It opens SQLite read-only,
+The weekly credential-free, network-isolated restore drill restores the newest backup into a
+temporary database, verifies integrity, foreign keys, and the migration ledger, then removes the
+temporary copy without replacing the live database.
+
+The 15-minute health timer receives only the protected Slack environment and outbound network. It
 checks integrity and foreign keys, and reports bounded structured alerts for a Turn older than the
 configured SSH operation timeout plus five minutes, a WorkItem blocked for more than 24 hours, an
 archive pending for more than 15 minutes, an ambiguous/blocked archive, or an overdue disposition
-or completed-retention archive. With `--systemd`, the fixed wrapper also requires all three timers
-to be loaded, enabled, and active and rejects a failed dispatcher or backup service result. It does
-not repair state or contact GitHub, Slack, or the Runner.
+or completed-retention archive. With `--systemd`, the fixed wrapper also requires all four timers
+to be loaded, enabled, and active and rejects a failed dispatcher, backup, or restore-drill service
+result. It writes only the schema-14 health outbox and active-episode row, sends one deduplicated
+Slack alert per stable episode plus one threaded recovery, and never contacts GitHub or the Runner.
+The health command does not run migrations; activate schema 14 through the normal recovery-first
+Dispatcher path before enabling Slack health delivery.
 
 The files are deployment artifacts, not an installer. Copying them into `/etc/systemd/system` or
 enabling the timer changes a real host and can trigger GitHub, SSH, Publisher, and optional Slack
@@ -33,6 +41,8 @@ writes. Perform those steps only after a separately approved deployment command 
 - `config.toml` readable by the service user but not writable by it;
 - `dispatcher.env` owned by root with mode `0600`; systemd reads it before changing to the service
   user, and token values never appear in the unit or `ExecStart` argv;
+- `health.env` independently owned by root with mode `0600`, containing only the Slack write gate
+  and outbound bot token from `health.env.example`;
 - the Runner identity owned by `codex-dispatcher` with mode `0600`, because OpenSSH reads it after
   privilege drop;
 - `/var/lib/codex-dispatcher` and every configured mutable subdirectory owned by
@@ -56,14 +66,17 @@ Before touching systemd, stage one root-owned release and validate it offline:
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 PYTHONPATH=src python3 -m compileall -q src tests
-sh -n scripts/codex-dispatcher-v1 scripts/codex-dispatcher-health-v1
+sh -n scripts/codex-dispatcher-v1 scripts/codex-dispatcher-health-v1 \
+  scripts/codex-dispatcher-restore-drill-v1
 systemd-analyze verify \
   deploy/systemd/codex-dispatcher.service \
   deploy/systemd/codex-dispatcher.timer \
   deploy/systemd/codex-dispatcher-backup.service \
   deploy/systemd/codex-dispatcher-backup.timer \
   deploy/systemd/codex-dispatcher-health.service \
-  deploy/systemd/codex-dispatcher-health.timer
+  deploy/systemd/codex-dispatcher-health.timer \
+  deploy/systemd/codex-dispatcher-restore-drill.service \
+  deploy/systemd/codex-dispatcher-restore-drill.timer
 ```
 
 Prepare these persistent subdirectories with owner/group `codex-dispatcher` and mode `0700`:
@@ -82,6 +95,8 @@ Do not copy values from an interactive shell history. Create `dispatcher.env` th
 root session, using `dispatcher.env.example` only as the field-name template. Never print or commit
 the resulting file. The environment must include the SSH write gate and one recognized repository-
 scoped GitHub token. Include the Slack gate and bot token only when Slack output is configured.
+Create `health.env` separately from `health.env.example`; copy only the Slack gate/token without
+printing the token, and do not place the GitHub token or SSH write gate in this file.
 
 Before enabling the timer, run the normal source-tree `ssh-preflight` as the service user with the
 same protected config and GitHub credential. It must pass tool pins and SQLite integrity and report
@@ -92,8 +107,9 @@ Run `codex-dispatcher-backup.service` once before enabling either timer. Its JSO
 one file below `/var/lib/codex-dispatcher/backups`, report `integrity=ok`, and the file must be owned
 by `codex-dispatcher` with mode `0600`. The backup service receives no environment file, token, or
 network namespace. `Persistent=true` lets the daily timer catch up after downtime; the bounded
-15-minute random delay avoids synchronized disk work. Retention is deliberately manual until a
-separate deletion policy and minimum-good-backup invariant are approved.
+15-minute random delay avoids synchronized disk work. The service preserves at least the newest
+seven good copies plus a distinct oldest anchor. Run and verify the restore-drill service before
+enabling its weekly timer; the temporary restored database must be absent after the receipt.
 
 After installation, validate unit expansion and hardening before the first start:
 
@@ -103,15 +119,19 @@ systemd-analyze verify /etc/systemd/system/codex-dispatcher.service \
   /etc/systemd/system/codex-dispatcher-backup.service \
   /etc/systemd/system/codex-dispatcher-backup.timer \
   /etc/systemd/system/codex-dispatcher-health.service \
-  /etc/systemd/system/codex-dispatcher-health.timer
+  /etc/systemd/system/codex-dispatcher-health.timer \
+  /etc/systemd/system/codex-dispatcher-restore-drill.service \
+  /etc/systemd/system/codex-dispatcher-restore-drill.timer
 systemd-analyze security codex-dispatcher.service
 systemd-analyze security codex-dispatcher-backup.service
 systemd-analyze security codex-dispatcher-health.service
+systemd-analyze security codex-dispatcher-restore-drill.service
 systemctl cat codex-dispatcher.service codex-dispatcher.timer \
   codex-dispatcher-backup.service codex-dispatcher-backup.timer \
-  codex-dispatcher-health.service codex-dispatcher-health.timer
+  codex-dispatcher-health.service codex-dispatcher-health.timer \
+  codex-dispatcher-restore-drill.service codex-dispatcher-restore-drill.timer
 systemctl list-timers codex-dispatcher.timer codex-dispatcher-backup.timer \
-  codex-dispatcher-health.timer
+  codex-dispatcher-health.timer codex-dispatcher-restore-drill.timer
 ```
 
 Do not use `systemctl show-environment`, dump `/proc/<pid>/environ`, or enable shell tracing while
@@ -123,18 +143,21 @@ The state-changing activation sequence is intentionally not automated. Once sepa
 the operator installs the reviewed units, runs `systemctl daemon-reload`, manually starts exactly
 one service sweep, verifies its bounded journal result and SQLite/GitHub/Runner state, and only then
 enables the dispatcher timer. It separately starts and verifies one backup before enabling the
-backup timer. Enable the three operational timers before manually starting the health service,
+backup timer. Start and verify one restore drill before enabling its weekly timer. Enable the four
+operational timers before manually starting the health service,
 because its systemd assertion intentionally treats a disabled timer as unhealthy.
 
 Observe with `systemctl status`, `systemctl list-timers`, and bounded queries such as
 `journalctl -u codex-dispatcher.service -n 100` and
 `journalctl -u codex-dispatcher-backup.service -n 20`, plus
+`journalctl -u codex-dispatcher-restore-drill.service -n 20` and
 `journalctl -u codex-dispatcher-health.service -n 20`. A non-zero sweep or health check remains
 visible as a failed service activation; the dispatcher timer will try another recovery-first sweep
 after the inactive interval, while the health timer only observes and reports.
 
 Emergency stop disables `codex-dispatcher.timer`, `codex-dispatcher-backup.timer`, and
-`codex-dispatcher-health.timer`, followed, if necessary, by stopping their services. Preserve
+`codex-dispatcher-health.timer`, and `codex-dispatcher-restore-drill.timer`, followed, if necessary,
+by stopping their services. Preserve
 SQLite, WAL/SHM files, backups, quarantine, mirrors, Runner directories, branches, and PRs. Roll
 back code by atomically restoring the previous `/opt/codex-dispatcher/current` release symlink,
 re-running unit verification, and starting one manually observed recovery sweep and backup before

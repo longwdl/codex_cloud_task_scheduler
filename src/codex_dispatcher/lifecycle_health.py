@@ -22,10 +22,12 @@ SYSTEMD_TIMER_UNITS = (
     "codex-dispatcher.timer",
     "codex-dispatcher-backup.timer",
     "codex-dispatcher-health.timer",
+    "codex-dispatcher-restore-drill.timer",
 )
 SYSTEMD_SERVICE_UNITS = (
     "codex-dispatcher.service",
     "codex-dispatcher-backup.service",
+    "codex-dispatcher-restore-drill.service",
 )
 
 

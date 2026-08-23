@@ -771,7 +771,9 @@ unit、ExecStart argv、TOML 或 release 中。service 使用稳定低权限用�
 独立 backup oneshot 不读取 EnvironmentFile，禁用网络，通过 SQLite Online Backup API 在
 Dispatcher 运行时也可创建一致快照。它先检查源库，再检查完整备份，最后以
 `0600` 原子公布到受保护的 `backups/`；同名文件不覆盖。daily timer 允许主机
-停机后补跑，但不自动删除旧备份。
+停机后补跑。公布成功后先验证全部规范备份，再固定保留最老迁移锚点和最新七份，
+只删除其余已验证副本；任一副本异常时不删除。独立 weekly restore-drill 在临时库验证
+最新备份的 integrity、外键和 migration ledger，随后删除临时库，绝不覆盖在线库。
 
 ### 11.3 Runner 目录
 

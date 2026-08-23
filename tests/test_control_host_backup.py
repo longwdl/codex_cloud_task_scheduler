@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import stat
@@ -8,7 +8,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from codex_dispatcher.control_host_backup import create_state_backup
+from codex_dispatcher.control_host_backup import (
+    create_state_backup,
+    drill_latest_state_backup,
+    rotate_state_backups,
+)
 from codex_dispatcher.domain import Run
 from codex_dispatcher.state_store import StateStore
 
@@ -96,6 +100,85 @@ class ControlHostBackupTests(unittest.TestCase):
             ):
                 create_state_backup(database, backups, now=NOW)
             self.assertEqual([], list(backups.iterdir()))
+
+    def test_retention_preserves_oldest_anchor_and_newest_seven(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database, backups = self._state(Path(temp_dir))
+            created = [
+                create_state_backup(
+                    database,
+                    backups,
+                    now=NOW + timedelta(seconds=index),
+                ).path
+                for index in range(10)
+            ]
+
+            result = rotate_state_backups(backups)
+
+            self.assertEqual(
+                (created[0], *created[-7:]),
+                result.retained_paths,
+            )
+            self.assertEqual(tuple(created[1:3]), result.deleted_paths)
+            self.assertGreater(result.deleted_bytes, 0)
+            self.assertEqual(result.retained_paths, rotate_state_backups(backups).retained_paths)
+
+    def test_retention_fails_closed_before_deleting_if_a_backup_is_corrupt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database, backups = self._state(Path(temp_dir))
+            created = [
+                create_state_backup(
+                    database,
+                    backups,
+                    now=NOW + timedelta(seconds=index),
+                ).path
+                for index in range(9)
+            ]
+            created[4].write_bytes(b"not sqlite")
+            created[4].chmod(0o600)
+
+            with self.assertRaises(Exception):
+                rotate_state_backups(backups)
+
+            self.assertEqual(set(created), set(backups.glob("state-*.db")))
+
+    def test_restore_drill_uses_newest_backup_and_removes_temporary_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            database, backups = self._state(root)
+            create_state_backup(database, backups, now=NOW)
+            newest = create_state_backup(
+                database, backups, now=NOW + timedelta(seconds=1)
+            )
+
+            result = drill_latest_state_backup(
+                database,
+                backups,
+                now=NOW + timedelta(hours=1),
+            )
+
+            self.assertEqual(newest.path, result.source_path)
+            self.assertEqual("ok", result.integrity)
+            self.assertEqual(0, result.foreign_key_violations)
+            self.assertEqual(tuple(range(1, 15)), result.schema_migrations)
+            self.assertEqual(3599, result.source_age_seconds)
+            self.assertEqual([], list(root.glob(".state-restore-drill-*")))
+
+    def test_restore_drill_rejects_a_backup_from_another_schema_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            database, backups = self._state(root)
+            backup = create_state_backup(database, backups, now=NOW).path
+            with StateStore(backup) as store:
+                store._connection.execute(
+                    "DELETE FROM schema_migrations WHERE version = 14"
+                )
+                store._connection.commit()
+
+            with self.assertRaisesRegex(RuntimeError, "differs from this release"):
+                drill_latest_state_backup(database, backups, now=NOW)
+
+            self.assertEqual([], list(root.glob(".state-restore-drill-*")))
 
 
 if __name__ == "__main__":

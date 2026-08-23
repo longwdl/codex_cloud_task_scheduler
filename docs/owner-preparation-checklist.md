@@ -68,11 +68,14 @@ read-only preflight as the service user, and obtain separate approval for the ex
 installation/activation commands. See `deploy/systemd/README.md` for staging, observation, and
 rollback boundaries.
 
-Create `/var/lib/codex-dispatcher/backups` as an owned mode-`0700` directory. Before enabling either
+Create `/var/lib/codex-dispatcher/backups` as an owned mode-`0700` directory. Before enabling any
 timer, manually run the credential-free backup service and require a mode-`0600` backup plus
 `integrity=ok`. The backup service uses no environment file or network and may use SQLite Online
-Backup concurrently with a sweep. Do not add automatic retention until deletion has a separately
-reviewed minimum-good-backup and disk-pressure policy.
+Backup concurrently with a sweep. Its reviewed retention policy first validates all canonical
+copies, then preserves the oldest migration anchor and newest seven before deleting excess files.
+Manually run the credential-free restore-drill service and require matching migration-ledger,
+foreign-key, and integrity evidence before enabling its weekly timer. Install `health.env` separately
+as root-owned mode `0600` with only the Slack write gate and outbound bot token.
 
 ### 2. Dedicated Linux Runner
 

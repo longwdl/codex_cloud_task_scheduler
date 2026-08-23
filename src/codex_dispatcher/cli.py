@@ -67,6 +67,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Also inspect the fixed Control Host service and timer allowlist.",
     )
     lifecycle_health.add_argument(
+        "--notify-slack",
+        action="store_true",
+        help="Persist and deliver idempotent Slack alert/recovery notifications.",
+    )
+    lifecycle_health.add_argument(
         "--json", action="store_true", help="Emit machine-readable output."
     )
 
@@ -75,6 +80,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     state_backup.add_argument("--config", required=True, type=Path)
     state_backup.add_argument(
+        "--json", action="store_true", help="Emit machine-readable output."
+    )
+
+    restore_drill = subparsers.add_parser(
+        "state-restore-drill",
+        help="Restore the newest protected backup to a temporary database and verify it.",
+    )
+    restore_drill.add_argument("--config", required=True, type=Path)
+    restore_drill.add_argument(
         "--json", action="store_true", help="Emit machine-readable output."
     )
 
@@ -280,7 +294,10 @@ def _status(database_path: Path) -> tuple[int, dict[str, object]]:
 
 def _state_backup(config_path: Path) -> tuple[int, dict[str, object]]:
     try:
-        from codex_dispatcher.control_host_backup import create_state_backup
+        from codex_dispatcher.control_host_backup import (
+            create_state_backup,
+            rotate_state_backups,
+        )
         from codex_dispatcher.ssh_runtime import load_protected_ssh_config
 
         config = load_protected_ssh_config(config_path)
@@ -289,6 +306,7 @@ def _state_backup(config_path: Path) -> tuple[int, dict[str, object]]:
             database_path,
             database_path.parent / "backups",
         )
+        retention = rotate_state_backups(database_path.parent / "backups")
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         return 1, {"ok": False, "error": str(exc)}
     return 0, {
@@ -297,6 +315,38 @@ def _state_backup(config_path: Path) -> tuple[int, dict[str, object]]:
         "path": str(result.path),
         "size_bytes": result.size_bytes,
         "integrity": result.integrity,
+        "retained_count": len(retention.retained_paths),
+        "deleted_count": len(retention.deleted_paths),
+        "deleted_bytes": retention.deleted_bytes,
+        "oldest_preserved": True,
+        "retain_newest": 7,
+    }
+
+
+def _state_restore_drill(config_path: Path) -> tuple[int, dict[str, object]]:
+    try:
+        from codex_dispatcher.control_host_backup import drill_latest_state_backup
+        from codex_dispatcher.ssh_runtime import load_protected_ssh_config
+
+        config = load_protected_ssh_config(config_path)
+        database_path = config.scheduler.database_path
+        result = drill_latest_state_backup(
+            database_path,
+            database_path.parent / "backups",
+        )
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        return 1, {"ok": False, "state_restore_drill": True, "error": str(exc)}
+    return 0, {
+        "ok": True,
+        "state_restore_drill": True,
+        "source_path": str(result.source_path),
+        "source_size_bytes": result.source_size_bytes,
+        "restored_size_bytes": result.restored_size_bytes,
+        "integrity": result.integrity,
+        "foreign_key_violations": result.foreign_key_violations,
+        "schema_migrations": list(result.schema_migrations),
+        "source_age_seconds": result.source_age_seconds,
+        "temporary_restore_removed": True,
     }
 
 
@@ -332,36 +382,85 @@ def _runner_capacity(
 
 
 def _lifecycle_health(
-    config_path: Path, *, check_systemd: bool
+    config_path: Path, *, check_systemd: bool, notify_slack: bool = False
 ) -> tuple[int, dict[str, object]]:
+    slack_token: str | None = None
     try:
+        from codex_dispatcher.health_alert_delivery import (
+            HealthAlertDeliveryCoordinator,
+        )
         from codex_dispatcher.lifecycle_health import (
             MAX_REPORTED_ALERTS,
             inspect_lifecycle_health,
             inspect_systemd_health,
         )
+        from codex_dispatcher.slack_web_api import SlackWebApiPublisher
         from codex_dispatcher.ssh_runtime import load_protected_ssh_config
 
         config = load_protected_ssh_config(config_path)
-        with StateStore(config.scheduler.database_path, read_only=True) as store:
+        if notify_slack:
+            if config.slack_runtime is None:
+                raise RuntimeError("Slack health notifications require slack_runtime")
+            if os.environ.get("CODEX_DISPATCHER_ENABLE_SLACK_WRITES") != "1":
+                raise RuntimeError(
+                    "CODEX_DISPATCHER_ENABLE_SLACK_WRITES=1 is required for Slack health notifications"
+                )
+            slack_token = _slack_bot_token()
+            if slack_token is None:
+                raise RuntimeError("a recognized explicit Slack bot token is required")
+        with StateStore(
+            config.scheduler.database_path, read_only=not notify_slack
+        ) as store:
             snapshot = inspect_lifecycle_health(config, store)
-        payload = snapshot.to_mapping()
-        if check_systemd:
-            unit_states, systemd_alerts = inspect_systemd_health()
-            payload["systemd_checked"] = True
-            payload["systemd_units"] = [state.to_mapping() for state in unit_states]
-            alerts = list(payload["alerts"])
-            alerts.extend(alert.to_mapping() for alert in systemd_alerts)
-            payload["alerts"] = alerts[:MAX_REPORTED_ALERTS]
-            payload["alert_count"] = len(payload["alerts"])
-            payload["alerts_truncated"] = bool(payload["alerts_truncated"]) or (
-                len(alerts) > MAX_REPORTED_ALERTS
+            unit_states = ()
+            systemd_alerts = ()
+            if check_systemd:
+                unit_states, systemd_alerts = inspect_systemd_health()
+            combined_alerts = tuple(snapshot.alerts) + tuple(systemd_alerts)
+            alerts_truncated = snapshot.alerts_truncated or (
+                len(combined_alerts) > MAX_REPORTED_ALERTS
             )
-            payload["ok"] = bool(payload["ok"]) and not systemd_alerts
-        else:
-            payload["systemd_checked"] = False
+            combined_alerts = combined_alerts[:MAX_REPORTED_ALERTS]
+            notification = None
+            if notify_slack:
+                if snapshot.integrity != "ok" or snapshot.foreign_key_violations:
+                    raise RuntimeError(
+                        "unsafe to write health outbox while database checks fail"
+                    )
+                assert config.slack_runtime is not None
+                assert slack_token is not None
+                notification = HealthAlertDeliveryCoordinator(
+                    store=store,
+                    publisher=SlackWebApiPublisher(
+                        bot_token=slack_token,
+                        timeout_seconds=config.slack_runtime.request_timeout_seconds,
+                    ),
+                    channel_id=config.slack_runtime.channel_id,
+                ).reconcile(
+                    combined_alerts,
+                    checked_at=snapshot.checked_at,
+                    alerts_truncated=alerts_truncated,
+                )
+        payload = snapshot.to_mapping()
+        payload["alerts"] = [alert.to_mapping() for alert in combined_alerts]
+        payload["alert_count"] = len(combined_alerts)
+        payload["alerts_truncated"] = alerts_truncated
+        payload["ok"] = snapshot.ok and not systemd_alerts
+        payload["systemd_checked"] = check_systemd
+        if check_systemd:
+            payload["systemd_units"] = [state.to_mapping() for state in unit_states]
+        payload["slack_notification_enabled"] = notify_slack
+        if notification is not None:
+            payload["slack_notification"] = notification.to_mapping()
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
-        return 1, {"ok": False, "lifecycle_health": True, "error": str(exc)}
+        from codex_dispatcher.redaction import redact_text
+
+        secrets = () if slack_token is None else (slack_token,)
+        return 1, {
+            "ok": False,
+            "lifecycle_health": True,
+            "error": redact_text(str(exc), secrets),
+        }
     return (0 if payload["ok"] else 1), payload
 
 
@@ -706,6 +805,14 @@ def _emit(payload: dict[str, object], as_json: bool) -> None:
         print(f"path: {payload.get('path')}")
         print(f"size_bytes: {payload.get('size_bytes')}")
         print(f"integrity: {payload.get('integrity')}")
+        print(f"retained_count: {payload.get('retained_count')}")
+        print(f"deleted_count: {payload.get('deleted_count')}")
+        print(f"deleted_bytes: {payload.get('deleted_bytes')}")
+    if payload.get("state_restore_drill") is True:
+        print(f"source_path: {payload.get('source_path')}")
+        print(f"integrity: {payload.get('integrity')}")
+        print(f"foreign_key_violations: {payload.get('foreign_key_violations')}")
+        print(f"source_age_seconds: {payload.get('source_age_seconds')}")
     if payload.get("runner_capacity") is True:
         print(f"capacity_bytes: {payload.get('capacity_bytes')}")
         print(f"available_bytes: {payload.get('available_bytes')}")
@@ -739,12 +846,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return code
     if args.command == "lifecycle-health":
         code, payload = _lifecycle_health(
-            args.config, check_systemd=args.systemd
+            args.config,
+            check_systemd=args.systemd,
+            notify_slack=args.notify_slack,
         )
         _emit(payload, args.json)
         return code
     if args.command == "state-backup":
         code, payload = _state_backup(args.config)
+        _emit(payload, args.json)
+        return code
+    if args.command == "state-restore-drill":
+        code, payload = _state_restore_drill(args.config)
         _emit(payload, args.json)
         return code
     if args.command == "run-once":

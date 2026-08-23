@@ -13,7 +13,11 @@ from unittest.mock import patch
 from codex_dispatcher.cli import main, run_once_dry_run
 from codex_dispatcher.config import SlackRuntimeConfig
 from codex_dispatcher.contract import ContractCheck
-from codex_dispatcher.control_host_backup import StateBackupResult
+from codex_dispatcher.control_host_backup import (
+    StateBackupResult,
+    StateBackupRetentionResult,
+    StateRestoreDrillResult,
+)
 from codex_dispatcher.control_sweep import ControlSweepResult, ControlSweepStatus
 from codex_dispatcher.domain import Run
 from codex_dispatcher.ssh_preflight import (
@@ -195,6 +199,11 @@ class CliTests(unittest.TestCase):
             4096,
             "ok",
         )
+        retention = StateBackupRetentionResult(
+            (result.path,),
+            (),
+            0,
+        )
         stdout = io.StringIO()
         with (
             patch.dict("os.environ", {}, clear=True),
@@ -206,6 +215,10 @@ class CliTests(unittest.TestCase):
                 "codex_dispatcher.control_host_backup.create_state_backup",
                 return_value=result,
             ) as create,
+            patch(
+                "codex_dispatcher.control_host_backup.rotate_state_backups",
+                return_value=retention,
+            ) as rotate,
             contextlib.redirect_stdout(stdout),
         ):
             exit_code = main(
@@ -216,7 +229,54 @@ class CliTests(unittest.TestCase):
         self.assertEqual(0, exit_code)
         self.assertTrue(payload["state_backup"])
         self.assertEqual("ok", payload["integrity"])
+        self.assertEqual(1, payload["retained_count"])
+        self.assertEqual(0, payload["deleted_count"])
         create.assert_called_once_with(database, database.parent / "backups")
+        rotate.assert_called_once_with(database.parent / "backups")
+
+    def test_restore_drill_emits_bounded_verified_receipt(self) -> None:
+        config = make_config()
+        database = Path("/var/lib/codex-dispatcher/state.db")
+        config = replace(
+            config,
+            scheduler=replace(config.scheduler, database_path=database),
+        )
+        result = StateRestoreDrillResult(
+            source_path=database.parent / "backups/state-20260823T010000.000000Z.db",
+            source_size_bytes=8192,
+            restored_size_bytes=8192,
+            integrity="ok",
+            foreign_key_violations=0,
+            schema_migrations=tuple(range(1, 15)),
+            source_age_seconds=300,
+        )
+        stdout = io.StringIO()
+        with (
+            patch(
+                "codex_dispatcher.ssh_runtime.load_protected_ssh_config",
+                return_value=config,
+            ),
+            patch(
+                "codex_dispatcher.control_host_backup.drill_latest_state_backup",
+                return_value=result,
+            ) as drill,
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = main(
+                [
+                    "state-restore-drill",
+                    "--config",
+                    "/etc/codex-dispatcher/config.toml",
+                    "--json",
+                ]
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(0, exit_code)
+        self.assertTrue(payload["state_restore_drill"])
+        self.assertEqual("ok", payload["integrity"])
+        self.assertTrue(payload["temporary_restore_removed"])
+        drill.assert_called_once_with(database, database.parent / "backups")
 
     def test_run_once_requires_explicit_dry_run(self) -> None:
         with self.assertRaises(SystemExit):

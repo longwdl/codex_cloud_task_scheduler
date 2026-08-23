@@ -121,8 +121,16 @@ the fixed SSH Runner.
 A separate network-isolated oneshot creates daily SQLite Online Backups while the Dispatcher may be
 active. It checks the live database before copying, validates the completed backup, and only then
 atomically publishes one mode-`0600` file in the protected backup directory. The backup path is not
-configurable from a timer invocation, receives no provider credential, and never deletes prior
-backups; retention remains an explicit operator policy.
+configurable from a timer invocation and receives no provider credential. After publishing a good
+copy it validates every canonical backup, preserves the oldest migration anchor and newest seven,
+then deletes only validated excess files. A weekly credential-free job restores the newest copy to a
+temporary database, checks integrity, foreign keys, and migration identity, and removes the temporary
+copy without replacing the live database.
+
+The Control health timer may write only its dedicated schema-14 alert outbox and active-episode row.
+It excludes changing age counters from the episode fingerprint, persists exact bounded message text
+before sending, reuses the existing deterministic Slack `client_msg_id` transport, and clears an
+episode only after the threaded recovery receipt is durable. Slack remains output-only.
 
 ## Input and output channels
 

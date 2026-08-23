@@ -56,9 +56,13 @@ executor. The environment-independent implementation now includes:
 - a fixed, argument-free Linux Control Host entrypoint plus a hardened systemd oneshot/timer and
   root-only environment-file template; live installation and activation remain operator actions.
 - a credential-free, network-isolated daily systemd job that atomically publishes an
-  integrity-checked SQLite Online Backup without automatic deletion.
-- credential-free, network-isolated 15-minute health timers for Control lifecycle/systemd backlog
-  and Runner capacity admission; both emit bounded JSON and never repair or delete state.
+  integrity-checked SQLite Online Backup, preserves the oldest migration anchor plus the newest
+  seven verified copies, and prunes only validated excess backups.
+- a credential-free, network-isolated weekly restore drill that restores the newest backup into a
+  temporary database and verifies integrity, foreign keys, and the migration ledger before cleanup.
+- 15-minute health timers for Control lifecycle/systemd backlog and Runner capacity admission;
+  Control durably deduplicates outbound-only Slack alert/recovery notifications, while neither
+  monitor performs automated repair.
 
 The Runner path has now been exercised against the private Fixture through the real pinned SSH
 transport and Codex CLI 0.147.0 using ChatGPT login. A migrated Issue binding completed PREPARE,

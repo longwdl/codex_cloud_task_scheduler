@@ -4,7 +4,7 @@ set -eu
 umask 077
 
 if [ "$#" -ne 0 ]; then
-    printf '%s\n' 'codex-dispatcher-health-v1: arguments are not accepted' >&2
+    printf '%s\n' 'codex-dispatcher-restore-drill-v1: arguments are not accepted' >&2
     exit 2
 fi
 
@@ -17,8 +17,6 @@ export PYTHONNOUSERSITE=1
 export PYTHONPATH=/opt/codex-dispatcher/current/src
 
 exec /opt/codex-python/current/bin/python3 -P -s -m codex_dispatcher \
-    lifecycle-health \
+    state-restore-drill \
     --config /etc/codex-dispatcher/config.toml \
-    --systemd \
-    --notify-slack \
     --json

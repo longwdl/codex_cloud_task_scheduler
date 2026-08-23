@@ -26,6 +26,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from codex_dispatcher.slack_reporting import (
     SlackDeliveryReceipt,
+    SlackOutboundMessage,
     SlackReport,
 )
 
@@ -164,9 +165,9 @@ class SlackWebApiPublisher:
         self._timeout_seconds = float(timeout_seconds)
         self._transport = transport or UrllibSlackHttpTransport()
 
-    def publish(self, report: SlackReport) -> SlackDeliveryReceipt:
-        if not isinstance(report, SlackReport):
-            raise TypeError("report must be a SlackReport")
+    def publish(self, report: SlackReport | SlackOutboundMessage) -> SlackDeliveryReceipt:
+        if not isinstance(report, (SlackReport, SlackOutboundMessage)):
+            raise TypeError("report must be a validated Slack outbound message")
         message = self._post_message(report)
         message_ts = message.get("ts")
         channel_id = message.get("channel")
@@ -222,7 +223,9 @@ class SlackWebApiPublisher:
                 "Slack permalink conflicts with the posted message"
             ) from exc
 
-    def _post_message(self, report: SlackReport) -> dict[str, object]:
+    def _post_message(
+        self, report: SlackReport | SlackOutboundMessage
+    ) -> dict[str, object]:
         payload: dict[str, object] = {
             "channel": report.channel_id,
             "text": _escape_slack_control_sequences(report.text),
@@ -321,10 +324,10 @@ class SlackWebApiPublisher:
         return decoded
 
 
-def slack_client_message_id(report: SlackReport) -> str:
+def slack_client_message_id(report: SlackReport | SlackOutboundMessage) -> str:
     """Return the stable provider key for one validated outbox identity."""
-    if not isinstance(report, SlackReport):
-        raise TypeError("report must be a SlackReport")
+    if not isinstance(report, (SlackReport, SlackOutboundMessage)):
+        raise TypeError("report must be a validated Slack outbound message")
     return str(uuid5(_CLIENT_MESSAGE_NAMESPACE, report.deduplication_key))
 
 

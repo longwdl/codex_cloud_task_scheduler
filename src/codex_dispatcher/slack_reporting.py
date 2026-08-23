@@ -34,6 +34,23 @@ class SlackDeliveryState(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class SlackOutboundMessage:
+    """One bounded generic outbound message with a durable caller-owned key."""
+
+    deduplication_key: str
+    channel_id: str
+    text: str
+    thread_ts: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_deduplication_key(self.deduplication_key)
+        validate_slack_channel_id(self.channel_id)
+        if self.thread_ts is not None:
+            _validate_message_ts(self.thread_ts, "thread_ts")
+        _validate_report_text(self.text)
+
+
+@dataclass(frozen=True, slots=True)
 class SlackReport:
     deduplication_key: str
     work_item_id: str
@@ -50,17 +67,7 @@ class SlackReport:
         validate_slack_channel_id(self.channel_id)
         if self.thread_ts is not None:
             _validate_message_ts(self.thread_ts, "thread_ts")
-        if (
-            not isinstance(self.text, str)
-            or not self.text
-            or len(self.text) > MAX_SLACK_TEXT_CHARS
-            or any(
-                (ord(character) < 32 and ord(character) not in {9, 10, 13})
-                or ord(character) == 127
-                for character in self.text
-            )
-        ):
-            raise ValueError("Slack report text is invalid")
+        _validate_report_text(self.text)
         expected = slack_deduplication_key(
             self.work_item_id, kind=self.kind, turn_id=self.turn_id
         )
@@ -174,6 +181,31 @@ class SlackPublisher(Protocol):
     """
 
     def publish(self, report: SlackReport) -> SlackDeliveryReceipt: ...
+
+
+class SlackOutboundPublisher(Protocol):
+    """Publish a generic outbound message using the same provider idempotency contract."""
+
+    def publish(self, report: SlackOutboundMessage) -> SlackDeliveryReceipt: ...
+
+
+def build_slack_outbound_message(
+    *,
+    deduplication_key: str,
+    channel_id: str,
+    text: str,
+    thread_ts: str | None = None,
+    explicit_secrets: tuple[str, ...] = (),
+) -> SlackOutboundMessage:
+    redacted = redact_text(text, explicit_secrets)
+    if len(redacted) > MAX_SLACK_TEXT_CHARS:
+        redacted = redacted[: MAX_SLACK_TEXT_CHARS - 14] + "\n[TRUNCATED]"
+    return SlackOutboundMessage(
+        deduplication_key=deduplication_key,
+        channel_id=channel_id,
+        text=redacted,
+        thread_ts=thread_ts,
+    )
 
 
 def build_slack_report(
@@ -296,4 +328,19 @@ def _validate_deduplication_key(value: str) -> str:
         or re.fullmatch(r"[A-Za-z0-9:._-]+", value) is None
     ):
         raise ValueError("Slack deduplication key is invalid")
+    return value
+
+
+def _validate_report_text(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > MAX_SLACK_TEXT_CHARS
+        or any(
+            (ord(character) < 32 and ord(character) not in {9, 10, 13})
+            or ord(character) == 127
+            for character in value
+        )
+    ):
+        raise ValueError("Slack report text is invalid")
     return value

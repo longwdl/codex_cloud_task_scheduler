@@ -28,6 +28,11 @@ from codex_dispatcher.handoffs import (
     SessionHandoffSnapshot,
     validate_handoff_id,
 )
+from codex_dispatcher.health_alerts import (
+    ActiveHealthAlert,
+    HealthAlertDelivery,
+    HealthAlertKind,
+)
 from codex_dispatcher.runner_protocol import (
     AgentResult,
     agent_result_to_json,
@@ -38,6 +43,7 @@ from codex_dispatcher.slack_reporting import (
     SlackDeliveryReceipt,
     SlackDeliveryRecord,
     SlackDeliveryState,
+    SlackOutboundMessage,
     SlackReport,
     SlackReportKind,
 )
@@ -3350,6 +3356,245 @@ class StateStore:
         assert completed is not None
         return completed
 
+    def get_active_health_alert(self) -> ActiveHealthAlert | None:
+        row = self._connection.execute(
+            "SELECT fingerprint, delivery_key, updated_at "
+            "FROM active_health_alert WHERE singleton = 1"
+        ).fetchone()
+        return ActiveHealthAlert(**dict(row)) if row is not None else None
+
+    def get_health_alert_delivery(
+        self, delivery_key: str
+    ) -> HealthAlertDelivery | None:
+        row = self._connection.execute(
+            "SELECT * FROM health_alert_deliveries WHERE delivery_key = ?",
+            (delivery_key,),
+        ).fetchone()
+        return self._row_to_health_alert_delivery(row) if row is not None else None
+
+    def prepare_health_alert_delivery(
+        self,
+        report: SlackOutboundMessage,
+        *,
+        fingerprint: str,
+        expected_active_delivery_key: str | None,
+        created_at: str | None = None,
+    ) -> HealthAlertDelivery:
+        """Persist an immutable root alert and atomically make it active."""
+        if not isinstance(report, SlackOutboundMessage) or report.thread_ts is not None:
+            raise TypeError("health alert must be a root Slack outbound message")
+        now = created_at or utc_now_iso()
+        prepared = HealthAlertDelivery(
+            delivery_key=report.deduplication_key,
+            kind=HealthAlertKind.ALERT,
+            fingerprint=fingerprint,
+            channel_id=report.channel_id,
+            report_text=report.text,
+            payload_sha256=sha256(report.text.encode("utf-8")).hexdigest(),
+            state=SlackDeliveryState.PREPARED,
+            created_at=now,
+            updated_at=now,
+        )
+        with self._transaction() as connection:
+            active_row = connection.execute(
+                "SELECT delivery_key FROM active_health_alert WHERE singleton = 1"
+            ).fetchone()
+            actual_active_key = None if active_row is None else str(active_row[0])
+            if actual_active_key != expected_active_delivery_key:
+                raise RuntimeError("concurrent health alert state change detected")
+            row = connection.execute(
+                "SELECT * FROM health_alert_deliveries WHERE delivery_key = ?",
+                (prepared.delivery_key,),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    "INSERT INTO health_alert_deliveries "
+                    "(delivery_key, kind, fingerprint, channel_id, thread_ts, "
+                    "report_text, payload_sha256, state, message_ts, permalink, "
+                    "created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?, ?)",
+                    (
+                        prepared.delivery_key,
+                        prepared.kind.value,
+                        prepared.fingerprint,
+                        prepared.channel_id,
+                        prepared.report_text,
+                        prepared.payload_sha256,
+                        prepared.state.value,
+                        prepared.created_at,
+                        prepared.updated_at,
+                    ),
+                )
+            else:
+                existing = self._row_to_health_alert_delivery(row)
+                if existing != prepared:
+                    raise ValueError(
+                        "health alert delivery key is bound to another payload"
+                    )
+                prepared = existing
+            connection.execute("DELETE FROM active_health_alert WHERE singleton = 1")
+            connection.execute(
+                "INSERT INTO active_health_alert "
+                "(singleton, fingerprint, delivery_key, updated_at) VALUES (1, ?, ?, ?)",
+                (fingerprint, prepared.delivery_key, now),
+            )
+        return prepared
+
+    def prepare_health_recovery_delivery(
+        self,
+        report: SlackOutboundMessage,
+        *,
+        fingerprint: str,
+        active_alert_delivery_key: str,
+        created_at: str | None = None,
+    ) -> HealthAlertDelivery:
+        """Persist one recovery reply while retaining the active alert pointer."""
+        if not isinstance(report, SlackOutboundMessage) or report.thread_ts is None:
+            raise TypeError("health recovery must be a threaded Slack outbound message")
+        now = created_at or utc_now_iso()
+        prepared = HealthAlertDelivery(
+            delivery_key=report.deduplication_key,
+            kind=HealthAlertKind.RECOVERY,
+            fingerprint=fingerprint,
+            channel_id=report.channel_id,
+            thread_ts=report.thread_ts,
+            report_text=report.text,
+            payload_sha256=sha256(report.text.encode("utf-8")).hexdigest(),
+            state=SlackDeliveryState.PREPARED,
+            created_at=now,
+            updated_at=now,
+        )
+        with self._transaction() as connection:
+            active_row = connection.execute(
+                "SELECT fingerprint, delivery_key FROM active_health_alert "
+                "WHERE singleton = 1"
+            ).fetchone()
+            if active_row is None or (
+                str(active_row[0]), str(active_row[1])
+            ) != (fingerprint, active_alert_delivery_key):
+                raise RuntimeError("concurrent health alert recovery detected")
+            alert_row = connection.execute(
+                "SELECT * FROM health_alert_deliveries WHERE delivery_key = ?",
+                (active_alert_delivery_key,),
+            ).fetchone()
+            if alert_row is None:
+                raise RuntimeError("active health alert delivery is missing")
+            alert = self._row_to_health_alert_delivery(alert_row)
+            if (
+                alert.kind is not HealthAlertKind.ALERT
+                or alert.state is not SlackDeliveryState.DELIVERED
+                or alert.message_ts != report.thread_ts
+                or alert.channel_id != report.channel_id
+            ):
+                raise RuntimeError("active health alert receipt is not recoverable")
+            row = connection.execute(
+                "SELECT * FROM health_alert_deliveries WHERE delivery_key = ?",
+                (prepared.delivery_key,),
+            ).fetchone()
+            if row is not None:
+                existing = self._row_to_health_alert_delivery(row)
+                if (
+                    existing.kind is not prepared.kind
+                    or existing.fingerprint != prepared.fingerprint
+                    or existing.channel_id != prepared.channel_id
+                    or existing.thread_ts != prepared.thread_ts
+                    or existing.report_text != prepared.report_text
+                    or existing.payload_sha256 != prepared.payload_sha256
+                ):
+                    raise ValueError(
+                        "health recovery delivery key is bound to another payload"
+                    )
+                return existing
+            connection.execute(
+                "INSERT INTO health_alert_deliveries "
+                "(delivery_key, kind, fingerprint, channel_id, thread_ts, "
+                "report_text, payload_sha256, state, message_ts, permalink, "
+                "created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)",
+                (
+                    prepared.delivery_key,
+                    prepared.kind.value,
+                    prepared.fingerprint,
+                    prepared.channel_id,
+                    prepared.thread_ts,
+                    prepared.report_text,
+                    prepared.payload_sha256,
+                    prepared.state.value,
+                    prepared.created_at,
+                    prepared.updated_at,
+                ),
+            )
+        return prepared
+
+    def complete_health_alert_delivery(
+        self,
+        delivery_key: str,
+        receipt: SlackDeliveryReceipt,
+        *,
+        clear_active_alert_key: str | None = None,
+        updated_at: str | None = None,
+    ) -> HealthAlertDelivery:
+        """Persist one provider receipt and optionally clear a recovered episode."""
+        if not isinstance(receipt, SlackDeliveryReceipt):
+            raise TypeError("receipt must be a SlackDeliveryReceipt")
+        if receipt.deduplication_key != delivery_key:
+            raise ValueError("health alert receipt key conflicts with its delivery")
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM health_alert_deliveries WHERE delivery_key = ?",
+                (delivery_key,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"health alert delivery not found: {delivery_key}")
+            delivery = self._row_to_health_alert_delivery(row)
+            expected_thread = delivery.thread_ts or receipt.message_ts
+            if (
+                receipt.channel_id != delivery.channel_id
+                or receipt.thread_ts != expected_thread
+            ):
+                raise ValueError("health alert receipt conflicts with the outbox")
+            if delivery.state is SlackDeliveryState.DELIVERED:
+                if (
+                    delivery.message_ts != receipt.message_ts
+                    or delivery.permalink != receipt.permalink
+                ):
+                    raise ValueError(
+                        "health alert delivery already has another receipt"
+                    )
+            else:
+                cursor = connection.execute(
+                    "UPDATE health_alert_deliveries SET state = ?, message_ts = ?, "
+                    "permalink = ?, updated_at = ? "
+                    "WHERE delivery_key = ? AND state = ?",
+                    (
+                        SlackDeliveryState.DELIVERED.value,
+                        receipt.message_ts,
+                        receipt.permalink,
+                        now,
+                        delivery_key,
+                        SlackDeliveryState.PREPARED.value,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(
+                        "concurrent health alert delivery completion detected"
+                    )
+            if clear_active_alert_key is not None:
+                if delivery.kind is not HealthAlertKind.RECOVERY:
+                    raise ValueError("only a recovery delivery may clear an active alert")
+                cursor = connection.execute(
+                    "DELETE FROM active_health_alert "
+                    "WHERE singleton = 1 AND delivery_key = ?",
+                    (clear_active_alert_key,),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("active health alert changed before recovery")
+        completed = self.get_health_alert_delivery(delivery_key)
+        if completed is None:
+            raise RuntimeError("completed health alert delivery disappeared")
+        return completed
+
     def bind_draft_pr(
         self, work_item_id: str, pr_number: int, *, updated_at: str | None = None
     ) -> WorkItem:
@@ -4137,6 +4382,25 @@ class StateStore:
         """Return the number of read-only SQLite foreign-key violations."""
         return sum(1 for _ in self._connection.execute("PRAGMA foreign_key_check"))
 
+    def schema_migration_versions(self) -> tuple[int, ...]:
+        """Return the ordered additive migration ledger for backup evidence."""
+        rows = self._connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        return tuple(int(row[0]) for row in rows)
+
+    @staticmethod
+    def supported_schema_migration_versions() -> tuple[int, ...]:
+        """Return the exact migration versions shipped by this release."""
+        versions = []
+        for resource in files("codex_dispatcher.migrations").iterdir():
+            match = re.fullmatch(r"([0-9]{3})_[A-Za-z0-9_]+\.sql", resource.name)
+            if match is not None:
+                versions.append(int(match.group(1)))
+        if len(set(versions)) != len(versions):
+            raise RuntimeError("duplicate SQLite migration version")
+        return tuple(sorted(versions))
+
     @staticmethod
     def _row_to_run(row: sqlite3.Row) -> Run:
         values = dict(row)
@@ -4242,6 +4506,13 @@ class StateStore:
         values["kind"] = SlackReportKind(values["kind"])
         values["state"] = SlackDeliveryState(values["state"])
         return SlackDeliveryRecord(**values)
+
+    @staticmethod
+    def _row_to_health_alert_delivery(row: sqlite3.Row) -> HealthAlertDelivery:
+        values = dict(row)
+        values["kind"] = HealthAlertKind(values["kind"])
+        values["state"] = SlackDeliveryState(values["state"])
+        return HealthAlertDelivery(**values)
 
     @staticmethod
     def _parse_string_tuple(value: object, field: str) -> tuple[str, ...]:

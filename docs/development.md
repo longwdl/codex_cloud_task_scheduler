@@ -148,16 +148,18 @@ Explicitly deferred:
 The repository now includes the fixed Control Host wrapper, hardened `Type=oneshot` service,
 non-overlapping timer, protected environment-file template, deployment/rollback checklist, and
 offline invariant tests. A separate credential-free command and network-isolated daily timer create
-atomic integrity-checked SQLite Online Backups without automatic retention deletion. The reviewed
+atomic integrity-checked SQLite Online Backups, retain the oldest anchor and newest seven verified
+copies, and delete only validated excess backups. A weekly isolated restore drill exercises the
+newest backup without replacing the live database. The reviewed
 system units are active on the dedicated `s2` Control Host; repository artifacts still do not install
 or activate themselves. A separate `systemd --user` variant remains only a fallback when `sudo` is
 unavailable and is not the production deployment profile.
 
-The system deployment also includes credential-free 15-minute health timers. Control opens SQLite
-read-only and reports bounded lifecycle, retention, archive, and fixed-unit failures; Runner reports
-whether the fixed reserve and one additional bounded image remain admissible. These checks emit JSON
-to journald and exit nonzero on an alert, but never mutate the database, delete disk state, contact an
-external API, or attempt automated repair.
+The system deployment also includes 15-minute health timers. Control reports bounded lifecycle,
+retention, archive, and fixed-unit failures and uses a dedicated schema-14 outbox plus deterministic
+Slack provider keys to deliver one alert per stable episode and one threaded recovery; Runner reports
+whether the fixed reserve and one additional bounded image remain admissible. Health mutates only its
+outbox/active-alert rows, emits bounded JSON to journald, and never repairs WorkItems or Runner state.
 
 ## Architecture constraints for offline code
 
