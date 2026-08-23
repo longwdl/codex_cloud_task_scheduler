@@ -188,8 +188,8 @@ The health service also sends a strict protocol-v2 `capacity` read to the forced
 It reports `runner_capacity_unavailable`, `runner_turn_capacity_low`, or
 `runner_provision_capacity_low` through the same deduplicated Slack episode. Capacity canaries must
 not consume disk: stop the Dispatcher timer and service, back up the protected Runner config, raise
-only `host_free_reserve_bytes` above current availability, run one health check, restore the exact
-config, then run health twice to prove one threaded recovery and no duplicate. Backup/service
+only `work_item_disk.host_reserve_bytes` above current availability, run one health check, restore
+the exact config, then run health twice to prove one threaded recovery and no duplicate. Backup/service
 canaries similarly use one controlled invalid input or stopped timer, never delete real backups,
 WorkItems, branches, or images; record the alert and recovery permalinks before re-enabling timers.
 
