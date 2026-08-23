@@ -184,6 +184,19 @@ longer has the recorded candidate digest. After any sweep begins, external state
 changed and automatic binary-only rollback is forbidden; use the matching database backup and the
 documented recovery-first rollback instead.
 
+Treat receipt states as operational state, not progress text:
+
+- `in_progress` means the exact invocation did not reach a durable terminal observation; inspect the
+  recorded phase and both exact links, and do not retry the same commit.
+- `rolled_back` means the previous links/configuration were observed restored; retain the receipt
+  and use a new commit for another attempt.
+- `rollback_incomplete` or `recovery_required` requires manual reconciliation from the receipt and
+  exact links. Do not delete either candidate or rewrite the receipt.
+- `committed` with `handoff_required` means both links and optional configuration are installed but
+  no Control sweep or timer restart has been authorized by the tool.
+- `rolled_back` with operation `rollback` is the durable result of an explicitly requested,
+  pre-sweep automatic rollback.
+
 The state-changing activation sequence is intentionally not automated. Once separately approved,
 the operator installs the reviewed units, runs `systemctl daemon-reload`, manually starts exactly
 one service sweep, verifies its bounded journal result and SQLite/GitHub/Runner state, and only then
