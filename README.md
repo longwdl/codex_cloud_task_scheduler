@@ -93,8 +93,10 @@ rotation. Container-visible routing, cross-container denial, per-WorkItem ENOSPC
 and the fixed 8 GiB disk admission boundary have also been exercised. After the final schema-18
 runtime release, credential-free Docker-daemon and host restart, remount, proxy fail-closed, direct
 network denial, and isolated login-status probes were repeated successfully. The auth seed stayed
-unchanged; natural expiry-driven token refresh was not forced and remains unproved. Higher-value
-repositories remain prohibited pending the explicit auth/recovery matrix in
+unchanged. Every START and RESUME must now pass `codex login status` in the exact WorkItem home;
+invalid authentication blocks before Codex starts and is never blindly retried. Token refresh is
+Codex-managed rather than a separate Dispatcher admission gate. Higher-value repositories remain
+prohibited pending the repository-class recovery and target-readback matrix in
 `deploy/runner/DOCKER.md`.
 The Fixture-only Dispatcher, backup, restore-drill, health, and Runner-capacity timers are enabled
 on the dedicated hosts. This activation does not admit another repository class.

@@ -89,8 +89,9 @@ Prepare a rebuildable Linux host with:
 
 The original fixture-stage deployment intentionally ran without Docker or per-task operating-system
 restrictions. The current `s3` Fixture path uses the reviewed rootless per-WorkItem container
-boundary, but higher-value repositories remain prohibited until the outstanding attack and recovery
-acceptance in `deploy/runner/DOCKER.md` is complete.
+boundary and checks ChatGPT login status in the exact WorkItem home before every START/RESUME.
+Higher-value repositories remain prohibited until their exact target read-back and repository-class
+operator recovery workflow are explicitly accepted under `deploy/runner/DOCKER.md`.
 
 Return later, without secrets:
 

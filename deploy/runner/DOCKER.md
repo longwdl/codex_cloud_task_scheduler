@@ -107,23 +107,31 @@ weakly protected auth state is rejected before Codex starts.
 Offline fake execution proves the START/RESUME identity and failure boundary. Live acceptance must
 prove:
 
-1. `codex login status` succeeds without mutating the protected auth source;
-2. token refresh can atomically update only the selected WorkItem auth file without mutating or
-   silently invalidating the Runner-wide seed;
-3. a new session persists only in the selected WorkItem home and resumes there by exact session ID;
-4. one container cannot enumerate, read, modify, or delete another WorkItem home;
-5. existing direct-mode WorkItems migrate their exact session state only after independently
+1. immediately before every START and RESUME, `codex login status` succeeds in the selected
+   WorkItem home without mutating the protected Runner-wide seed;
+2. a new session persists only in the selected WorkItem home and resumes there by exact session ID;
+3. one container cannot enumerate, read, modify, or delete another WorkItem home;
+4. existing direct-mode WorkItems migrate their exact session state only after independently
    verified counts and IDs, followed by an exact host-side binding record; without both, RESUME is
    rejected and must never create a replacement session.
 
-The dedicated Issue `#24` recovery fixture proved items 1, 3, and 5 for one existing isolated
+The dedicated Issue `#24` recovery fixture proved items 1, 2, and 4 for one existing isolated
 session: the original version-1 binding remained byte-identical, the companion sidecar was added
 only after authentication and executable validation, and Turn 2 resumed the same session and
-produced one checkpoint. It did not intentionally force a token refresh, so item 2 remains a
-version-specific operational risk. The WorkItem auth host binding and atomic-refresh behavior are
-covered offline but require a new dedicated Fixture before deployment admission. Cross-WorkItem
-denial and the network/disk boundaries were proved separately with credential-free probes; repeat
-them whenever those boundaries change.
+produced one checkpoint. Issue `#26` then proved the per-WorkItem auth binding and exact
+START/RESUME reuse. Cross-WorkItem denial and the network/disk boundaries were proved separately
+with credential-free probes; repeat them whenever those boundaries change.
+
+OpenAI [documents Codex authentication](https://developers.openai.com/codex/auth):
+`codex login status` reports the active authentication method, and Codex manages ChatGPT token
+refresh during use. This readiness gate does not claim that `login status`
+performs a model request, does not force credential expiry, and does not reimplement OAuth refresh.
+A nonzero exit, timeout, truncated or unexpected output, or a non-ChatGPT method returns
+`codex_auth_invalid` before `codex exec`; the Turn and WorkItem become blocked and blind retry is
+forbidden. The actual START or RESUME request remains the final provider-side authentication check.
+The isolated writable WorkItem home and offline atomic-replacement coverage ensure that any
+Codex-managed credential update can affect only that WorkItem, never the protected seed or another
+WorkItem.
 
 No credential value, session content, Prompt, raw JSONL stream, or full container output may be
 printed, logged, copied to GitHub/Slack, or committed during these proofs.
@@ -199,7 +207,7 @@ successful Fixture admission does not authorize unattended use for another repos
 |---|---|---|
 | Rootless daemon, image, mounts, cgroups, proxy and per-WorkItem disk | Live-proved; repeat after any relevant asset change | Requires the same exact target read-back |
 | Per-WorkItem writable auth plus host-only binding | Live-proved by Issue `#26`; seed and bindings stayed protected and stable across START/RESUME | Requires the same exact target read-back |
-| Natural token refresh | The layout permits isolated atomic replacement; never force expiry by editing a credential | Blocked until a version-specific refresh/rotation procedure preserves the seed and other WorkItems |
+| Per-Turn ChatGPT authentication readiness | Exact WorkItem `codex login status` is mandatory immediately before every START and RESUME; invalid status blocks without starting Codex | Requires the same exact check and explicit operator re-login recovery; never blind retry |
 | Runner/client timeout or process loss | Protocol-v2 exact inactivity proof plus double-gated, idempotent operator abandonment is live-deployed; blind replay remains forbidden | Requires explicit repository-class approval for the same operator workflow; abandonment is never automatic |
 | Docker/host restart with no active Turn | Credential-free daemon/host restart, remount, egress, and isolated login-status probes passed after the final schema-18 runtime release | Requires the same exact release-bound read-back |
 | Backup publication | Final schema-18 backup and restore drill passed integrity, migration-ledger, foreign-key, and temporary-cleanup checks | Same exact backup and restore-drill requirement |
@@ -208,8 +216,9 @@ Fixture-only timer activation completed only after the auth candidate was indepe
 Issue `#26` proved the WorkItem auth binding without exposing its contents, the backup sidecar fix
 was live-verified, protocol-v2 inactivity abandonment was deployed, final restart/remount/egress
 probes passed, temporary administrative access was removed, and preflight plus repeated sweeps were
-idle. Natural expiry-driven token refresh remains unproved, and none of this automatically satisfies
-the higher-value column.
+idle. Codex-managed token refresh is not a separate Dispatcher admission claim: every Turn must pass
+the exact WorkItem login-status gate, and none of this automatically satisfies the higher-value
+column.
 
 Rollback keeps the Dispatcher timer disabled, stops the rootless user daemon, restores the previous
 Runner release/config/account binding, and uses read-only STATUS reconciliation. Preserve every

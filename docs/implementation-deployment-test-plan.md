@@ -164,8 +164,10 @@ GitHub 已发布 commit、Issue/PR、Control Host SQLite 和审计记录不得�
 
 Runner 级 `auth.json` 只作为宿主机种子。每个 WorkItem 在自己的 `codex-home` 中持有可写
 副本，容器外的不可变 sidecar 绑定 WorkItem 与种子摘要；不得挂载整个 Runner 级
-`CODEX_HOME` 或共享可写认证文件。Fixture live 成功不自动准入高价值仓库，剩余 auth refresh
-和 active-Turn recovery 门槛以 `deploy/runner/DOCKER.md` 的矩阵为准。
+`CODEX_HOME` 或共享可写认证文件。每次 START/RESUME 前必须在实际执行将使用的同一个
+WorkItem `CODEX_HOME` 内通过 ChatGPT login-status 门禁；失败即阻断，不能启动 Codex 或盲目
+重试。Fixture live 成功不自动准入高价值仓库，剩余 repository-class recovery 和精确目标
+read-back 门槛以 `deploy/runner/DOCKER.md` 的矩阵为准。
 
 ## 4. GitHub 协议
 
@@ -430,11 +432,17 @@ Runner；Docker 阶段继续在容器内使用，但由容器提供外部边界�
 和自动创建替代 session。JSONL 解析错误、缺少 `thread_id`、返回
 不同 session、超时或 SSH 中断都进入对账状态，不能盲目重放 Prompt。
 
-每个 Turn 在启动前先使用相同共享 `CODEX_HOME` 执行固定的 `codex login status`。状态检查和
-`codex exec` 都通过固定 CLI 配置覆盖强制 `forced_login_method="chatgpt"` 以及
+每个 Turn 在启动前先使用该次实际执行的同一个 `CODEX_HOME` 执行固定的
+`codex login status`：Docker 模式必须是精确 WorkItem home，不能是 Runner seed；direct 模式
+必须是该执行路径的固定 home。状态检查和 `codex exec` 都通过固定 CLI 配置覆盖强制
+`forced_login_method="chatgpt"` 以及
 `cli_auth_credentials_store="file"`，不依赖 WorkItem 或可变环境。当前固定 CLI 版本还必须返回
 精确的 `Logged in using ChatGPT`；API key、未登录、状态输出漂移、超时或命令失败都返回
-`codex_auth_invalid`，不启动 `codex exec`。检查器不读取或复制 `auth.json`。配置项语义以
+`codex_auth_invalid`，不启动 `codex exec`，Turn/WorkItem 进入 blocked，且禁止盲目重试。检查器
+不读取或复制 `auth.json`，也不声称 `login status` 会发起模型请求；实际 START/RESUME 才是
+最终 provider-side 校验。Dispatcher 不实现 OAuth refresh，也不通过人为修改凭证来制造过期；
+操作员修复方式是对目标 WorkItem 执行受控的重新登录后再显式重试。认证与配置项语义以
+[OpenAI Codex authentication](https://developers.openai.com/codex/auth) 和
 [OpenAI Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
 为准。
 

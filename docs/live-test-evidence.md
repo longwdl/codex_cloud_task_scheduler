@@ -50,9 +50,12 @@ was removed and Docker returned to zero containers.
 An isolated temporary WorkItem-shaped Codex home ran the deployed fixed Docker login-status plan.
 Before and after the Runner host reboot it returned the exact ChatGPT-login success condition; the
 Runner-wide seed remained byte-identical, the status command did not change the isolated auth copy,
-and each temporary home was removed. This proves current authentication and writable isolation,
-not expiry-driven refresh. No token was expired, edited, printed, or logged, so natural token
-refresh deliberately remains an admission gate.
+and each temporary home was removed. This proves the deployed per-WorkItem login-status gate and
+writable isolation; it does not prove that the status command performs a provider request. No token
+was expired, edited, printed, or logged. Current policy therefore relies on the same exact
+login-status check immediately before every START/RESUME, fail-closed handling of the real command,
+and explicit operator re-login recovery. Codex-managed token refresh is not a separate Dispatcher
+admission gate.
 
 The non-production Runner host then rebooted after a second zero-container and clean-unmount
 preflight. SSH disconnect and reconnect were both observed. Firewall, proxy, and rootless Docker

@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEPLOYMENT = ROOT / "deploy" / "runner"
 SSHD_CONFIG = DEPLOYMENT / "codex-runner-sshd.conf"
 DOCUMENTATION = DEPLOYMENT / "README.md"
+DOCKER_DOCUMENTATION = DEPLOYMENT / "DOCKER.md"
 WRAPPER = ROOT / "scripts" / "codex-runner-v1"
 CAPACITY_WRAPPER = ROOT / "scripts" / "codex-runner-capacity-v1"
 CAPACITY_SERVICE = DEPLOYMENT / "codex-runner-capacity.service"
@@ -76,6 +77,21 @@ class RunnerDeploymentTests(unittest.TestCase):
         self.assertIn("successful container RESUME Turn", documentation)
         self.assertIn("does not authorize\nhigher-value repositories", documentation)
         self.assertIn("do not move or\nrewrite their contents", documentation)
+
+    def test_documentation_uses_exact_per_turn_auth_readiness_gate(self) -> None:
+        documentation = DOCKER_DOCUMENTATION.read_text(encoding="utf-8")
+
+        self.assertIn("immediately before every START and RESUME", documentation)
+        self.assertIn(
+            "returns\n`codex_auth_invalid` before `codex exec`",
+            documentation,
+        )
+        self.assertIn(
+            "does not claim that `login status`\nperforms a model request",
+            documentation,
+        )
+        self.assertNotIn("| Natural token refresh |", documentation)
+        self.assertNotIn("token refresh remains an admission gate", documentation)
 
     def test_capacity_monitor_is_fixed_read_only_and_hardened(self) -> None:
         wrapper = CAPACITY_WRAPPER.read_text(encoding="utf-8")

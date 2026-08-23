@@ -141,11 +141,14 @@ The Runner egress boundary is active on `s3`: the `codex-runner` UID can create 
 to the audited loopback proxy, the unprivileged proxy worker is restricted to reviewed public TLS
 destinations, and private/metadata/direct paths fail closed. Configured Fixture Turns now use the
 reviewed rootless per-WorkItem container, container-visible proxy path, and bounded disk image.
-Higher-value repositories remain blocked by the explicit auth/recovery admission matrix.
+Every START and RESUME must pass the exact WorkItem ChatGPT login-status gate first; invalid auth
+blocks before Codex starts and requires explicit operator recovery. Higher-value repositories remain
+blocked by the repository-class recovery and exact target-readback admission matrix.
 
 Explicitly deferred:
 
-- admission of higher-value repositories before the remaining auth/recovery gates;
+- admission of higher-value repositories before the remaining repository-class recovery and
+  target-readback gates;
 - any dispatcher-initiated merge, deployment, release, or production access.
 
 The repository now includes the fixed Control Host wrapper, hardened `Type=oneshot` service,

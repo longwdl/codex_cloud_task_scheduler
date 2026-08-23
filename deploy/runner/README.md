@@ -294,5 +294,8 @@ rollback rules are documented in [DOCKER.md](DOCKER.md).
 The deployed Runner keeps the Runner-wide `auth.json` only as an unmounted host seed. Each WorkItem
 receives a protected writable copy inside its own session home plus a host-only binding sidecar, so
 Codex can atomically refresh without sharing writable authentication state across WorkItems. Issue
-`#26` proved the binding and exact START/RESUME reuse before Fixture-only timer activation. A natural
-version-specific token refresh remains an admission gate for higher-value repositories.
+`#26` proved the binding and exact START/RESUME reuse before Fixture-only timer activation. The
+Runner executes `codex login status` in the exact WorkItem home immediately before every START and
+RESUME. Invalid authentication returns `codex_auth_invalid`, starts no Codex Turn, and requires
+explicit operator re-login before retry. Token refresh remains Codex-managed; the Dispatcher neither
+forces expiry nor implements a separate refresh gate.
