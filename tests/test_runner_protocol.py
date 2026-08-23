@@ -13,6 +13,12 @@ from codex_dispatcher.runner_protocol import (
     parse_agent_result,
     parse_runner_request,
 )
+from codex_dispatcher.runner_transport import (
+    RunnerInactiveContainerState,
+    RunnerTurnRemoteState,
+    RunnerTurnReply,
+    parse_runner_turn_reply,
+)
 
 
 WORK_ITEM = "wi_" + "a" * 24
@@ -24,6 +30,49 @@ POLICY_DIGEST = "e" * 64
 
 
 class RunnerProtocolTests(unittest.TestCase):
+    def test_v2_inactive_and_abandonment_replies_are_strict(self) -> None:
+        common = {
+            "work_item_id": WORK_ITEM,
+            "turn_id": TURN,
+            "session_generation_id": GENERATION_ID,
+            "session_generation": 1,
+            "agent_policy_digest": POLICY_DIGEST,
+            "inactive_container_state": RunnerInactiveContainerState.ABSENT,
+            "inactive_observed_at": "2026-08-23T00:00:00+00:00",
+            "version": NEXT_PROTOCOL_VERSION,
+        }
+        inactive = RunnerTurnReply(
+            operation=RunnerOperation.STATUS,
+            state=RunnerTurnRemoteState.UNKNOWN,
+            error_code="turn_container_inactive",
+            **common,
+        )
+        abandoned = RunnerTurnReply(
+            operation=RunnerOperation.STOP,
+            state=RunnerTurnRemoteState.FAILED,
+            error_code="turn_abandoned_inactive",
+            **common,
+        )
+        self.assertEqual(inactive, parse_runner_turn_reply(inactive.to_json()))
+        self.assertEqual(abandoned, parse_runner_turn_reply(abandoned.to_json()))
+        for changes in (
+            {"inactive_observed_at": None},
+            {"error_code": "turn_outcome_unresolved"},
+            {"version": 1},
+        ):
+            values = {**common, **changes}
+            with self.subTest(changes=changes), self.assertRaises(
+                RunnerProtocolError
+            ):
+                RunnerTurnReply(
+                    operation=RunnerOperation.STATUS,
+                    state=RunnerTurnRemoteState.UNKNOWN,
+                    error_code=values.pop(
+                        "error_code", "turn_container_inactive"
+                    ),
+                    **values,
+                )
+
     def test_prepare_start_and_resume_roundtrip_without_prompt_or_path_fields(self) -> None:
         requests = (
             RunnerRequest(

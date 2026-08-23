@@ -7,6 +7,7 @@ import os
 import re
 import stat
 from dataclasses import dataclass
+from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,14 @@ _PINNED_IMAGE_RE = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
 
 class RunnerDockerError(RuntimeError):
     """Raised when the rootless container boundary cannot be proven safe."""
+
+
+class DockerGenerationContainerState(StrEnum):
+    """Exact state of one identity-validated v2 Turn container."""
+
+    RUNNING = "running"
+    STOPPED = "stopped"
+    ABSENT = "absent"
 
 
 @dataclass(frozen=True, slots=True)
@@ -672,12 +681,12 @@ def bind_docker_session(
         raise RunnerDockerError("WorkItem Codex session binding conflicts")
 
 
-def docker_generation_container_is_running(
+def inspect_docker_generation_container(
     *,
     runtime: DockerCodexRuntime,
     request: RunnerRequest,
-) -> bool:
-    """Prove that the exact deterministic v2 Turn container is still running."""
+) -> DockerGenerationContainerState:
+    """Inspect one exact v2 Turn container without changing Docker state."""
     if request.version != NEXT_PROTOCOL_VERSION or request.turn_id is None:
         raise ValueError("request must identify one v2 Turn")
     assert request.session_generation_id is not None
@@ -715,7 +724,7 @@ def docker_generation_container_is_running(
             and not result.stdout.strip()
             and result.stderr.strip() in missing_messages
         ):
-            return False
+            return DockerGenerationContainerState.ABSENT
         raise RunnerDockerError("Docker container inspection failed")
     if result.stderr:
         raise RunnerDockerError("Docker container inspection failed")
@@ -775,7 +784,23 @@ def docker_generation_container_is_running(
         or (not running and pid != 0)
     ):
         raise RunnerDockerError("Docker container state is invalid")
-    return running
+    return (
+        DockerGenerationContainerState.RUNNING
+        if running
+        else DockerGenerationContainerState.STOPPED
+    )
+
+
+def docker_generation_container_is_running(
+    *,
+    runtime: DockerCodexRuntime,
+    request: RunnerRequest,
+) -> bool:
+    """Compatibility wrapper proving whether the exact container is running."""
+    return (
+        inspect_docker_generation_container(runtime=runtime, request=request)
+        is DockerGenerationContainerState.RUNNING
+    )
 
 
 def _seed_work_item_auth(

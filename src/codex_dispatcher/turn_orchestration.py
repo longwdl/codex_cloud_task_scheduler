@@ -35,6 +35,7 @@ from codex_dispatcher.runner_transport import (
     parse_runner_turn_reply,
 )
 from codex_dispatcher.state_store import StateStore
+from codex_dispatcher.turn_abandonment import TurnExecutionAbandonment
 from codex_dispatcher.work_item_lifecycle import (
     WorkItemAbsenceReconciliation,
     WorkItemArchive,
@@ -594,6 +595,159 @@ class OfflineTurnOrchestrator:
                 reply=reply,
             )
         return self._apply_turn_reply(turn_id, RunnerOperation.STATUS, reply)
+
+    def inspect_turn_abandonment(self, turn_id: str) -> RunnerTurnReply:
+        """Read exact inactive proof for one v2 reconciling Turn without writes."""
+        turn = self._require_turn(turn_id)
+        locally_committed = False
+        if turn.state is TurnState.BLOCKED:
+            abandonment = self._store.get_turn_execution_abandonment(turn_id)
+            locally_committed = bool(
+                abandonment is not None
+                and turn.error_code == "turn_abandoned_inactive"
+            )
+        if turn.state is not TurnState.RECONCILING and not locally_committed:
+            raise TurnOrchestrationError(
+                "Turn abandonment inspection requires reconciling state"
+            )
+        generation = self._store.get_turn_session_generation(turn_id)
+        if generation is None or generation.policy_sha256 is None:
+            raise TurnOrchestrationError(
+                "Turn abandonment requires a policy-bound session generation"
+            )
+        request = RunnerRequest(
+            RunnerOperation.STATUS,
+            turn.work_item_id,
+            version=NEXT_PROTOCOL_VERSION,
+            turn_id=turn.turn_id,
+            session_generation_id=generation.session_generation_id,
+            session_generation=generation.generation_number,
+            agent_policy_digest=generation.policy_sha256,
+        )
+        try:
+            output = self._transport.invoke(request)
+        except (RunnerTransportInterrupted, RunnerTransportRejected) as exc:
+            raise TurnOrchestrationError(
+                "Runner cannot provide abandonment evidence"
+            ) from exc
+        if output.artifact is not None:
+            raise TurnOrchestrationError(
+                "Runner abandonment inspection returned an artifact"
+            )
+        try:
+            reply = parse_runner_turn_reply(output.payload)
+        except RunnerProtocolError as exc:
+            raise TurnOrchestrationError(
+                "Runner abandonment inspection reply is invalid"
+            ) from exc
+        if not self._generation_reply_identity_is_valid(
+            turn=turn,
+            generation=generation,
+            reply=reply,
+            operation=RunnerOperation.STATUS,
+        ):
+            raise TurnOrchestrationError(
+                "Runner abandonment inspection identity is invalid"
+            )
+        exact_inactive = (
+            reply.state is RunnerTurnRemoteState.UNKNOWN
+            and reply.error_code == "turn_container_inactive"
+        )
+        committed_abandonment = (
+            reply.state is RunnerTurnRemoteState.FAILED
+            and reply.error_code == "turn_abandoned_inactive"
+        )
+        if (
+            not (exact_inactive or committed_abandonment)
+            or reply.inactive_container_state is None
+            or reply.inactive_observed_at is None
+        ):
+            raise TurnOrchestrationError(
+                "Runner has not proven the Turn container inactive"
+            )
+        return reply
+
+    def abandon_unknown_turn(
+        self, turn_id: str
+    ) -> tuple[TurnProgress, TurnExecutionAbandonment]:
+        """Explicitly abandon one exact inactive v2 Turn and persist its receipt."""
+        self.inspect_turn_abandonment(turn_id)
+        turn = self._require_turn(turn_id)
+        generation = self._store.get_turn_session_generation(turn_id)
+        assert generation is not None
+        assert generation.policy_sha256 is not None
+        request = RunnerRequest(
+            RunnerOperation.STOP,
+            turn.work_item_id,
+            version=NEXT_PROTOCOL_VERSION,
+            turn_id=turn.turn_id,
+            session_generation_id=generation.session_generation_id,
+            session_generation=generation.generation_number,
+            agent_policy_digest=generation.policy_sha256,
+        )
+        try:
+            output = self._transport.invoke(request)
+        except (RunnerTransportInterrupted, RunnerTransportRejected) as exc:
+            raise TurnOrchestrationError(
+                "Runner did not commit an abandonment receipt"
+            ) from exc
+        if output.artifact is not None:
+            raise TurnOrchestrationError(
+                "Runner abandonment returned an artifact"
+            )
+        try:
+            reply = parse_runner_turn_reply(output.payload)
+        except RunnerProtocolError as exc:
+            raise TurnOrchestrationError(
+                "Runner abandonment reply is invalid"
+            ) from exc
+        if not self._generation_reply_identity_is_valid(
+            turn=turn,
+            generation=generation,
+            reply=reply,
+            operation=RunnerOperation.STOP,
+        ):
+            raise TurnOrchestrationError("Runner abandonment identity is invalid")
+        if (
+            reply.state is not RunnerTurnRemoteState.FAILED
+            or reply.error_code != "turn_abandoned_inactive"
+            or reply.inactive_container_state is None
+            or reply.inactive_observed_at is None
+        ):
+            raise TurnOrchestrationError(
+                "Runner did not return exact inactive abandonment evidence"
+            )
+        work_item, _, turn, receipt = (
+            self._store.record_generation_turn_abandoned(
+                turn_id,
+                session_generation_id=generation.session_generation_id,
+                generation_number=generation.generation_number,
+                policy_sha256=generation.policy_sha256,
+                session_id=reply.session_id,
+                inactive_container_state=reply.inactive_container_state,
+                inactive_observed_at=reply.inactive_observed_at,
+            )
+        )
+        return TurnProgress(work_item, turn), receipt
+
+    @staticmethod
+    def _generation_reply_identity_is_valid(
+        *,
+        turn: Turn,
+        generation: SessionGeneration,
+        reply: RunnerTurnReply,
+        operation: RunnerOperation,
+    ) -> bool:
+        return bool(
+            generation.policy_sha256 is not None
+            and reply.version == NEXT_PROTOCOL_VERSION
+            and reply.operation is operation
+            and reply.work_item_id == turn.work_item_id
+            and reply.turn_id == turn.turn_id
+            and reply.session_generation_id == generation.session_generation_id
+            and reply.session_generation == generation.generation_number
+            and reply.agent_policy_digest == generation.policy_sha256
+        )
 
     def prepare_publication(
         self,

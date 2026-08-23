@@ -439,6 +439,11 @@ class RunnerTurnRemoteState(StrEnum):
     UNKNOWN = "unknown"
 
 
+class RunnerInactiveContainerState(StrEnum):
+    STOPPED = "stopped"
+    ABSENT = "absent"
+
+
 @dataclass(frozen=True, slots=True)
 class RunnerTurnReply:
     operation: RunnerOperation
@@ -457,6 +462,8 @@ class RunnerTurnReply:
     agent_policy_digest: str | None = None
     usage: CodexTurnUsage | None = None
     delegation_receipt: DelegationReceipt | None = None
+    inactive_container_state: RunnerInactiveContainerState | None = None
+    inactive_observed_at: str | None = None
     version: int = PROTOCOL_VERSION
 
     def __post_init__(self) -> None:
@@ -464,6 +471,7 @@ class RunnerTurnReply:
             RunnerOperation.START,
             RunnerOperation.RESUME,
             RunnerOperation.STATUS,
+            RunnerOperation.STOP,
         }:
             raise RunnerProtocolError("operation does not return a Turn reply")
         if type(self.version) is not int or self.version not in {
@@ -496,6 +504,36 @@ class RunnerTurnReply:
             raise RunnerProtocolError(
                 "failed checkpoint evidence fields must be recorded together"
             )
+        if (self.inactive_container_state is None) != (
+            self.inactive_observed_at is None
+        ):
+            raise RunnerProtocolError(
+                "inactive container evidence fields must be recorded together"
+            )
+        if self.inactive_container_state is not None:
+            if not isinstance(
+                self.inactive_container_state, RunnerInactiveContainerState
+            ):
+                raise RunnerProtocolError("inactive container state is invalid")
+            if not isinstance(self.inactive_observed_at, str):
+                raise RunnerProtocolError(
+                    "inactive_observed_at must be an aware timestamp"
+                )
+            try:
+                inactive_observed_at = datetime.fromisoformat(
+                    self.inactive_observed_at
+                )
+            except ValueError as exc:
+                raise RunnerProtocolError(
+                    "inactive_observed_at is invalid"
+                ) from exc
+            if (
+                inactive_observed_at.tzinfo is None
+                or inactive_observed_at.utcoffset() is None
+            ):
+                raise RunnerProtocolError(
+                    "inactive_observed_at must include a timezone"
+                )
         if self.version == NEXT_PROTOCOL_VERSION:
             if self.session_generation_id is None:
                 raise RunnerProtocolError("v2 Runner Turn requires session_generation_id")
@@ -521,9 +559,20 @@ class RunnerTurnReply:
                 self.delegation_receipt,
                 self.failure_head_sha,
                 self.worktree_clean,
+                self.inactive_container_state,
+                self.inactive_observed_at,
             )
         ):
             raise RunnerProtocolError("v1 Runner Turn cannot contain v2 fields")
+
+        if self.operation is RunnerOperation.STOP and (
+            self.version != NEXT_PROTOCOL_VERSION
+            or self.state is not RunnerTurnRemoteState.FAILED
+            or self.error_code != "turn_abandoned_inactive"
+        ):
+            raise RunnerProtocolError(
+                "STOP only returns an exact v2 inactive abandonment receipt"
+            )
 
         final_fields = (self.head_sha, self.output_sha256, self.result)
         if self.state is not RunnerTurnRemoteState.FAILED and (
@@ -592,6 +641,31 @@ class RunnerTurnReply:
                 raise RunnerProtocolError(
                     "clean context failure requires exact checkpoint evidence"
                 )
+        if self.inactive_container_state is not None:
+            allowed_inactive_evidence = (
+                self.version == NEXT_PROTOCOL_VERSION
+                and (
+                    (
+                        self.state is RunnerTurnRemoteState.UNKNOWN
+                        and self.error_code == "turn_container_inactive"
+                    )
+                    or (
+                        self.state is RunnerTurnRemoteState.FAILED
+                        and self.error_code == "turn_abandoned_inactive"
+                    )
+                )
+            )
+            if not allowed_inactive_evidence:
+                raise RunnerProtocolError(
+                    "inactive container evidence conflicts with the Turn outcome"
+                )
+        elif self.error_code in {
+            "turn_container_inactive",
+            "turn_abandoned_inactive",
+        }:
+            raise RunnerProtocolError(
+                "inactive Turn outcome requires exact container evidence"
+            )
 
     def to_json(self) -> str:
         payload: dict[str, object] = {
@@ -622,6 +696,13 @@ class RunnerTurnReply:
                 if self.delegation_receipt is not None
                 else None,
             ),
+            (
+                "inactive_container_state",
+                self.inactive_container_state.value
+                if self.inactive_container_state is not None
+                else None,
+            ),
+            ("inactive_observed_at", self.inactive_observed_at),
         )
         payload.update((name, value) for name, value in optional if value is not None)
         return _dump(payload)
@@ -665,6 +746,14 @@ def parse_runner_turn_reply(value: str | bytes) -> RunnerTurnReply:
             expected = expected | {"usage"}
             if "delegation_receipt" in payload:
                 expected = expected | {"delegation_receipt"}
+        if (
+            "inactive_container_state" in payload
+            or "inactive_observed_at" in payload
+        ):
+            expected = expected | {
+                "inactive_container_state",
+                "inactive_observed_at",
+            }
     if set(payload) != expected:
         raise RunnerProtocolError("Runner Turn response fields are invalid")
     result: AgentResult | None = None
@@ -692,6 +781,12 @@ def parse_runner_turn_reply(value: str | bytes) -> RunnerTurnReply:
                 if "delegation_receipt" in payload
                 else None
             ),
+            inactive_container_state=(
+                RunnerInactiveContainerState(payload["inactive_container_state"])
+                if "inactive_container_state" in payload
+                else None
+            ),
+            inactive_observed_at=payload.get("inactive_observed_at"),
             version=version,
         )
     except (DelegationEvidenceError, TypeError, ValueError) as exc:

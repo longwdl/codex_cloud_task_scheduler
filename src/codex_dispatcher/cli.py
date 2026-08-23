@@ -150,6 +150,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Emit machine-readable output."
     )
 
+    ssh_abandon = subparsers.add_parser(
+        "ssh-abandon-unknown-turn",
+        help="Inspect or explicitly abandon one exact inactive v2 Runner Turn.",
+    )
+    ssh_abandon.add_argument("--config", required=True, type=Path)
+    ssh_abandon.add_argument("--turn-id", required=True)
+    abandon_mode = ssh_abandon.add_mutually_exclusive_group(required=True)
+    abandon_mode.add_argument(
+        "--plan",
+        action="store_true",
+        help="Read exact Runner inactivity evidence without state writes.",
+    )
+    abandon_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="Commit Runner and SQLite abandonment receipts after a second proof.",
+    )
+    ssh_abandon.add_argument(
+        "--json", action="store_true", help="Emit machine-readable output."
+    )
+
     slack_fixture = subparsers.add_parser(
         "slack-idempotency-fixture",
         help="Prove one Slack client_msg_id exact-retry contract.",
@@ -728,6 +749,77 @@ def _ssh_reconcile_absence(
     }
 
 
+def _ssh_abandon_unknown_turn(
+    config_path: Path, *, turn_id: str, apply: bool
+) -> tuple[int, dict[str, object]]:
+    if apply:
+        if os.environ.get("CODEX_DISPATCHER_ENABLE_SSH_WRITES") != "1":
+            return 1, {
+                "ok": False,
+                "error": "CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 is required",
+            }
+        if os.environ.get("CODEX_DISPATCHER_ENABLE_TURN_ABANDON") != "1":
+            return 1, {
+                "ok": False,
+                "error": "CODEX_DISPATCHER_ENABLE_TURN_ABANDON=1 is required",
+            }
+    try:
+        from codex_dispatcher.ssh_runtime import (
+            load_protected_ssh_config,
+            run_ssh_turn_abandonment,
+            validate_runtime_state_path,
+        )
+
+        config = load_protected_ssh_config(config_path)
+        validate_runtime_state_path(config.scheduler.database_path)
+        with StateStore(
+            config.scheduler.database_path, read_only=not apply
+        ) as store:
+            if apply:
+                store.migrate()
+            if store.integrity_check() != "ok":
+                raise RuntimeError("state database integrity check failed")
+            result = run_ssh_turn_abandonment(
+                config=config,
+                store=store,
+                turn_id=turn_id,
+                apply=apply,
+            )
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        return 1, {
+            "ok": False,
+            "ssh_turn_abandonment": True,
+            "turn_id": turn_id,
+            "error": str(exc),
+        }
+    inspection = result.inspection
+    payload: dict[str, object] = {
+        "ok": True,
+        "ssh_turn_abandonment": True,
+        "mode": "apply" if apply else "plan",
+        "external_writes": apply,
+        "state_writes": None if apply else 0,
+        "authorizes_apply": False,
+        "work_item_id": inspection.work_item_id,
+        "turn_id": inspection.turn_id,
+        "session_generation_id": inspection.session_generation_id,
+        "session_generation": inspection.session_generation,
+        "agent_policy_digest": inspection.agent_policy_digest,
+        "session_id": inspection.session_id,
+        "inactive_container_state": inspection.inactive_container_state.value,
+        "inactive_observed_at": inspection.inactive_observed_at,
+    }
+    if result.receipt is not None:
+        payload["recorded_at"] = result.receipt.recorded_at
+        payload["committed_inactive_container_state"] = (
+            result.receipt.inactive_container_state.value
+        )
+        payload["committed_inactive_observed_at"] = (
+            result.receipt.inactive_observed_at
+        )
+    return 0, payload
+
+
 def _slack_idempotency_fixture(
     *,
     workspace_id: str,
@@ -819,6 +911,14 @@ def _emit(payload: dict[str, object], as_json: bool) -> None:
         print(f"issue_number: {payload.get('issue_number')}")
         print(f"work_item_id: {payload.get('work_item_id')}")
         print(f"evidence_sha256: {payload.get('evidence_sha256')}")
+    if payload.get("ssh_turn_abandonment") is True:
+        print(f"mode: {payload.get('mode')}")
+        print(f"work_item_id: {payload.get('work_item_id')}")
+        print(f"turn_id: {payload.get('turn_id')}")
+        print(
+            "inactive_container_state: "
+            f"{payload.get('inactive_container_state')}"
+        )
     if payload.get("slack_idempotency_fixture") is True:
         print(f"workspace_id: {payload.get('workspace_id')}")
         print(f"channel_id: {payload.get('channel_id')}")
@@ -847,6 +947,7 @@ def _emit(payload: dict[str, object], as_json: bool) -> None:
         print(f"integrity: {payload.get('integrity')}")
         print(f"active_turns: {payload.get('active_turns')}")
         print(f"blocked_work_items: {payload.get('blocked_work_items')}")
+        print(f"abandoned_turns: {payload.get('abandoned_turns')}")
         print(f"pending_archives: {payload.get('pending_archives')}")
         print(f"alert_count: {payload.get('alert_count')}")
 
@@ -902,6 +1003,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.config,
             repository=args.repository,
             issue_number=args.issue_number,
+        )
+        _emit(payload, args.json)
+        return code
+    if args.command == "ssh-abandon-unknown-turn":
+        code, payload = _ssh_abandon_unknown_turn(
+            args.config,
+            turn_id=args.turn_id,
+            apply=args.apply,
         )
         _emit(payload, args.json)
         return code

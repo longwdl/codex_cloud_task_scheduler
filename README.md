@@ -69,6 +69,9 @@ Fixture target is the remote Linux Codex CLI executor, and the implementation no
 - a durable daily terminal-audit cursor plus schema-17 per-sweep GitHub metrics shared by the
   tracker and Actions importer, including read/write/failure counts, latency, terminal outcome, and
   rate-limit evidence; health alerts on stale/missing evidence instead of trusting process stdout;
+- an explicit schema-18 inactive-Turn abandonment ledger and double-gated Control command; Runner
+  `STOP` is abandonment-only, repeats exact container inspection under the global Turn lock, and
+  never invokes Docker stop, kill, or remove;
 - permanent open terminal Issues and exact-evidence task-branch reclamation after an explicitly
   configured retention interval, with prepared/delete/absence receipts and health projection.
 - a dedicated exact-target Fixture canary for terminal-branch delete receipt loss and absence
@@ -239,4 +242,7 @@ The dispatcher processes untrusted issue text, Runner output, Git bundles, and a
 It must never execute issue-provided commands on its control host, expose GitHub write credentials
 to Codex, accept Slack as input, or interpret unknown external state as success. Ambiguous execution
 or publication remains active for bounded status/read-back reconciliation and is never treated as
-success by inference.
+success by inference. An operator may terminalize a v2 execution only through
+`ssh-abandon-unknown-turn`: read-only `--plan` must obtain exact absent/stopped evidence, while
+`--apply` requires both SSH-write and Turn-abandon environment gates and makes Runner revalidate or
+replay its durable abandonment receipt before SQLite changes.

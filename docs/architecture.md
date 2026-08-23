@@ -98,6 +98,13 @@ Only one turn may be active globally. A single dispatcher process and an operati
 lock enforce this; SQLite leases are not used to enable concurrent submitters. `reconciling` is an
 active state: an ambiguous SSH interruption retains the global slot until a read-only `status`
 request proves the remote outcome. The original Prompt is never replayed during reconciliation.
+Docker observation failure, malformed identity, and an exact inactive container are distinct v2
+outcomes. Inactivity alone does not mutate Control state. The operator-only abandonment path first
+plans from exact `absent`/`stopped` evidence, then sends the reserved `STOP` operation under the
+Runner global lock. Here `STOP` means only “commit an inactive abandonment receipt”: it re-inspects
+the exact deterministic container and never calls Docker stop, kill, or remove. Schema 18 records
+that receipt atomically while failing the generation, blocking the Turn, and blocking the WorkItem.
+A lost `STOP` response is recovered through STATUS plus idempotent receipt replay.
 
 The live Control Host entry point is a one-sweep command, not an interactive shell. It requires both
 the `--apply` argument and `CODEX_DISPATCHER_ENABLE_SSH_WRITES=1`; without either, configuration and

@@ -11,10 +11,16 @@ from unittest.mock import patch
 
 from codex_dispatcher.prompt_builder import PromptSnapshot
 from codex_dispatcher.publisher import VerifiedBundle
-from codex_dispatcher.runner_protocol import RunnerOperation, parse_agent_result
+from codex_dispatcher.runner_protocol import (
+    NEXT_PROTOCOL_VERSION,
+    RunnerOperation,
+    parse_agent_result,
+)
 from codex_dispatcher.runner_transport import (
+    RunnerInactiveContainerState,
     RunnerTurnRemoteState,
     RunnerTurnReply,
+    RunnerTransportInterrupted,
     RunnerWireOutput,
 )
 from codex_dispatcher.state_store import StateStore
@@ -25,7 +31,14 @@ from codex_dispatcher.testing.fake_runner import (
 )
 from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator
 from codex_dispatcher.turn_orchestration import TurnOrchestrationError
-from codex_dispatcher.work_items import TurnState, WorkItem, WorkItemState
+from codex_dispatcher.work_items import (
+    PromptKind,
+    SessionGenerationRole,
+    SessionGenerationState,
+    TurnState,
+    WorkItem,
+    WorkItemState,
+)
 
 
 SESSION = "123e4567-e89b-12d3-a456-426614174000"
@@ -336,6 +349,139 @@ class TurnOrchestrationTests(unittest.TestCase):
         self.assertEqual(1, operations.count(RunnerOperation.START))
         self.assertEqual(0, operations.count(RunnerOperation.RESUME))
         self.assertEqual(1, operations.count(RunnerOperation.STATUS))
+
+    def test_explicit_inactive_abandonment_requires_plan_then_stop_receipt(self) -> None:
+        item = work_item(45)
+        self.store.create_work_item(item)
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.PREPARING)
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.READY)
+        policy = "c" * 64
+        generation = self.store.plan_session_generation(
+            item.work_item_id,
+            role=SessionGenerationRole.IMPLEMENTATION,
+            policy_sha256=policy,
+        )
+        _, generation, turn, _ = self.store.begin_session_generation_turn(
+            item.work_item_id,
+            session_generation_id=generation.session_generation_id,
+            generation_number=1,
+            policy_sha256=policy,
+            prompt_kind=PromptKind.FULL,
+            issue_revision="revision",
+            issue_content_sha256="d" * 64,
+            task_spec_sha256="e" * 64,
+            prompt_sha256="f" * 64,
+            approved_comment_ids=(),
+            approved_context_sha256="1" * 64,
+            issue_allowed_paths=("src",),
+            input_head_sha="a" * 40,
+        )
+        self.store.record_generation_turn_unknown(
+            turn.turn_id,
+            session_generation_id=generation.session_generation_id,
+            generation_number=1,
+            policy_sha256=policy,
+        )
+
+        class InactiveTransport:
+            def __init__(self):
+                self.operations = []
+                self.committed = False
+                self.interrupt_stop_once = True
+
+            def invoke(self, request, *, stdin=b"", source_artifact=None):
+                self.operations.append(request.operation)
+                if request.operation is RunnerOperation.STATUS:
+                    state = (
+                        RunnerTurnRemoteState.FAILED
+                        if self.committed
+                        else RunnerTurnRemoteState.UNKNOWN
+                    )
+                    error_code = (
+                        "turn_abandoned_inactive"
+                        if self.committed
+                        else "turn_container_inactive"
+                    )
+                elif request.operation is RunnerOperation.STOP:
+                    state = RunnerTurnRemoteState.FAILED
+                    error_code = "turn_abandoned_inactive"
+                    self.committed = True
+                else:
+                    raise AssertionError("unexpected operation")
+                reply = RunnerTurnReply(
+                    operation=request.operation,
+                    work_item_id=request.work_item_id,
+                    turn_id=request.turn_id,
+                    state=state,
+                    error_code=error_code,
+                    inactive_container_state=RunnerInactiveContainerState.ABSENT,
+                    inactive_observed_at="2026-08-23T00:00:00+00:00",
+                    session_generation_id=request.session_generation_id,
+                    session_generation=request.session_generation,
+                    agent_policy_digest=request.agent_policy_digest,
+                    version=NEXT_PROTOCOL_VERSION,
+                )
+                output = RunnerWireOutput(reply.to_json().encode("utf-8"))
+                if (
+                    request.operation is RunnerOperation.STOP
+                    and self.interrupt_stop_once
+                ):
+                    self.interrupt_stop_once = False
+                    raise RunnerTransportInterrupted(
+                        "fixture lost committed STOP response"
+                    )
+                return output
+
+        transport = InactiveTransport()
+        service = OfflineTurnOrchestrator(
+            store=self.store,
+            transport=transport,
+            bundle_verifier=self.verifier,
+        )
+        inspection = service.inspect_turn_abandonment(turn.turn_id)
+        self.assertEqual("turn_container_inactive", inspection.error_code)
+        self.assertEqual(
+            TurnState.RECONCILING, self.store.get_turn(turn.turn_id).state
+        )
+        with self.assertRaisesRegex(
+            TurnOrchestrationError, "did not commit"
+        ):
+            service.abandon_unknown_turn(turn.turn_id)
+        self.assertEqual(
+            TurnState.RECONCILING, self.store.get_turn(turn.turn_id).state
+        )
+        recovered = service.inspect_turn_abandonment(turn.turn_id)
+        self.assertEqual("turn_abandoned_inactive", recovered.error_code)
+        progress, receipt = service.abandon_unknown_turn(turn.turn_id)
+        self.assertEqual(WorkItemState.BLOCKED, progress.work_item.state)
+        self.assertEqual(TurnState.BLOCKED, progress.turn.state)
+        self.assertEqual("absent", receipt.inactive_container_state.value)
+        self.assertEqual(
+            [
+                RunnerOperation.STATUS,
+                RunnerOperation.STATUS,
+                RunnerOperation.STOP,
+                RunnerOperation.STATUS,
+                RunnerOperation.STATUS,
+                RunnerOperation.STOP,
+            ],
+            transport.operations,
+        )
+        self.assertEqual(
+            SessionGenerationState.FAILED,
+            self.store.get_session_generation(
+                generation.session_generation_id
+            ).state,
+        )
+        repeated_progress, repeated_receipt = service.abandon_unknown_turn(
+            turn.turn_id
+        )
+        self.assertEqual(progress, repeated_progress)
+        self.assertEqual(receipt, repeated_receipt)
+        self.assertEqual(
+            [RunnerOperation.STATUS, RunnerOperation.STOP],
+            transport.operations[-2:],
+        )
 
     def test_migrated_legacy_generation_reconciles_with_v1_status(self) -> None:
         item = work_item(47)

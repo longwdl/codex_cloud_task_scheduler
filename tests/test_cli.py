@@ -26,6 +26,12 @@ from codex_dispatcher.ssh_preflight import (
 )
 from codex_dispatcher.ssh_recovery import SshRecoveryAction
 from codex_dispatcher.ssh_runtime import SshPreflightInspection
+from codex_dispatcher.runner_protocol import NEXT_PROTOCOL_VERSION, RunnerOperation
+from codex_dispatcher.runner_transport import (
+    RunnerInactiveContainerState,
+    RunnerTurnRemoteState,
+    RunnerTurnReply,
+)
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.testing.fakes import FakeTracker
 from tests.test_scheduler import make_config
@@ -374,6 +380,87 @@ class CliTests(unittest.TestCase):
         self.assertEqual("c" * 64, payload["evidence_sha256"])
         self.assertNotIn(token, stdout.getvalue())
         self.assertEqual(24, reconcile.call_args.kwargs["issue_number"])
+
+    def test_unknown_turn_abandonment_plan_is_read_only_and_apply_is_double_gated(self) -> None:
+        turn_id = "turn_" + "a" * 32
+        work_item_id = "wi_" + "b" * 24
+        generation_id = "sg_" + "c" * 32
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = make_config(global_max_active=1)
+            database = Path(temp_dir) / "state.db"
+            config = replace(
+                base,
+                scheduler=replace(base.scheduler, database_path=database),
+            )
+            with StateStore(database) as store:
+                store.migrate()
+            inspection = RunnerTurnReply(
+                operation=RunnerOperation.STATUS,
+                work_item_id=work_item_id,
+                turn_id=turn_id,
+                state=RunnerTurnRemoteState.UNKNOWN,
+                error_code="turn_container_inactive",
+                inactive_container_state=RunnerInactiveContainerState.ABSENT,
+                inactive_observed_at="2026-08-23T00:00:00+00:00",
+                session_generation_id=generation_id,
+                session_generation=1,
+                agent_policy_digest="d" * 64,
+                version=NEXT_PROTOCOL_VERSION,
+            )
+            outcome = SimpleNamespace(
+                applied=False, inspection=inspection, receipt=None
+            )
+            stdout = io.StringIO()
+            with (
+                patch.dict("os.environ", {}, clear=True),
+                patch(
+                    "codex_dispatcher.ssh_runtime.load_protected_ssh_config",
+                    return_value=config,
+                ),
+                patch(
+                    "codex_dispatcher.ssh_runtime.validate_runtime_state_path"
+                ),
+                patch(
+                    "codex_dispatcher.ssh_runtime.run_ssh_turn_abandonment",
+                    return_value=outcome,
+                ) as abandon,
+                contextlib.redirect_stdout(stdout),
+            ):
+                exit_code = main(
+                    [
+                        "ssh-abandon-unknown-turn",
+                        "--plan",
+                        "--config",
+                        "config.toml",
+                        "--turn-id",
+                        turn_id,
+                        "--json",
+                    ]
+                )
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(0, exit_code)
+            self.assertEqual(0, payload["state_writes"])
+            self.assertFalse(payload["external_writes"])
+            self.assertFalse(payload["authorizes_apply"])
+            self.assertFalse(abandon.call_args.kwargs["apply"])
+
+        stdout = io.StringIO()
+        with patch.dict(
+            "os.environ", {"CODEX_DISPATCHER_ENABLE_SSH_WRITES": "1"}, clear=True
+        ), contextlib.redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "ssh-abandon-unknown-turn",
+                    "--apply",
+                    "--config",
+                    "config.toml",
+                    "--turn-id",
+                    turn_id,
+                    "--json",
+                ]
+            )
+        self.assertEqual(1, exit_code)
+        self.assertIn("ENABLE_TURN_ABANDON", stdout.getvalue())
 
     def test_ssh_run_once_requires_recognized_explicit_token(self) -> None:
         stdout = io.StringIO()

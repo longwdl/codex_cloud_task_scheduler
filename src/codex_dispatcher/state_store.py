@@ -58,6 +58,8 @@ from codex_dispatcher.terminal_retention import (
     TerminalBranchCleanupOutcome,
     TerminalBranchCleanupState,
 )
+from codex_dispatcher.turn_abandonment import TurnExecutionAbandonment
+from codex_dispatcher.runner_transport import RunnerInactiveContainerState
 from codex_dispatcher.work_items import (
     ACTIVE_TURN_STATES,
     PRE_SESSION_RETRY_ROTATION_REASON,
@@ -2169,6 +2171,149 @@ class StateStore:
             elif work_item.state is not WorkItemState.BLOCKED:
                 raise ValueError("WorkItem cannot record a generation failure")
         return work_item, generation, turn
+
+    def record_generation_turn_abandoned(
+        self,
+        turn_id: str,
+        *,
+        session_generation_id: str,
+        generation_number: int,
+        policy_sha256: str,
+        session_id: str | None,
+        inactive_container_state: RunnerInactiveContainerState,
+        inactive_observed_at: str,
+        recorded_at: str | None = None,
+    ) -> tuple[WorkItem, SessionGeneration, Turn, TurnExecutionAbandonment]:
+        """Atomically terminalize one explicitly abandoned inactive execution."""
+        now = recorded_at or utc_now_iso()
+        with self._transaction() as connection:
+            generation, turn = self._require_bound_generation_turn(
+                connection,
+                turn_id=turn_id,
+                session_generation_id=session_generation_id,
+                generation_number=generation_number,
+                policy_sha256=policy_sha256,
+            )
+            work_item = self._require_work_item(connection, turn.work_item_id)
+            proposed = TurnExecutionAbandonment(
+                turn_id=turn_id,
+                work_item_id=work_item.work_item_id,
+                session_generation_id=session_generation_id,
+                generation_number=generation_number,
+                policy_sha256=policy_sha256,
+                session_id=session_id,
+                inactive_container_state=inactive_container_state,
+                inactive_observed_at=inactive_observed_at,
+                recorded_at=now,
+            )
+            existing_row = connection.execute(
+                "SELECT * FROM turn_execution_abandonments WHERE turn_id = ?",
+                (turn_id,),
+            ).fetchone()
+            if existing_row is not None:
+                existing = self._row_to_turn_execution_abandonment(existing_row)
+                if existing != replace(proposed, recorded_at=existing.recorded_at):
+                    raise ValueError("Turn already has different abandonment evidence")
+                if (
+                    generation.state is SessionGenerationState.FAILED
+                    and turn.state is TurnState.BLOCKED
+                    and turn.error_code == "turn_abandoned_inactive"
+                    and work_item.state is WorkItemState.BLOCKED
+                ):
+                    return work_item, generation, turn, existing
+                raise ValueError("persisted Turn abandonment state is inconsistent")
+            if turn.state is not TurnState.RECONCILING:
+                raise ValueError("Turn abandonment requires reconciling state")
+            if generation.state not in {
+                SessionGenerationState.STARTING,
+                SessionGenerationState.ACTIVE,
+            }:
+                raise ValueError(
+                    "Turn abandonment requires a starting or active generation"
+                )
+            if work_item.state is not WorkItemState.RUNNING:
+                raise ValueError("Turn abandonment requires a running WorkItem")
+
+            if session_id is not None:
+                generation = generation.bind_session(session_id, at=now)
+            generation = generation.transition_to(SessionGenerationState.FAILED, at=now)
+            turn = replace(
+                turn, error_code="turn_abandoned_inactive"
+            ).transition_to(TurnState.BLOCKED, at=now)
+            work_item = work_item.transition_to(WorkItemState.BLOCKED, at=now)
+            connection.execute(
+                "INSERT INTO turn_execution_abandonments "
+                "(turn_id, work_item_id, session_generation_id, generation_number, "
+                "policy_sha256, session_id, inactive_container_state, "
+                "inactive_observed_at, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    proposed.turn_id,
+                    proposed.work_item_id,
+                    proposed.session_generation_id,
+                    proposed.generation_number,
+                    proposed.policy_sha256,
+                    proposed.session_id,
+                    proposed.inactive_container_state.value,
+                    proposed.inactive_observed_at,
+                    proposed.recorded_at,
+                ),
+            )
+            connection.execute(
+                "UPDATE session_generations SET state = ?, codex_session_id = ?, "
+                "retired_at = ?, updated_at = ? WHERE session_generation_id = ?",
+                (
+                    generation.state.value,
+                    generation.codex_session_id,
+                    generation.retired_at,
+                    now,
+                    session_generation_id,
+                ),
+            )
+            connection.execute(
+                "UPDATE turns SET state = ?, error_code = ?, finished_at = ?, "
+                "updated_at = ? WHERE turn_id = ?",
+                (
+                    turn.state.value,
+                    turn.error_code,
+                    turn.finished_at,
+                    now,
+                    turn_id,
+                ),
+            )
+            connection.execute(
+                "UPDATE work_items SET state = ?, updated_at = ? WHERE work_item_id = ?",
+                (work_item.state.value, now, work_item.work_item_id),
+            )
+        return work_item, generation, turn, proposed
+
+    def get_turn_execution_abandonment(
+        self, turn_id: str
+    ) -> TurnExecutionAbandonment | None:
+        row = self._connection.execute(
+            "SELECT * FROM turn_execution_abandonments WHERE turn_id = ?",
+            (turn_id,),
+        ).fetchone()
+        return (
+            None
+            if row is None
+            else self._row_to_turn_execution_abandonment(row)
+        )
+
+    def list_turn_execution_abandonments(self) -> list[TurnExecutionAbandonment]:
+        return [
+            self._row_to_turn_execution_abandonment(row)
+            for row in self._connection.execute(
+                "SELECT * FROM turn_execution_abandonments "
+                "ORDER BY recorded_at, turn_id"
+            )
+        ]
+
+    def turn_execution_abandonment_count(self) -> int:
+        row = self._connection.execute(
+            "SELECT COUNT(*) FROM turn_execution_abandonments"
+        ).fetchone()
+        assert row is not None
+        return int(row[0])
 
     def record_generation_turn_context_failure(
         self,
@@ -4803,6 +4948,16 @@ class StateStore:
         values = dict(row)
         values["worktree_clean"] = bool(values["worktree_clean"])
         return TurnContextFailureReceipt(**values)
+
+    @staticmethod
+    def _row_to_turn_execution_abandonment(
+        row: sqlite3.Row,
+    ) -> TurnExecutionAbandonment:
+        values = dict(row)
+        values["inactive_container_state"] = RunnerInactiveContainerState(
+            values["inactive_container_state"]
+        )
+        return TurnExecutionAbandonment(**values)
 
     @staticmethod
     def _row_to_turn_prompt_input(row: sqlite3.Row) -> TurnPromptInput:

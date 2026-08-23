@@ -7,6 +7,7 @@ import os
 import sqlite3
 import stat
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -37,10 +38,12 @@ from codex_dispatcher.executors.codex_docker import (
     build_docker_login_status_plan,
 )
 from codex_dispatcher.runner_docker import (
+    DockerGenerationContainerState,
     DockerWorkItemContext,
     RunnerDockerError,
     bind_docker_session,
     docker_generation_container_is_running,
+    inspect_docker_generation_container,
     load_docker_generation_receipt,
     prepare_docker_work_item,
     validate_docker_auth_state,
@@ -62,6 +65,7 @@ from codex_dispatcher.runner_policy import (
     PolicyBundleError,
 )
 from codex_dispatcher.runner_transport import (
+    RunnerInactiveContainerState,
     RunnerTurnRemoteState,
     RunnerTurnReply,
     parse_runner_turn_reply,
@@ -252,13 +256,76 @@ class RunnerTurnExecutor:
         assert record.reply is not None
         return replace(record.reply, operation=RunnerOperation.STATUS)
 
+    def abandon(self, request: RunnerRequest) -> RunnerTurnReply:
+        """Commit an inactive-only abandonment receipt without stopping anything."""
+        if request.operation is not RunnerOperation.STOP:
+            raise ValueError("request must be a STOP operation")
+        if request.version != NEXT_PROTOCOL_VERSION:
+            raise RunnerTurnError("Runner STOP requires protocol v2")
+        self._require_activated_protocol(request)
+        assert request.turn_id is not None
+        assert self._docker_runtime is not None
+        paths = self._workspace.paths(request.work_item_id)
+        record_path = self._record_path(paths.state, request.turn_id)
+        record = self._read_record(record_path, required=True)
+        assert record is not None
+        if (
+            record.request.version != request.version
+            or record.request.work_item_id != request.work_item_id
+            or record.request.turn_id != request.turn_id
+            or record.request.session_generation_id
+            != request.session_generation_id
+            or record.request.session_generation != request.session_generation
+            or record.request.agent_policy_digest != request.agent_policy_digest
+        ):
+            raise RunnerTurnError("Turn generation identity is inconsistent")
+        if record.state == "finished":
+            assert record.reply is not None
+            if record.reply.error_code != "turn_abandoned_inactive":
+                raise RunnerTurnError("finished Turn cannot be abandoned")
+            return replace(record.reply, operation=RunnerOperation.STOP)
+        if record.state != "executing":
+            raise RunnerTurnError("Turn record state is invalid")
+
+        status_request = replace(request, operation=RunnerOperation.STATUS)
+        try:
+            receipt = load_docker_generation_receipt(
+                runtime=self._docker_runtime,
+                paths=paths,
+                request=status_request,
+            )
+        except (RunnerDockerError, OSError, ValueError) as exc:
+            raise RunnerTurnError("Turn session receipt is invalid") from exc
+        session_id = None if receipt is None else receipt[1]
+        try:
+            container_state = inspect_docker_generation_container(
+                runtime=self._docker_runtime,
+                request=record.request,
+            )
+        except (RunnerDockerError, OSError, ValueError) as exc:
+            raise RunnerTurnError(
+                "Turn container state cannot be proven inactive"
+            ) from exc
+        if container_state is DockerGenerationContainerState.RUNNING:
+            raise RunnerTurnError("running Turn cannot be abandoned")
+        inactive_observed_at = datetime.now(timezone.utc).isoformat()
+        reply = self._failed_reply(
+            record.request,
+            "turn_abandoned_inactive",
+            session_id=session_id,
+            inactive_container_state=RunnerInactiveContainerState(
+                container_state.value
+            ),
+            inactive_observed_at=inactive_observed_at,
+        )
+        self._write_record(record_path, _TurnRecord(record.request, "finished", reply))
+        return replace(reply, operation=RunnerOperation.STOP)
+
     def _require_activated_protocol(self, request: RunnerRequest) -> None:
         if request.version == PROTOCOL_VERSION:
             return
         if request.version != NEXT_PROTOCOL_VERSION:
             raise RunnerTurnError("Runner protocol version is not activated")
-        if request.operation is RunnerOperation.STOP:
-            raise RunnerTurnError("Runner STOP is not activated")
         if self._docker_runtime is None or self._policy_bundle is None:
             raise RunnerTurnError("v2 requires policy-bound Docker execution")
         if request.agent_policy_digest != self._policy_bundle.policy_digest:
@@ -290,23 +357,31 @@ class RunnerTurnExecutor:
                 request=status_request,
             )
         except (RunnerDockerError, OSError, ValueError):
-            receipt = None
-        if receipt is None:
-            return self._unknown_reply(request, "turn_outcome_unresolved")
-        _, session_id = receipt
+            return self._unknown_reply(request, "turn_session_receipt_invalid")
+        session_id = None if receipt is None else receipt[1]
         try:
-            running = docker_generation_container_is_running(
+            container_state = inspect_docker_generation_container(
                 runtime=self._docker_runtime,
                 request=request,
             )
         except (RunnerDockerError, OSError, ValueError):
-            running = False
-        if not running:
             return self._unknown_reply(
                 request,
-                "turn_outcome_unresolved",
+                "turn_container_observation_unavailable",
                 session_id=session_id,
             )
+        if container_state is not DockerGenerationContainerState.RUNNING:
+            return self._unknown_reply(
+                request,
+                "turn_container_inactive",
+                session_id=session_id,
+                inactive_container_state=RunnerInactiveContainerState(
+                    container_state.value
+                ),
+                inactive_observed_at=datetime.now(timezone.utc).isoformat(),
+            )
+        if session_id is None:
+            return self._unknown_reply(request, "turn_session_receipt_missing")
         assert request.turn_id is not None
         return RunnerTurnReply(
             request.operation,
@@ -799,6 +874,8 @@ class RunnerTurnExecutor:
         session_id: str | None = None,
         failure_head_sha: str | None = None,
         worktree_clean: bool | None = None,
+        inactive_container_state: RunnerInactiveContainerState | None = None,
+        inactive_observed_at: str | None = None,
     ) -> RunnerTurnReply:
         assert request.turn_id is not None
         return RunnerTurnReply(
@@ -810,6 +887,8 @@ class RunnerTurnExecutor:
             error_code=error_code,
             failure_head_sha=failure_head_sha,
             worktree_clean=worktree_clean,
+            inactive_container_state=inactive_container_state,
+            inactive_observed_at=inactive_observed_at,
             **cls._v2_reply_fields(request),
         )
 
@@ -820,6 +899,8 @@ class RunnerTurnExecutor:
         error_code: str,
         *,
         session_id: str | None = None,
+        inactive_container_state: RunnerInactiveContainerState | None = None,
+        inactive_observed_at: str | None = None,
     ) -> RunnerTurnReply:
         assert request.turn_id is not None
         return RunnerTurnReply(
@@ -829,6 +910,8 @@ class RunnerTurnExecutor:
             RunnerTurnRemoteState.UNKNOWN,
             session_id=session_id if session_id is not None else request.session_id,
             error_code=error_code,
+            inactive_container_state=inactive_container_state,
+            inactive_observed_at=inactive_observed_at,
             **cls._v2_reply_fields(request),
         )
 

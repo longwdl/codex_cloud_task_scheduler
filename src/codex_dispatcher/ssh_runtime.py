@@ -49,10 +49,13 @@ from codex_dispatcher.trackers.github_cli import GitHubCliTracker
 from codex_dispatcher.trackers.base import PullRequestState, TaskState, Tracker
 from codex_dispatcher.trusted_mirror import GitHubMirrorRefresher, TrustedMirrorSource
 from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator
+from codex_dispatcher.turn_abandonment import TurnExecutionAbandonment
+from codex_dispatcher.runner_transport import RunnerTurnReply
 from codex_dispatcher.work_item_lifecycle import WorkItemAbsenceReconciliation
 from codex_dispatcher.work_items import (
     WorkItemState,
     validate_git_sha,
+    validate_turn_id,
     validate_work_item_id,
 )
 
@@ -71,6 +74,13 @@ class SshPreflightInspection:
     plan: SshPreflightPlan
     checks: tuple[ContractCheck, ...]
     database_preexisting: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TurnAbandonmentControlResult:
+    applied: bool
+    inspection: RunnerTurnReply
+    receipt: TurnExecutionAbandonment | None = None
 
 
 def load_protected_ssh_config(path: Path) -> Config:
@@ -527,6 +537,64 @@ def _run_locked_absence_reconciliation(
         work_item.work_item_id,
         eligible_at=store.get_work_item_completed_at(work_item.work_item_id),
     )
+
+
+def run_ssh_turn_abandonment(
+    *,
+    config: Config,
+    store: StateStore,
+    turn_id: str,
+    apply: bool,
+) -> TurnAbandonmentControlResult:
+    """Inspect or explicitly commit one exact inactive v2 Turn abandonment."""
+    if not isinstance(config, Config):
+        raise TypeError("config must be a Config")
+    if not isinstance(store, StateStore):
+        raise TypeError("store must be a StateStore")
+    turn_id = validate_turn_id(turn_id)
+    if type(apply) is not bool:
+        raise TypeError("apply must be a bool")
+    runtime = _require_runtime(config)
+    git_path = _protected_executable(runtime.git_path, "ssh_runtime.git_path")
+    gh_path = _protected_executable(runtime.gh_path, "ssh_runtime.gh_path")
+    ssh_path = _protected_executable(runtime.ssh_path, "ssh_runtime.ssh_path")
+    checks = run_control_host_contract_checks(
+        pins=config.tools,
+        git_path=git_path,
+        gh_path=gh_path,
+        ssh_path=ssh_path,
+    )
+    failed = tuple(check.name for check in checks if not check.ok)
+    if failed:
+        raise SshRuntimeError(
+            f"Control Host tool contract failed: {', '.join(failed)}"
+        )
+    transport = SshRunnerTransport(
+        ssh_path=ssh_path,
+        host=runtime.host,
+        user=runtime.user,
+        port=runtime.port,
+        known_hosts_path=runtime.known_hosts_path,
+        identity_file=runtime.identity_file,
+        assh_proxy_path=runtime.assh_proxy_path,
+        assh_home=runtime.assh_home,
+        connect_timeout_seconds=runtime.connect_timeout_seconds,
+        operation_timeout_seconds=runtime.operation_timeout_seconds,
+    )
+    orchestrator = OfflineTurnOrchestrator(
+        store=store,
+        transport=transport,
+        bundle_verifier=GitBundleQuarantineVerifier(
+            git_path=git_path,
+            quarantine_root=runtime.quarantine_root,
+        ),
+    )
+    with DispatcherProcessLock(runtime.lock_path):
+        inspection = orchestrator.inspect_turn_abandonment(turn_id)
+        if not apply:
+            return TurnAbandonmentControlResult(False, inspection)
+        _, receipt = orchestrator.abandon_unknown_turn(turn_id)
+        return TurnAbandonmentControlResult(True, inspection, receipt)
 
 
 def run_ssh_preflight(

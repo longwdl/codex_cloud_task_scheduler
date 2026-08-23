@@ -66,6 +66,12 @@ class LinuxRunnerService:
             elif request.operation is RunnerOperation.STATUS:
                 reply = self._turns.status(request)
                 output = RunnerWireOutput(reply.to_json().encode("utf-8"))
+            elif request.operation is RunnerOperation.STOP:
+                # STOP is deliberately abandonment-only. The executor performs
+                # another exact inactive observation and never stops a container.
+                with self._active_turn_lock():
+                    reply = self._turns.abandon(request)
+                output = RunnerWireOutput(reply.to_json().encode("utf-8"))
             elif request.operation is RunnerOperation.EXPORT:
                 output = self._workspace.export(request)
             elif request.operation is RunnerOperation.ARCHIVE:

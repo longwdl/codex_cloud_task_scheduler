@@ -94,12 +94,43 @@ remove `[session_runtime]` after a v2 WorkItem has started: the legacy
 rollback could start an unrelated v1 session. Generation directories are audit
 state and must not be deleted during rollback.
 
-Releases through schema migration 013 add Handoff, Agent-result, verified
+Releases through schema migration 018 add Handoff, Agent-result, verified
 publication, delegation, completion-gate, context-failure, archive, disposition, and explicit
-absence-reconciliation ledgers. Older
+absence-reconciliation, GitHub API metric, terminal branch cleanup, and inactive-Turn abandonment
+ledgers. Older
 binaries intentionally reject a newer schema. Rolling back such a release
 therefore requires the matching pre-migration SQLite Online Backup; changing
 only the `current` release symlink is unsafe.
+
+## Inactive Turn abandonment boundary
+
+Protocol-v2 `STOP` does not stop a process or container. It is accepted only for an existing exact
+`executing` Turn, while the Runner global Turn lock is available, after a fresh identity-validated
+Docker inspect returns `absent` or `stopped`. Running containers, Docker/daemon unavailability,
+malformed inspection, policy drift, identity drift, and malformed session receipts are rejected
+without changing the Turn record. A successful receipt changes only the durable Runner Turn record
+from `executing` to failed `turn_abandoned_inactive`; repeated STOP or STATUS replays that receipt.
+
+On Control, inspect first without write gates:
+
+```bash
+codex-dispatcher ssh-abandon-unknown-turn \
+  --config /etc/codex-dispatcher/config.toml \
+  --turn-id turn_<exact-id> --plan --json
+```
+
+Apply requires the ordinary SSH write gate plus the separate resolution acknowledgement:
+
+```bash
+CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_TURN_ABANDON=1 \
+codex-dispatcher ssh-abandon-unknown-turn \
+  --config /etc/codex-dispatcher/config.toml \
+  --turn-id turn_<exact-id> --apply --json
+```
+
+The command holds the Control dispatcher lock, rechecks STATUS, asks Runner to commit/replay the
+receipt, and only then atomically blocks the WorkItem/Turn and fails its generation in SQLite.
 
 ## Terminal WorkItem archive boundary
 

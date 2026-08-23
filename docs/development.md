@@ -96,6 +96,9 @@ The environment-independent core now additionally contains:
 - an explicit protocol-v2 absence reconciliation path whose Runner-persisted receipt binds the
   normal archive request and rejects any remaining registry, workspace, staging, image, or mount
   state before schema-13 evidence is recorded.
+- an explicit protocol-v2 inactive execution abandonment path with distinct observation-unavailable
+  evidence, Runner-lock reinspection, lost-STOP-response replay, schema-18 receipts, and immediate
+  lifecycle health projection; it contains no container stop/kill/remove action.
 
 The fixed OpenSSH argv/byte-stream adapter is covered by isolated unit tests, and the installed
 Runner protocol has also completed the disposable SSH/real-Codex fixture recorded in

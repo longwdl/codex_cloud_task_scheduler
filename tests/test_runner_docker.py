@@ -25,6 +25,7 @@ from codex_dispatcher.executors.codex_docker import (
 from codex_dispatcher.command_runner import BinaryCommandResult, CommandResult
 from codex_dispatcher.codex_jsonl import CodexJsonlError
 from codex_dispatcher.runner_docker import (
+    DockerGenerationContainerState,
     RunnerDockerError,
     bind_docker_session as durable_bind_docker_session,
     docker_generation_container_is_running,
@@ -1271,8 +1272,8 @@ class RunnerDockerExecutionTests(unittest.TestCase):
                         return_value=socket_path,
                     ),
                     patch(
-                        "codex_dispatcher.runner_turns.docker_generation_container_is_running",
-                        return_value=True,
+                        "codex_dispatcher.runner_turns.inspect_docker_generation_container",
+                        return_value=DockerGenerationContainerState.RUNNING,
                     ),
                 ):
                     status = turns.status(status_request)
@@ -1283,11 +1284,56 @@ class RunnerDockerExecutionTests(unittest.TestCase):
                         return_value=socket_path,
                     ),
                     patch(
-                        "codex_dispatcher.runner_turns.docker_generation_container_is_running",
-                        return_value=False,
+                        "codex_dispatcher.runner_turns.inspect_docker_generation_container",
+                        return_value=DockerGenerationContainerState.ABSENT,
                     ),
                 ):
                     unknown = turns.status(status_request)
+                with (
+                    patch(
+                        "codex_dispatcher.runner_docker._expected_rootless_socket",
+                        return_value=socket_path,
+                    ),
+                    patch(
+                        "codex_dispatcher.runner_turns.inspect_docker_generation_container",
+                        side_effect=RunnerDockerError("fixture unavailable"),
+                    ),
+                ):
+                    unavailable = turns.status(status_request)
+                stop_request = RunnerRequest(
+                    RunnerOperation.STOP,
+                    WORK_ITEM,
+                    turn_id=TURN_ONE,
+                    session_generation_id=GENERATION_ONE_ID,
+                    session_generation=1,
+                    agent_policy_digest=policy.policy_digest,
+                    version=NEXT_PROTOCOL_VERSION,
+                )
+                with (
+                    patch(
+                        "codex_dispatcher.runner_docker._expected_rootless_socket",
+                        return_value=socket_path,
+                    ),
+                    patch(
+                        "codex_dispatcher.runner_turns.inspect_docker_generation_container",
+                        return_value=DockerGenerationContainerState.RUNNING,
+                    ),
+                    self.assertRaisesRegex(RunnerTurnError, "running Turn"),
+                ):
+                    turns.abandon(stop_request)
+                with (
+                    patch(
+                        "codex_dispatcher.runner_docker._expected_rootless_socket",
+                        return_value=socket_path,
+                    ),
+                    patch(
+                        "codex_dispatcher.runner_turns.inspect_docker_generation_container",
+                        return_value=DockerGenerationContainerState.ABSENT,
+                    ),
+                ):
+                    abandoned = turns.abandon(stop_request)
+                terminal_status = turns.status(status_request)
+                terminal_replay = turns.execute(request, prompt)
                 mismatched_status = RunnerRequest(
                     RunnerOperation.STATUS,
                     WORK_ITEM,
@@ -1309,6 +1355,20 @@ class RunnerDockerExecutionTests(unittest.TestCase):
             self.assertEqual(SESSION, replay.session_id)
             self.assertEqual(RunnerTurnRemoteState.UNKNOWN, unknown.state)
             self.assertEqual(SESSION, unknown.session_id)
+            self.assertEqual("turn_container_inactive", unknown.error_code)
+            self.assertEqual("absent", unknown.inactive_container_state.value)
+            self.assertEqual(
+                "turn_container_observation_unavailable", unavailable.error_code
+            )
+            self.assertIsNone(unavailable.inactive_container_state)
+            self.assertEqual(RunnerOperation.STOP, abandoned.operation)
+            self.assertEqual(RunnerTurnRemoteState.FAILED, abandoned.state)
+            self.assertEqual("turn_abandoned_inactive", abandoned.error_code)
+            self.assertEqual("absent", abandoned.inactive_container_state.value)
+            self.assertEqual(RunnerOperation.STATUS, terminal_status.operation)
+            self.assertEqual("turn_abandoned_inactive", terminal_status.error_code)
+            self.assertEqual("turn_abandoned_inactive", terminal_replay.error_code)
+            self.assertEqual(2, calls)
 
     def test_v2_running_container_proof_requires_exact_identity(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:

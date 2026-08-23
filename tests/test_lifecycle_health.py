@@ -26,11 +26,17 @@ from codex_dispatcher.github_api_metrics import (
 )
 from codex_dispatcher.runner_transport import (
     RunnerCapacityReply,
+    RunnerInactiveContainerState,
     RunnerTransportInterrupted,
     RunnerWireOutput,
 )
 from codex_dispatcher.state_store import StateStore
-from codex_dispatcher.work_items import WorkItem, WorkItemState
+from codex_dispatcher.work_items import (
+    PromptKind,
+    SessionGenerationRole,
+    WorkItem,
+    WorkItemState,
+)
 
 
 HEAD = "b" * 40
@@ -118,6 +124,69 @@ def _seed_observability(store: StateStore, at: str) -> None:
 
 
 class LifecycleHealthTests(unittest.TestCase):
+    def test_inactive_turn_abandonment_is_immediately_visible(self) -> None:
+        now = datetime(2026, 8, 23, tzinfo=timezone.utc)
+        at = now.isoformat()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "state.db"
+            with StateStore(database) as store:
+                store.migrate()
+                _seed_observability(store, at)
+                item = _item(6, at)
+                store.create_work_item(item)
+                store.update_work_item_state(
+                    item.work_item_id, WorkItemState.PREPARING, updated_at=at
+                )
+                store.update_work_item_state(
+                    item.work_item_id, WorkItemState.READY, updated_at=at
+                )
+                generation = store.plan_session_generation(
+                    item.work_item_id,
+                    role=SessionGenerationRole.IMPLEMENTATION,
+                    policy_sha256="c" * 64,
+                    created_at=at,
+                )
+                _, generation, turn, _ = store.begin_session_generation_turn(
+                    item.work_item_id,
+                    session_generation_id=generation.session_generation_id,
+                    generation_number=1,
+                    policy_sha256="c" * 64,
+                    prompt_kind=PromptKind.FULL,
+                    issue_revision="revision",
+                    issue_content_sha256="d" * 64,
+                    task_spec_sha256="e" * 64,
+                    prompt_sha256="f" * 64,
+                    approved_comment_ids=(),
+                    approved_context_sha256="1" * 64,
+                    issue_allowed_paths=("src",),
+                    input_head_sha="a" * 40,
+                )
+                store.record_generation_turn_unknown(
+                    turn.turn_id,
+                    session_generation_id=generation.session_generation_id,
+                    generation_number=1,
+                    policy_sha256="c" * 64,
+                    updated_at=at,
+                )
+                store.record_generation_turn_abandoned(
+                    turn.turn_id,
+                    session_generation_id=generation.session_generation_id,
+                    generation_number=1,
+                    policy_sha256="c" * 64,
+                    session_id=None,
+                    inactive_container_state=RunnerInactiveContainerState.ABSENT,
+                    inactive_observed_at=at,
+                    recorded_at=at,
+                )
+                snapshot = inspect_lifecycle_health(
+                    _config(database), store, now=now
+                )
+        self.assertEqual(1, snapshot.abandoned_turns)
+        self.assertEqual(
+            {"runner_turn_abandoned_inactive"},
+            {alert.code for alert in snapshot.alerts},
+        )
+
     def test_runner_capacity_health_reports_thresholds_and_unavailability(self) -> None:
         class CapacityTransport:
             def invoke(self, request, *, stdin=b"", source_artifact=None):

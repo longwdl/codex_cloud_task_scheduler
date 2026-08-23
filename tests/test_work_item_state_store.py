@@ -25,6 +25,7 @@ from codex_dispatcher.runner_protocol import (
 from codex_dispatcher.runner_transport import (
     RunnerArchiveReply,
     RunnerArchiveState,
+    RunnerInactiveContainerState,
 )
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.work_items import (
@@ -466,7 +467,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 ).fetchall()
                 legacy_runs = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
                 self.assertEqual(
-                [(version,) for version in range(1, 18)],
+                [(version,) for version in range(1, 19)],
                     versions,
                 )
             self.assertEqual(0, legacy_runs)
@@ -535,7 +536,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
                 self.assertEqual(
-                [(version,) for version in range(1, 18)],
+                [(version,) for version in range(1, 19)],
                     versions,
                 )
 
@@ -803,6 +804,75 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     (turn,),
                     store.list_session_generation_turns(generation.session_generation_id),
                 )
+
+    def test_inactive_turn_abandonment_is_atomic_strict_and_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                item = make_ready(store, make_item(18))
+                generation = store.plan_session_generation(
+                    item.work_item_id,
+                    role=SessionGenerationRole.IMPLEMENTATION,
+                    policy_sha256="c" * 64,
+                )
+                _, generation, turn, _ = store.begin_session_generation_turn(
+                    item.work_item_id,
+                    session_generation_id=generation.session_generation_id,
+                    generation_number=1,
+                    policy_sha256="c" * 64,
+                    prompt_kind=PromptKind.FULL,
+                    issue_revision="revision",
+                    issue_content_sha256="d" * 64,
+                    task_spec_sha256="e" * 64,
+                    prompt_sha256="f" * 64,
+                    approved_comment_ids=(),
+                    approved_context_sha256="1" * 64,
+                    issue_allowed_paths=("src",),
+                    input_head_sha="a" * 40,
+                )
+                store.record_generation_turn_unknown(
+                    turn.turn_id,
+                    session_generation_id=generation.session_generation_id,
+                    generation_number=1,
+                    policy_sha256="c" * 64,
+                )
+                values = {
+                    "session_generation_id": generation.session_generation_id,
+                    "generation_number": 1,
+                    "policy_sha256": "c" * 64,
+                    "session_id": SESSION,
+                    "inactive_container_state": RunnerInactiveContainerState.ABSENT,
+                    "inactive_observed_at": "2026-08-23T00:00:00+00:00",
+                    "recorded_at": "2026-08-23T00:00:01+00:00",
+                }
+                work_item, failed_generation, blocked_turn, receipt = (
+                    store.record_generation_turn_abandoned(turn.turn_id, **values)
+                )
+                self.assertEqual(WorkItemState.BLOCKED, work_item.state)
+                self.assertEqual(
+                    SessionGenerationState.FAILED, failed_generation.state
+                )
+                self.assertEqual(TurnState.BLOCKED, blocked_turn.state)
+                self.assertEqual("turn_abandoned_inactive", blocked_turn.error_code)
+                self.assertEqual(receipt, store.get_turn_execution_abandonment(turn.turn_id))
+                self.assertEqual(1, store.turn_execution_abandonment_count())
+                self.assertEqual(
+                    (receipt,), tuple(store.list_turn_execution_abandonments())
+                )
+                self.assertEqual(
+                    receipt,
+                    store.record_generation_turn_abandoned(
+                        turn.turn_id, **values
+                    )[3],
+                )
+                with self.assertRaisesRegex(ValueError, "different abandonment"):
+                    store.record_generation_turn_abandoned(
+                        turn.turn_id,
+                        **{
+                            **values,
+                            "inactive_container_state": RunnerInactiveContainerState.STOPPED,
+                        },
+                    )
 
     def test_pre_session_retry_proof_is_rechecked_inside_state_store(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -88,6 +88,7 @@ class LifecycleHealthSnapshot:
     blocked_archives: int
     archived_work_items: int
     absence_reconciliations: int
+    abandoned_turns: int
     pending_branch_cleanups: int
     blocked_branch_cleanups: int
     cleaned_branches: int
@@ -122,6 +123,7 @@ class LifecycleHealthSnapshot:
             "blocked_archives": self.blocked_archives,
             "archived_work_items": self.archived_work_items,
             "absence_reconciliations": self.absence_reconciliations,
+            "abandoned_turns": self.abandoned_turns,
             "pending_branch_cleanups": self.pending_branch_cleanups,
             "blocked_branch_cleanups": self.blocked_branch_cleanups,
             "cleaned_branches": self.cleaned_branches,
@@ -182,6 +184,10 @@ def inspect_lifecycle_health(
     dispositions = {
         disposition.work_item_id: disposition
         for disposition in store.list_work_item_dispositions()
+    }
+    abandonments = store.list_turn_execution_abandonments()
+    abandonments_by_work_item = {
+        abandonment.work_item_id: abandonment for abandonment in abandonments
     }
     github_api_sweeps = store.github_api_sweep_count()
     github_api_latest = store.get_latest_github_api_sweep()
@@ -269,6 +275,7 @@ def inspect_lifecycle_health(
         archive = store.get_work_item_archive(work_item.work_item_id)
         absence = store.get_work_item_absence_reconciliation(work_item.work_item_id)
         disposition = dispositions.get(work_item.work_item_id)
+        abandonment = abandonments_by_work_item.get(work_item.work_item_id)
         branch_cleanup = store.get_terminal_branch_cleanup(work_item.work_item_id)
         terminal_runner_evidence = (
             absence is not None
@@ -319,6 +326,14 @@ def inspect_lifecycle_health(
         if work_item.state is WorkItemState.BLOCKED and disposition is None:
             blocked_work_items += 1
             blocked_age = _age_seconds(moment, work_item.updated_at)
+            if abandonment is not None:
+                alerts.append(
+                    _item_alert(
+                        "runner_turn_abandoned_inactive",
+                        work_item,
+                        _age_seconds(moment, abandonment.recorded_at),
+                    )
+                )
             if blocked_age > MAX_BLOCKED_AGE_SECONDS:
                 alerts.append(_item_alert("work_item_blocked_too_long", work_item, blocked_age))
 
@@ -387,6 +402,7 @@ def inspect_lifecycle_health(
         blocked_archives=blocked_archives,
         archived_work_items=archived_work_items,
         absence_reconciliations=absence_reconciliations,
+        abandoned_turns=len(abandonments),
         pending_branch_cleanups=pending_branch_cleanups,
         blocked_branch_cleanups=blocked_branch_cleanups,
         cleaned_branches=cleaned_branches,

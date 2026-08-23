@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import fcntl
 import sys
 import tempfile
 import unittest
@@ -18,7 +19,10 @@ from codex_dispatcher.runner_service import LinuxRunnerService, serve_one
 from codex_dispatcher.runner_transport import (
     RUNNER_CAPACITY_SCOPE_ID,
     RunnerArchiveState,
+    RunnerInactiveContainerState,
+    RunnerTransportRejected,
     RunnerTurnRemoteState,
+    RunnerTurnReply,
     parse_runner_ack,
     parse_runner_archive_reply,
     parse_runner_capacity_reply,
@@ -426,6 +430,54 @@ class RunnerTurnExecutorTests(unittest.TestCase):
             reply = parse_runner_capacity_reply(response.payload)
             self.assertTrue(reply.provision_admissible)
             self.assertFalse((Path(temp_dir) / "missing-parent").exists())
+
+    def test_forced_command_stop_is_abandonment_only_and_requires_turn_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            lock_path = root / "active.lock"
+            calls = []
+            request = RunnerRequest(
+                RunnerOperation.STOP,
+                WORK_ITEM,
+                turn_id=TURN_ONE,
+                session_generation_id=GENERATION_ID,
+                session_generation=1,
+                agent_policy_digest=POLICY_DIGEST,
+                version=NEXT_PROTOCOL_VERSION,
+            )
+            expected = RunnerTurnReply(
+                operation=RunnerOperation.STOP,
+                work_item_id=WORK_ITEM,
+                turn_id=TURN_ONE,
+                state=RunnerTurnRemoteState.FAILED,
+                error_code="turn_abandoned_inactive",
+                inactive_container_state=RunnerInactiveContainerState.ABSENT,
+                inactive_observed_at="2026-08-23T00:00:00+00:00",
+                session_generation_id=GENERATION_ID,
+                session_generation=1,
+                agent_policy_digest=POLICY_DIGEST,
+                version=NEXT_PROTOCOL_VERSION,
+            )
+            turns = SimpleNamespace(
+                abandon=lambda observed: calls.append(observed) or expected
+            )
+            service = LinuxRunnerService(
+                workspace=SimpleNamespace(),
+                turns=turns,
+                active_lock_path=lock_path,
+            )
+            with lock_path.open("a+b") as stream:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaises(RunnerTransportRejected):
+                    service.handle_frame(encode_runner_input(request))
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            self.assertEqual([], calls)
+
+            output = decode_runner_output(
+                service.handle_frame(encode_runner_input(request))
+            )
+            self.assertEqual(expected, parse_runner_turn_reply(output.payload))
+            self.assertEqual([request], calls)
 
 
 if __name__ == "__main__":
