@@ -3,6 +3,27 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Durable GitHub API metrics and cursor-age health — 2026-08-23
+
+Commit `c2e27b0a5b81b523c6ad4d72964505aa6605ff06`, archive SHA-256
+`e78181ffe1a8f6fe6eb18496a20cddabb6056acf37398ef4f1c39fea0d0ce47e`, passed 569 tests under
+each real service account, compilation, shell checks, and unit verification before the two-host v2
+release handoff. The plan reported zero writes and no active service; the committed receipt retained
+the exact `cc200bf` prior links and left all Control timers stopped.
+
+The first observed sweep migrated SQLite additively through schema 17 and returned `idle`. Its
+process result and first durable `github_api_sweep_metrics` row agreed exactly: sequence 1, outcome
+`success`, status `idle`, four reads, zero writes, zero failures, 3,280 milliseconds, no rate-limit
+error, Core 5,000/5,000, and GraphQL 4,970/5,000. The daily terminal-audit cursor remained the prior
+successful value because its configured interval was not due.
+
+The fresh Online Backup was 573,440 bytes and the restore drill verified integrity `ok`, zero
+foreign-key violations, migrations 1 through 17, and removal of the temporary restore. Lifecycle
+health read the durable row rather than journal output: one metric, latest age 31 seconds, terminal
+cursor age 9,506 seconds, zero alerts, both Runner admissions true, and approximately 74.1 GB Runner
+availability. All four Control timers and the Runner capacity timer were active after handoff.
+Rollback to schema-16 code requires the preserved pre-migration backup, not only a symlink change.
+
 ## Durable release-v2 plan, receipt, and rollback canary — 2026-08-23
 
 Commit `a630b9976350cab01bd2cbe911b2e2dbff6917f5` introduced the stable-name release tool's
