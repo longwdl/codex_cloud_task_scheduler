@@ -36,6 +36,7 @@ from codex_dispatcher.trackers.base import TaskState, TrackerTask
 from codex_dispatcher.work_items import (
     PromptKind,
     SessionGeneration,
+    SessionGenerationRole,
     SessionGenerationState,
     Turn,
     WorkItem,
@@ -225,7 +226,14 @@ def build_ssh_generation_turn_plan(
     pre_session_retry_without_handoff: bool = False,
 ) -> SshGenerationTurnPlan:
     """Freeze a fail-closed full or incremental protocol-v2 Turn."""
-    task_spec, issue_revision = _validate_claimed_task(task, repository)
+    task_spec, issue_revision = _validate_claimed_task(
+        task,
+        repository,
+        allow_running=(
+            session_generation.role is SessionGenerationRole.AUDIT
+            and session_generation.state is SessionGenerationState.PLANNED
+        ),
+    )
     _validate_existing_binding(
         task,
         repository,
@@ -383,7 +391,11 @@ def build_ssh_session_handoff_snapshot(
     actions_evidence: ActionsEvidenceSnapshot | None = None,
 ) -> SessionHandoffSnapshot:
     """Freeze trusted Dispatcher/Git/CI facts and a separate untrusted advisory."""
-    task_spec, issue_revision = _validate_claimed_task(task, repository)
+    task_spec, issue_revision = _validate_claimed_task(
+        task,
+        repository,
+        allow_running=True,
+    )
     _validate_existing_binding(task, repository, work_item, _runner_root_for(work_item))
     if from_generation.work_item_id != work_item.work_item_id:
         raise SshDispatchPlanningError(
@@ -535,7 +547,10 @@ def _validate_active_generation_inputs(
 
 
 def _validate_claimed_task(
-    task: TrackerTask, repository: RepositoryConfig
+    task: TrackerTask,
+    repository: RepositoryConfig,
+    *,
+    allow_running: bool = False,
 ) -> tuple[TaskSpec, str]:
     if not isinstance(task, TrackerTask) or not isinstance(repository, RepositoryConfig):
         raise TypeError("task and repository must use dispatcher DTOs")
@@ -543,13 +558,20 @@ def _validate_claimed_task(
         raise SshDispatchPlanningError("Issue repository does not match configuration")
     if task.task_id != str(task.issue_number) or task.issue_number <= 0:
         raise SshDispatchPlanningError("Issue number identity is invalid")
-    if not task.is_open or task.state is not TaskState.DISPATCHING:
+    if type(allow_running) is not bool:
+        raise TypeError("allow_running must be a bool")
+    allowed_states = {TaskState.DISPATCHING}
+    if allow_running:
+        allowed_states.add(TaskState.RUNNING)
+    if not task.is_open or task.state not in allowed_states:
         raise SshDispatchPlanningError("Issue must be open and claimed for dispatch")
     if len(set(task.labels)) != len(task.labels):
         raise SshDispatchPlanningError("Issue labels must not contain duplicates")
     state_labels = tuple(label for label in task.labels if label.startswith("agent:"))
-    if state_labels != ("agent:dispatching",):
-        raise SshDispatchPlanningError("Issue must have exactly one dispatching state label")
+    if state_labels != (f"agent:{task.state.value}",):
+        raise SshDispatchPlanningError(
+            "Issue must have exactly one label matching its claimed state"
+        )
     executor_labels = tuple(label for label in task.labels if label.startswith("exec:"))
     if executor_labels != (SSH_CLI_EXECUTOR_LABEL,):
         raise SshDispatchPlanningError("Issue is not assigned to the SSH CLI executor")

@@ -1257,11 +1257,12 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
             service.requires_fresh_final_audit(implementation.turn.turn_id)
         )
         tracker = FakeTracker()
-        tracker.tasks[task.task_id] = replace(
+        running_task = replace(
             task,
             state=TaskState.RUNNING,
             labels=("agent:running", "exec:ssh-cli", "priority:p1"),
         )
+        tracker.tasks[task.task_id] = running_task
         recovery = plan_ssh_recovery(config, self.store, tracker)
         self.assertEqual(
             SshRecoveryAction.START_FRESH_FINAL_AUDIT,
@@ -1273,7 +1274,7 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
             FakeTurnFixture(SESSION_2, head_sha, completed_result()),
         )
         audit = service.run_fresh_final_audit(
-            task, turn_id="turn_" + "f" * 32
+            running_task, turn_id="turn_" + "f" * 32
         )
 
         self.assertEqual(TurnState.PUBLISHED, audit.turn.state)
@@ -1298,7 +1299,9 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
             handoff.trusted_facts["generation"]["rotation_reason"],
         )
 
-        accepted = service.evaluate_completion_gate(task, audit.turn.turn_id)
+        accepted = service.evaluate_completion_gate(
+            running_task, audit.turn.turn_id
+        )
 
         self.assertEqual(TurnState.FINISHED, accepted.turn.state)
         self.assertEqual(WorkItemState.REVIEW, accepted.work_item.state)

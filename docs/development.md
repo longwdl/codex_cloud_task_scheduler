@@ -80,6 +80,8 @@ The environment-independent core now additionally contains:
 - digest-pinned Sol-to-agent routing profiles plus a metadata-only protocol-v2 delegation receipt
   derived from per-Turn Codex state-database activity and stored atomically with the Turn result;
 - pre-gate Draft PR binding for repositories whose exact-head Actions checks start on `pull_request`;
+- a narrowly scoped running-state allowance for the planned fresh-Audit generation, without
+  weakening the normal implementation claim requirement;
 - a durable protocol-v2 completion gate that holds `completed` Turns at `published` until exact-HEAD
   configured Actions checks, structured acceptance predicates, and verified publication evidence
   reach a trusted verdict;

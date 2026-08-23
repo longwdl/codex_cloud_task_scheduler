@@ -204,7 +204,9 @@ blocks; only a passed durable gate atomically finishes the Turn and advances the
 
 When `rotate_before_final_audit=true`, a passed Implementation gate is not yet review. Recovery
 creates one new generation with role `audit`, a `completion_candidate` Handoff, fresh exact-HEAD CI
-evidence, and an explicit independent-audit prompt contract. The Audit may make bounded in-scope
+evidence, and an explicit independent-audit prompt contract while the Issue remains `agent:running`.
+Only that planned Audit generation may accept the running Issue state; ordinary implementation
+planning still requires the claimed `agent:dispatching` state. The Audit may make bounded in-scope
 fixes, but its completed candidate must pass the same completion gate. Generation-budget exhaustion
 or ambiguous audit preparation blocks instead of degrading to an implementation-only review.
 
