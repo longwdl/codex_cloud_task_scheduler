@@ -572,6 +572,7 @@ class SshControlSweep:
             progress.turn.state is TurnState.PUBLISHED
             and progress.turn.result_status == "completed"
         ):
+            progress = self._deliver_published_checkpoint(task, progress)
             progress = self._dispatch.evaluate_completion_gate(
                 task, progress.turn.turn_id
             )
@@ -766,6 +767,30 @@ class SshControlSweep:
             )
             work_item = slack.work_item
         return work_item
+
+    def _deliver_published_checkpoint(
+        self,
+        task: TrackerTask,
+        progress: TurnProgress,
+    ) -> TurnProgress:
+        """Expose the exact checkpoint through a Draft PR before CI import."""
+        work_item = progress.work_item
+        slack_permalink: str | None = None
+        if self._slack_delivery is not None:
+            slack_root = self._slack_delivery.ensure_root(
+                task,
+                work_item=work_item,
+            )
+            work_item = slack_root.work_item
+            slack_permalink = slack_root.root_permalink
+        if self._delivery is not None:
+            github = self._delivery.reconcile_published_checkpoint(
+                task,
+                work_item=work_item,
+                slack_permalink=slack_permalink,
+            )
+            work_item = github.work_item
+        return TurnProgress(work_item, progress.turn)
 
     def _deliver_completed(
         self,

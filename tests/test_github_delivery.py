@@ -203,6 +203,58 @@ class GitHubDeliveryCoordinatorTests(unittest.TestCase):
             )
         self.assertEqual([], tracker.calls)
 
+    def test_published_checkpoint_creates_draft_pr_while_issue_stays_running(self) -> None:
+        tracker = FakeTracker()
+        coordinator = GitHubDeliveryCoordinator(store=self.store, tracker=tracker)
+        running = WorkItem.new(
+            repository="owner/repo",
+            issue_number=43,
+            issue_node_id="I_kwDOFixture43",
+            base_branch="main",
+            base_sha=BASE_SHA,
+            at="2026-08-13T00:00:00Z",
+        )
+        self.store.create_work_item(running)
+        for state in (
+            WorkItemState.PREPARING,
+            WorkItemState.READY,
+            WorkItemState.RUNNING,
+        ):
+            running = self.store.update_work_item_state(running.work_item_id, state)
+        self.store.record_published_sha(
+            running.work_item_id,
+            previous_sha=BASE_SHA,
+            head_sha=HEAD_SHA,
+        )
+        running = self.store.get_work_item(running.work_item_id)
+        assert running is not None
+        task = replace(
+            claimed_task(43),
+            state=TaskState.RUNNING,
+            labels=("agent:running", "exec:ssh-cli", "priority:p1"),
+        )
+
+        result = coordinator.reconcile_published_checkpoint(
+            task,
+            work_item=running,
+        )
+
+        self.assertEqual(WorkItemState.RUNNING, result.work_item.state)
+        self.assertEqual(1, result.work_item.pr_number)
+        self.assertIsNotNone(result.pull_request)
+        assert result.pull_request is not None
+        self.assertTrue(result.pull_request.is_draft)
+        self.assertEqual(
+            [
+                "find_pr_by_branch",
+                "create_draft_pr",
+                "find_pr_by_branch",
+                "upsert_run_comment",
+            ],
+            [call.method for call in tracker.calls],
+        )
+        self.assertIn("agent:running", tracker.calls[-1].args[-1])
+
     def test_closed_or_wrong_branch_pr_is_rejected_without_rebinding(self) -> None:
         existing = PullRequest(
             number=9,

@@ -43,8 +43,8 @@ from codex_dispatcher.trackers.base import (
     TrackerComment,
     TrackerTask,
 )
-from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator
-from codex_dispatcher.work_items import TurnState, WorkItemState
+from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator, TurnProgress
+from codex_dispatcher.work_items import Turn, TurnState, WorkItemState
 from codex_dispatcher.work_item_lifecycle import WorkItemDispositionKind
 from tests.test_scheduler import make_config
 from tests.test_ssh_dispatch_planning import BASE_SHA, claimed_task
@@ -1265,6 +1265,71 @@ class SshControlSweepTests(unittest.TestCase):
             call for call in tracker.calls if call.method == "upsert_run_comment"
         )
         self.assertIn("fixture.slack.com", issue_comment.args[-1])
+
+    def test_completed_v2_checkpoint_binds_draft_pr_before_ci_evaluation(self) -> None:
+        tracker = FakeTracker()
+        task = claimed_task()
+        tracker.tasks[task.task_id] = task
+        item = self.dispatch.resolve_and_prepare(
+            task,
+            base_sha=BASE_SHA,
+            source_bundle=_bundle(),
+        )
+        item = self.store.update_work_item_state(
+            item.work_item_id, WorkItemState.RUNNING
+        )
+        head_sha = "e" * 40
+        self.store.record_published_sha(
+            item.work_item_id,
+            previous_sha=BASE_SHA,
+            head_sha=head_sha,
+        )
+        item = self.store.get_work_item(item.work_item_id)
+        assert item is not None
+        turn = Turn(
+            turn_id=TURN_ID,
+            work_item_id=item.work_item_id,
+            turn_number=1,
+            state=TurnState.PUBLISHED,
+            issue_revision=task.updated_at,
+            prompt_sha256="f" * 64,
+            input_head_sha=BASE_SHA,
+            output_sha256="a" * 64,
+            output_head_sha=head_sha,
+            result_status="completed",
+            result_summary="completion candidate",
+            created_at="2026-08-13T00:00:00Z",
+            updated_at="2026-08-13T00:00:01Z",
+        )
+
+        class PendingDispatch:
+            def evaluate_completion_gate(inner_self, observed_task, turn_id):
+                persisted = self.store.get_work_item(item.work_item_id)
+                assert persisted is not None
+                self.assertEqual(1, persisted.pr_number)
+                self.assertEqual(TURN_ID, turn_id)
+                self.assertEqual(task, observed_task)
+                return TurnProgress(persisted, turn)
+
+        delivery = GitHubDeliveryCoordinator(store=self.store, tracker=tracker)
+        sweep = SshControlSweep(
+            config=make_config(global_max_active=4),
+            store=self.store,
+            tracker=tracker,
+            dispatch=PendingDispatch(),  # type: ignore[arg-type]
+            source=_RecordingSource(),
+            process_lock=DispatcherProcessLock(self.lock_path),
+            delivery=delivery,
+        )
+
+        result = sweep._after_turn(task, TurnProgress(item, turn))
+
+        self.assertEqual(ControlSweepStatus.AWAITING_COMPLETION, result.status)
+        self.assertEqual(TaskState.RUNNING, tracker.tasks[task.task_id].state)
+        self.assertEqual(
+            1,
+            sum(call.method == "create_draft_pr" for call in tracker.calls),
+        )
 
     def test_lost_slack_root_receipt_recovers_before_starting_codex(self) -> None:
         tracker = FakeTracker()

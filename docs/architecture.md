@@ -195,8 +195,10 @@ directly.
 
 A protocol-v2 `completed` result is only a completion candidate. After checkpoint publication, the
 Turn remains `published` and the WorkItem remains `running`. The Control Host then imports configured
-GitHub Actions runs for the exact remote task-branch HEAD and combines them with the structured Issue
-acceptance predicates and complete publication ledger. Pending checks remain recoverable and are
+or recovers the single Draft PR before importing GitHub Actions runs, so repositories whose required
+checks are triggered by `pull_request` can produce exact-head evidence without prematurely moving the
+Issue to review. It imports only runs for the exact remote task-branch HEAD and combines them with
+the structured Issue acceptance predicates and complete publication ledger. Pending checks remain recoverable and are
 polled without replaying Codex or Publisher. A trusted failure or unverifiable/ambiguous identity
 blocks; only a passed durable gate atomically finishes the Turn and advances the WorkItem.
 

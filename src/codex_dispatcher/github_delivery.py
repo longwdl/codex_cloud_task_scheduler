@@ -98,6 +98,39 @@ class GitHubDeliveryCoordinator:
             ),
         )
 
+    def reconcile_published_checkpoint(
+        self,
+        task: TrackerTask,
+        *,
+        work_item: WorkItem,
+        slack_permalink: str | None = None,
+    ) -> GitHubDeliveryResult:
+        """Bind the Draft PR needed to trigger exact-head completion checks."""
+        self._validate_issue_identity(task, work_item)
+        if (
+            task.state not in {TaskState.DISPATCHING, TaskState.RUNNING}
+            or work_item.state is not WorkItemState.RUNNING
+            or work_item.last_published_sha is None
+        ):
+            raise GitHubDeliveryRejected(
+                "published checkpoint conflicts with the running WorkItem"
+            )
+        if slack_permalink is not None:
+            self._validate_slack_permalink(work_item, slack_permalink)
+        work_item, pull_request = self._ensure_pull_request(task, work_item)
+        self._tracker.upsert_run_comment(
+            work_item.repository,
+            str(work_item.issue_number),
+            f"work-item:{work_item.work_item_id}:status",
+            self._render_comment(
+                work_item,
+                pull_request,
+                TaskState.RUNNING,
+                slack_permalink,
+            ),
+        )
+        return GitHubDeliveryResult(work_item, pull_request)
+
     def reconcile_completed(
         self,
         task: TrackerTask,
