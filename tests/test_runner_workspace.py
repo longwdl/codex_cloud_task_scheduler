@@ -19,6 +19,7 @@ from codex_dispatcher.runner_protocol import (
 )
 from codex_dispatcher.runner_transport import (
     RunnerArchiveState,
+    parse_runner_absence_reply,
     parse_runner_export_reply,
 )
 from codex_dispatcher.runner_workspace import RunnerWorkspace, RunnerWorkspaceError
@@ -78,7 +79,60 @@ def prepare_request(artifact: bytes, base_sha: str) -> RunnerRequest:
     )
 
 
+def absence_request(base_sha: str = "c" * 40) -> RunnerRequest:
+    archive = RunnerRequest(
+        RunnerOperation.ARCHIVE,
+        WORK_ITEM,
+        version=NEXT_PROTOCOL_VERSION,
+        expected_head_sha=base_sha,
+    )
+    return RunnerRequest(
+        RunnerOperation.PROVE_ABSENCE,
+        WORK_ITEM,
+        version=NEXT_PROTOCOL_VERSION,
+        repository="owner/repo",
+        issue_number=42,
+        task_branch="codex/issue-42-aaaaaaaaaaaa",
+        expected_head_sha=base_sha,
+        archive_request_sha256=sha256(archive.to_json().encode("utf-8")).hexdigest(),
+    )
+
+
 class RunnerWorkspaceTests(unittest.TestCase):
+    def test_absence_proof_is_persistent_idempotent_and_blocks_recreation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = RunnerWorkspace(git_path=GIT, work_items_root=root / "runner")
+            request = absence_request()
+            first = workspace.prove_absence(request)
+            second = workspace.prove_absence(request)
+            self.assertEqual(first, second)
+            receipt = root / "runner" / ".absences" / f"{WORK_ITEM}.json"
+            self.assertEqual(0, receipt.stat().st_mode & 0o077)
+            self.assertEqual(first, parse_runner_absence_reply(receipt.read_bytes()))
+
+            artifact, base_sha = fixture(root)
+            with self.assertRaisesRegex(RunnerWorkspaceError, "archive lifecycle"):
+                workspace.prepare(prepare_request(artifact, base_sha), artifact)
+
+    def test_absence_proof_rejects_present_or_staged_state_without_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runner = root / "runner"
+            present = runner / "owner__repo" / "issue-42"
+            present.mkdir(parents=True)
+            workspace = RunnerWorkspace(git_path=GIT, work_items_root=runner)
+            with self.assertRaisesRegex(RunnerWorkspaceError, "still present"):
+                workspace.prove_absence(absence_request())
+            self.assertFalse((runner / ".absences" / f"{WORK_ITEM}.json").exists())
+
+            present.rmdir()
+            staging = runner / ".staging" / f"{WORK_ITEM}-partial"
+            staging.mkdir(parents=True)
+            with self.assertRaisesRegex(RunnerWorkspaceError, "staging"):
+                workspace.prove_absence(absence_request())
+            self.assertFalse((runner / ".absences" / f"{WORK_ITEM}.json").exists())
+
     def test_bounded_image_archive_keeps_image_reclamation_path(self) -> None:
         class ImageDisk:
             def __init__(self) -> None:

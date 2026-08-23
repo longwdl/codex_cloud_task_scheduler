@@ -32,8 +32,11 @@ from codex_dispatcher.ssh_preflight import SshPreflightPlan, build_ssh_preflight
 from codex_dispatcher.ssh_runner_transport import SshRunnerTransport
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.trackers.github_cli import GitHubCliTracker
+from codex_dispatcher.trackers.base import PullRequestState, TaskState, Tracker
 from codex_dispatcher.trusted_mirror import GitHubMirrorRefresher, TrustedMirrorSource
 from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator
+from codex_dispatcher.work_item_lifecycle import WorkItemAbsenceReconciliation
+from codex_dispatcher.work_items import WorkItemState
 
 if TYPE_CHECKING:
     from codex_dispatcher.fixture_faults import FixtureFaultInjection
@@ -348,6 +351,115 @@ def run_ssh_control_sweep(
         slack_token=slack_token,
     )
     return sweep.run_once()
+
+
+def run_ssh_absence_reconciliation(
+    *,
+    config: Config,
+    store: StateStore,
+    github_token: str,
+    repository: str,
+    issue_number: int,
+) -> WorkItemAbsenceReconciliation:
+    """Verify one completed GitHub binding, then request exact Runner absence proof."""
+    if not isinstance(config, Config):
+        raise TypeError("config must be a Config")
+    if not isinstance(store, StateStore):
+        raise TypeError("store must be a StateStore")
+    if type(issue_number) is not int or issue_number <= 0:
+        raise ValueError("issue_number must be a positive integer")
+    configured = {item.slug: item for item in config.repositories}
+    repository_config = configured.get(repository)
+    if repository_config is None:
+        raise SshRuntimeError("absence repository is not configured")
+    runtime = _require_runtime(config)
+    git_path = _protected_executable(runtime.git_path, "ssh_runtime.git_path")
+    gh_path = _protected_executable(runtime.gh_path, "ssh_runtime.gh_path")
+    ssh_path = _protected_executable(runtime.ssh_path, "ssh_runtime.ssh_path")
+    checks = run_control_host_contract_checks(
+        pins=config.tools,
+        git_path=git_path,
+        gh_path=gh_path,
+        ssh_path=ssh_path,
+    )
+    failed = tuple(check.name for check in checks if not check.ok)
+    if failed:
+        raise SshRuntimeError(
+            f"Control Host tool contract failed: {', '.join(failed)}"
+        )
+    tracker = GitHubCliTracker(gh_path=gh_path, token=github_token)
+    transport = SshRunnerTransport(
+        ssh_path=ssh_path,
+        host=runtime.host,
+        user=runtime.user,
+        port=runtime.port,
+        known_hosts_path=runtime.known_hosts_path,
+        identity_file=runtime.identity_file,
+        assh_proxy_path=runtime.assh_proxy_path,
+        assh_home=runtime.assh_home,
+        connect_timeout_seconds=runtime.connect_timeout_seconds,
+        operation_timeout_seconds=runtime.operation_timeout_seconds,
+    )
+    orchestrator = OfflineTurnOrchestrator(
+        store=store,
+        transport=transport,
+        bundle_verifier=GitBundleQuarantineVerifier(
+            git_path=git_path,
+            quarantine_root=runtime.quarantine_root,
+        ),
+    )
+    with DispatcherProcessLock(runtime.lock_path):
+        return _run_locked_absence_reconciliation(
+            store=store,
+            tracker=tracker,
+            orchestrator=orchestrator,
+            repository=repository,
+            repository_base_branch=repository_config.base_branch,
+            issue_number=issue_number,
+        )
+
+
+def _run_locked_absence_reconciliation(
+    *,
+    store: StateStore,
+    tracker: Tracker,
+    orchestrator: OfflineTurnOrchestrator,
+    repository: str,
+    repository_base_branch: str,
+    issue_number: int,
+) -> WorkItemAbsenceReconciliation:
+    task = tracker.get_task(repository, str(issue_number))
+    if task is None or not task.is_open or task.state is not TaskState.COMPLETED:
+        raise SshRuntimeError("absence reconciliation requires an open completed Issue")
+    executor_labels = tuple(label for label in task.labels if label.startswith("exec:"))
+    if executor_labels != ("exec:ssh-cli",):
+        raise SshRuntimeError("absence reconciliation requires exact exec:ssh-cli")
+    work_item = store.get_work_item_by_issue(repository, issue_number)
+    if (
+        work_item is None
+        or work_item.state is not WorkItemState.COMPLETED
+        or work_item.last_published_sha is None
+        or work_item.base_branch != repository_base_branch
+    ):
+        raise SshRuntimeError("absence reconciliation WorkItem is not terminal")
+    pull_request = tracker.find_pr_by_branch(repository, work_item.task_branch)
+    if (
+        pull_request is None
+        or pull_request.number != work_item.pr_number
+        or pull_request.url
+        != f"https://github.com/{repository}/pull/{work_item.pr_number}"
+        or pull_request.branch_name != work_item.task_branch
+        or pull_request.base_branch != work_item.base_branch
+        or pull_request.is_cross_repository
+        or pull_request.state is not PullRequestState.MERGED
+        or pull_request.is_draft
+        or pull_request.head_sha != work_item.last_published_sha
+    ):
+        raise SshRuntimeError("absence reconciliation Pull Request identity conflicts")
+    return orchestrator.reconcile_completed_work_item_absence(
+        work_item.work_item_id,
+        eligible_at=store.get_work_item_completed_at(work_item.work_item_id),
+    )
 
 
 def run_ssh_preflight(

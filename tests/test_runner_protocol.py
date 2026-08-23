@@ -199,6 +199,41 @@ class RunnerProtocolTests(unittest.TestCase):
         with self.assertRaises(RunnerProtocolError):
             RunnerRequest(RunnerOperation.ARCHIVE_STATUS, WORK_ITEM)
 
+    def test_v2_absence_request_is_exact_identity_and_archive_bound(self) -> None:
+        request = RunnerRequest(
+            RunnerOperation.PROVE_ABSENCE,
+            WORK_ITEM,
+            version=NEXT_PROTOCOL_VERSION,
+            repository="owner/repo",
+            issue_number=42,
+            task_branch="codex/issue-42-aaaaaaaaaaaa",
+            expected_head_sha="c" * 40,
+            archive_request_sha256="d" * 64,
+        )
+        self.assertEqual(request, parse_runner_request(request.to_json()))
+        for changes in (
+            {"version": 1},
+            {"archive_request_sha256": None},
+            {"repository": None},
+            {"issue_number": 0},
+        ):
+            values = {
+                "version": NEXT_PROTOCOL_VERSION,
+                "repository": "owner/repo",
+                "issue_number": 42,
+                "task_branch": "codex/issue-42-aaaaaaaaaaaa",
+                "expected_head_sha": "c" * 40,
+                "archive_request_sha256": "d" * 64,
+                **changes,
+            }
+            with self.subTest(changes=changes):
+                with self.assertRaises(RunnerProtocolError):
+                    RunnerRequest(
+                        RunnerOperation.PROVE_ABSENCE,
+                        WORK_ITEM,
+                        **values,
+                    )
+
     def test_agent_result_is_strict_bounded_and_path_safe(self) -> None:
         payload = {
             "status": "needs_input",

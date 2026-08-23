@@ -809,9 +809,11 @@ Codex tools、wrapper、Schema、配置和 SSH 授权由 root 管理；协议账
   registry、永久 archive tombstone、共享 auth seed/policy/tools 及 Control SQLite 不随单个
   WorkItem 清理。
 - 不自动删除 `blocked` 或 `needs_input` WorkItem；只有上述审计过的 disposition 才能使其可归档。
-- 混合 legacy directory/image 由 Runner storage classifier fail-closed；全缺失状态保持 blocked。
-  schema 13 仅预留独立 absence reconciliation ledger，待 Runner 生成 request-bound evidence
-  后再开放，不接受本地 JSON 断言，也不伪造 Runner archive receipt。
+- 混合 legacy directory/image 由 Runner storage classifier fail-closed；普通 ARCHIVE 对全缺失状态
+  仍保持 blocked。显式 `ssh-reconcile-absence --apply` 必须在 Control/Runner 双重全局锁下，通过
+  protocol-v2 `PROVE_ABSENCE` 核验 registry、workspace、archive、staging、image 和 mount 全部
+  缺失，并将 request-bound Runner receipt SHA 写入 schema-13 ledger；不接受本地 JSON 断言，
+  也不伪造 Runner archive receipt。
 - 用 `runner-capacity --json` 分别观察 Turn admission 与新 image provision admission/shortfall。
 - Control Host 每日 SQLite online backup，并保留 GitHub/Slack 映射。
 

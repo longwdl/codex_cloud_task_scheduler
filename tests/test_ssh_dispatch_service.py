@@ -109,6 +109,89 @@ def session_runtime_config(**overrides: object) -> SessionRuntimeConfig:
 
 
 class OfflineSshDispatchServiceTests(unittest.TestCase):
+    def test_missing_completed_state_requires_runner_bound_absence_receipt(self) -> None:
+        work_item = self.service.resolve_and_prepare(
+            claimed_task(),
+            base_sha=BASE_SHA,
+            source_bundle=source_bundle(),
+        )
+        head_sha = "9" * 40
+        self.store.record_published_sha(
+            work_item.work_item_id,
+            previous_sha=BASE_SHA,
+            head_sha=head_sha,
+        )
+        self.transport.set_head(work_item.work_item_id, head_sha)
+        self.store.update_work_item_state(work_item.work_item_id, WorkItemState.RUNNING)
+        self.store.update_work_item_state(work_item.work_item_id, WorkItemState.REVIEW)
+        self.store.update_work_item_state(
+            work_item.work_item_id,
+            WorkItemState.COMPLETED,
+            updated_at="2026-02-01T00:00:00+00:00",
+        )
+        self.transport.forget_work_item_for_fixture(work_item.work_item_id)
+
+        receipt = self.service.reconcile_completed_work_item_absence(
+            work_item.work_item_id,
+            eligible_at="2026-02-01T00:00:00+00:00",
+        )
+        self.assertEqual("runner_protocol_v2", receipt.observed_by)
+        self.assertEqual(head_sha, receipt.expected_head_sha)
+        archive = self.store.get_work_item_archive(work_item.work_item_id)
+        self.assertIsNotNone(archive)
+        assert archive is not None
+        self.assertIs(WorkItemArchiveStatus.PREPARED, archive.status)
+        self.assertEqual(
+            RunnerOperation.PROVE_ABSENCE,
+            self.transport.calls[-1].operation,
+        )
+        call_count = len(self.transport.calls)
+        self.assertEqual(
+            receipt,
+            self.service.reconcile_completed_work_item_absence(
+                work_item.work_item_id,
+                eligible_at="2026-02-01T00:00:00+00:00",
+            ),
+        )
+        self.assertEqual(call_count, len(self.transport.calls))
+
+    def test_interrupted_absence_receipt_retries_exact_runner_tombstone(self) -> None:
+        work_item = self.service.resolve_and_prepare(
+            claimed_task(), base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        head_sha = "8" * 40
+        self.store.record_published_sha(
+            work_item.work_item_id, previous_sha=BASE_SHA, head_sha=head_sha
+        )
+        self.transport.set_head(work_item.work_item_id, head_sha)
+        self.store.update_work_item_state(work_item.work_item_id, WorkItemState.RUNNING)
+        self.store.update_work_item_state(work_item.work_item_id, WorkItemState.REVIEW)
+        self.store.update_work_item_state(
+            work_item.work_item_id,
+            WorkItemState.COMPLETED,
+            updated_at="2026-02-01T00:00:00+00:00",
+        )
+        self.transport.forget_work_item_for_fixture(work_item.work_item_id)
+        self.transport.interrupt_next(RunnerOperation.PROVE_ABSENCE)
+
+        with self.assertRaisesRegex(RuntimeError, "retry the exact request"):
+            self.service.reconcile_completed_work_item_absence(
+                work_item.work_item_id,
+                eligible_at="2026-02-01T00:00:00+00:00",
+            )
+        self.assertIsNone(
+            self.store.get_work_item_absence_reconciliation(work_item.work_item_id)
+        )
+        receipt = self.service.reconcile_completed_work_item_absence(
+            work_item.work_item_id,
+            eligible_at="2026-02-01T00:00:00+00:00",
+        )
+        self.assertEqual("runner_protocol_v2", receipt.observed_by)
+        self.assertEqual(
+            [RunnerOperation.PROVE_ABSENCE, RunnerOperation.PROVE_ABSENCE],
+            [call.operation for call in self.transport.calls[-2:]],
+        )
+
     def test_archive_lost_receipt_reconciles_with_status_before_retry(self) -> None:
         task = claimed_task()
         work_item = self.service.resolve_and_prepare(

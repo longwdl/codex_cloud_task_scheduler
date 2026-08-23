@@ -14,6 +14,7 @@ from codex_dispatcher.runner_protocol import (
     parse_agent_result,
 )
 from codex_dispatcher.runner_transport import (
+    RunnerAbsenceReply,
     RunnerArchiveReply,
     RunnerArchiveState,
     RunnerAck,
@@ -21,6 +22,7 @@ from codex_dispatcher.runner_transport import (
     RunnerTurnRemoteState,
     RunnerTurnReply,
     parse_runner_ack,
+    parse_runner_absence_reply,
     parse_runner_archive_reply,
     parse_runner_export_reply,
     parse_runner_turn_reply,
@@ -71,6 +73,27 @@ def delegation_receipt() -> DelegationReceipt:
 
 
 class RunnerTransportContractTests(unittest.TestCase):
+    def test_absence_receipt_is_strict_request_bound_and_canonical(self) -> None:
+        reply = RunnerAbsenceReply(
+            work_item_id=WORK_ITEM,
+            repository="owner/repo",
+            issue_number=42,
+            task_branch="codex/issue-42-aaaaaaaaaaaa",
+            expected_head_sha="c" * 40,
+            archive_request_sha256="d" * 64,
+            request_sha256="e" * 64,
+            observed_at="2026-08-23T00:00:00+00:00",
+        )
+        self.assertEqual(reply, parse_runner_absence_reply(reply.to_json()))
+        payload = json.loads(reply.to_json())
+        payload["state"] = "active"
+        with self.assertRaises(RunnerProtocolError):
+            parse_runner_absence_reply(json.dumps(payload))
+        payload = json.loads(reply.to_json())
+        del payload["archive_request_sha256"]
+        with self.assertRaises(RunnerProtocolError):
+            parse_runner_absence_reply(json.dumps(payload))
+
     def test_ack_and_finished_turn_roundtrip(self) -> None:
         ack = RunnerAck(RunnerOperation.PREPARE, WORK_ITEM)
         self.assertEqual(ack, parse_runner_ack(ack.to_json()))

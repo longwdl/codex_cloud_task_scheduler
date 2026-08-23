@@ -74,6 +74,10 @@ class LinuxRunnerService:
                 with self._active_turn_lock():
                     reply = self._workspace.archive_status(request)
                 output = RunnerWireOutput(reply.to_json().encode("utf-8"))
+            elif request.operation is RunnerOperation.PROVE_ABSENCE:
+                with self._active_turn_lock():
+                    reply = self._workspace.prove_absence(request)
+                output = RunnerWireOutput(reply.to_json().encode("utf-8"))
             else:
                 raise RunnerTransportRejected("Runner operation is disabled")
         except (RunnerWorkspaceError, RunnerTurnError) as exc:

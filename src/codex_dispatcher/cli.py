@@ -95,6 +95,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Emit machine-readable output."
     )
 
+    ssh_absence = subparsers.add_parser(
+        "ssh-reconcile-absence",
+        help="Persist trusted Runner proof for one completed WorkItem already missing on disk.",
+    )
+    ssh_absence.add_argument("--config", required=True, type=Path)
+    ssh_absence.add_argument("--repository", required=True)
+    ssh_absence.add_argument("--issue-number", required=True, type=int)
+    ssh_absence.add_argument(
+        "--apply",
+        action="store_true",
+        required=True,
+        help="Required acknowledgement that Runner and SQLite writes are enabled.",
+    )
+    ssh_absence.add_argument(
+        "--json", action="store_true", help="Emit machine-readable output."
+    )
+
     slack_fixture = subparsers.add_parser(
         "slack-idempotency-fixture",
         help="Prove one Slack client_msg_id exact-retry contract.",
@@ -479,6 +496,58 @@ def _ssh_preflight(config_path: Path) -> tuple[int, dict[str, object]]:
     }
 
 
+def _ssh_reconcile_absence(
+    config_path: Path, *, repository: str, issue_number: int
+) -> tuple[int, dict[str, object]]:
+    if os.environ.get("CODEX_DISPATCHER_ENABLE_SSH_WRITES") != "1":
+        return 1, {
+            "ok": False,
+            "error": "CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 is required",
+        }
+    token = _github_token()
+    if token is None:
+        return 1, {"ok": False, "error": "a recognized explicit GitHub token is required"}
+    try:
+        from codex_dispatcher.redaction import redact_text
+        from codex_dispatcher.ssh_runtime import (
+            load_protected_ssh_config,
+            run_ssh_absence_reconciliation,
+            validate_runtime_state_path,
+        )
+
+        config = load_protected_ssh_config(config_path)
+        validate_runtime_state_path(config.scheduler.database_path)
+        with StateStore(config.scheduler.database_path) as store:
+            store.migrate()
+            if store.integrity_check() != "ok":
+                raise RuntimeError("state database integrity check failed")
+            receipt = run_ssh_absence_reconciliation(
+                config=config,
+                store=store,
+                github_token=token,
+                repository=repository,
+                issue_number=issue_number,
+            )
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        return 1, {
+            "ok": False,
+            "error": redact_text(str(exc), (token,)),
+            "repository": repository,
+            "issue_number": issue_number,
+        }
+    return 0, {
+        "ok": True,
+        "ssh_absence_reconciliation": True,
+        "repository": repository,
+        "issue_number": issue_number,
+        "work_item_id": receipt.work_item_id,
+        "expected_head_sha": receipt.expected_head_sha,
+        "evidence_sha256": receipt.evidence_sha256,
+        "observed_by": receipt.observed_by,
+        "observed_at": receipt.observed_at,
+    }
+
+
 def _slack_idempotency_fixture(
     *,
     workspace_id: str,
@@ -565,6 +634,11 @@ def _emit(payload: dict[str, object], as_json: bool) -> None:
         if payload.get("repository") is not None:
             print(f"repository: {payload.get('repository')}")
             print(f"issue_number: {payload.get('issue_number')}")
+    if payload.get("ssh_absence_reconciliation") is True:
+        print(f"repository: {payload.get('repository')}")
+        print(f"issue_number: {payload.get('issue_number')}")
+        print(f"work_item_id: {payload.get('work_item_id')}")
+        print(f"evidence_sha256: {payload.get('evidence_sha256')}")
     if payload.get("slack_idempotency_fixture") is True:
         print(f"workspace_id: {payload.get('workspace_id')}")
         print(f"channel_id: {payload.get('channel_id')}")
@@ -609,6 +683,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return code
     if args.command == "ssh-preflight":
         code, payload = _ssh_preflight(args.config)
+        _emit(payload, args.json)
+        return code
+    if args.command == "ssh-reconcile-absence":
+        code, payload = _ssh_reconcile_absence(
+            args.config,
+            repository=args.repository,
+            issue_number=args.issue_number,
+        )
         _emit(payload, args.json)
         return code
     if args.command == "slack-idempotency-fixture":

@@ -385,10 +385,14 @@ Runner-wide policy, tools, shared auth seed, and Control evidence are never part
 `blocked`, `waiting_input`, or `review` WorkItems are not eligible unless a trusted disposition has
 made them terminal. Active, dirty, moved-HEAD, or externally ambiguous WorkItems remain ineligible.
 If registry, workspace, image, and tombstone were already removed outside the protocol, normal
-archive never guesses success. Schema 13 reserves a distinct absence-reconciliation ledger, but no
-operator command is exposed in this release: a local assertion is not live Runner evidence. The
-WorkItem remains blocked until a Runner-generated, request-bound absence receipt exists, and the
-Control Host never fabricates a Runner `ARCHIVED` receipt.
+archive never guesses success. An explicitly applied `ssh-reconcile-absence` operation first
+persists the normal ARCHIVE request, then sends protocol-v2 `PROVE_ABSENCE` under both Control and
+Runner global locks. The request binds repository, Issue, task branch, expected HEAD, and ARCHIVE
+request SHA. Runner accepts it only when the exact registry, workspace, archive tombstone,
+workspace/image staging, image, and mount state are all absent. It durably writes a mode-`0600`
+receipt under `.absences/` before responding; retries return the same receipt. Control records the
+canonical response SHA and Runner observation time in the schema-13 absence ledger. A local JSON
+assertion remains insufficient, and Control never fabricates a Runner `ARCHIVED` receipt.
 
 Likewise, an ambiguous Slack root response is reconciled before Codex starts. An ambiguous terminal
 Slack response is retried from the durable Turn and outbox identity after the commit/PR work is

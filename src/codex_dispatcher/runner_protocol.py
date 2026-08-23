@@ -41,6 +41,7 @@ class RunnerOperation(StrEnum):
     STOP = "stop"
     ARCHIVE = "archive"
     ARCHIVE_STATUS = "archive_status"
+    PROVE_ABSENCE = "prove_absence"
 
 
 _V1_REQUEST_FIELDS = {
@@ -105,6 +106,18 @@ _V2_REQUEST_FIELDS = {
     RunnerOperation.ARCHIVE_STATUS: frozenset(
         {"version", "op", "work_item_id", "expected_head_sha"}
     ),
+    RunnerOperation.PROVE_ABSENCE: frozenset(
+        {
+            "version",
+            "op",
+            "work_item_id",
+            "repository",
+            "issue_number",
+            "task_branch",
+            "expected_head_sha",
+            "archive_request_sha256",
+        }
+    ),
 }
 
 
@@ -126,6 +139,7 @@ class RunnerRequest:
     session_generation_id: str | None = None
     session_generation: int | None = None
     agent_policy_digest: str | None = None
+    archive_request_sha256: str | None = None
     version: int = PROTOCOL_VERSION
 
     def __post_init__(self) -> None:
@@ -182,6 +196,13 @@ class RunnerRequest:
                 validate_sha256(self.agent_policy_digest, "agent_policy_digest")
             except ValueError as exc:
                 raise RunnerProtocolError(str(exc)) from exc
+        if self.archive_request_sha256 is not None:
+            try:
+                validate_sha256(
+                    self.archive_request_sha256, "archive_request_sha256"
+                )
+            except ValueError as exc:
+                raise RunnerProtocolError(str(exc)) from exc
 
     def to_mapping(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -204,6 +225,7 @@ class RunnerRequest:
             ("session_generation_id", self.session_generation_id),
             ("session_generation", self.session_generation),
             ("agent_policy_digest", self.agent_policy_digest),
+            ("archive_request_sha256", self.archive_request_sha256),
         )
         payload.update((name, value) for name, value in optional if value is not None)
         return payload
@@ -246,6 +268,7 @@ def parse_runner_request(value: str | bytes) -> RunnerRequest:
             session_generation_id=payload.get("session_generation_id"),
             session_generation=payload.get("session_generation"),
             agent_policy_digest=payload.get("agent_policy_digest"),
+            archive_request_sha256=payload.get("archive_request_sha256"),
         )
     except (TypeError, ValueError) as exc:
         raise RunnerProtocolError(str(exc)) from exc

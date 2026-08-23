@@ -17,6 +17,7 @@ from codex_dispatcher.runner_protocol import (
     agent_result_to_json,
 )
 from codex_dispatcher.runner_transport import (
+    RunnerAbsenceReply,
     RunnerArchiveReply,
     RunnerArchiveState,
     RunnerAck,
@@ -92,6 +93,7 @@ class FakeSshRunnerTransport:
         self._interrupt_after_effect: set[RunnerOperation] = set()
         self._reject_before_effect: set[RunnerOperation] = set()
         self._archives: dict[str, RunnerArchiveReply] = {}
+        self._absences: dict[str, RunnerAbsenceReply] = {}
 
     def queue_turn(self, work_item_id: str, fixture: FakeTurnFixture) -> None:
         self._fixtures[work_item_id].append(fixture)
@@ -101,6 +103,12 @@ class FakeSshRunnerTransport:
         if current is None:
             raise KeyError(work_item_id)
         current.head_sha = validate_git_sha(head_sha, "head_sha")
+
+    def forget_work_item_for_fixture(self, work_item_id: str) -> None:
+        """Model historical state missing before archive support existed."""
+        if work_item_id not in self._work_items:
+            raise KeyError(work_item_id)
+        del self._work_items[work_item_id]
 
     def interrupt_next(self, operation: RunnerOperation) -> None:
         self._interrupt_after_effect.add(operation)
@@ -164,6 +172,8 @@ class FakeSshRunnerTransport:
             output = self._archive(request)
         elif request.operation is RunnerOperation.ARCHIVE_STATUS:
             output = self._archive_status(request)
+        elif request.operation is RunnerOperation.PROVE_ABSENCE:
+            output = self._prove_absence(request)
         else:
             raise RunnerTransportRejected("fake Runner operation is not enabled")
 
@@ -413,6 +423,39 @@ class FakeSshRunnerTransport:
             RunnerArchiveState.ACTIVE,
         )
         return RunnerWireOutput(reply.to_json().encode("utf-8"))
+
+    def _prove_absence(self, request: RunnerRequest) -> RunnerWireOutput:
+        if request.work_item_id in self._work_items or request.work_item_id in self._archives:
+            raise RunnerTransportRejected("fake Runner WorkItem state is still present")
+        assert request.repository is not None
+        assert request.issue_number is not None
+        assert request.task_branch is not None
+        assert request.expected_head_sha is not None
+        assert request.archive_request_sha256 is not None
+        request_sha256 = sha256(request.to_json().encode("utf-8")).hexdigest()
+        existing = self._absences.get(request.work_item_id)
+        if existing is None:
+            existing = RunnerAbsenceReply(
+                work_item_id=request.work_item_id,
+                repository=request.repository,
+                issue_number=request.issue_number,
+                task_branch=request.task_branch,
+                expected_head_sha=request.expected_head_sha,
+                archive_request_sha256=request.archive_request_sha256,
+                request_sha256=request_sha256,
+                observed_at=datetime.now(timezone.utc).isoformat(),
+            )
+            self._absences[request.work_item_id] = existing
+        elif (
+            existing.repository != request.repository
+            or existing.issue_number != request.issue_number
+            or existing.task_branch != request.task_branch
+            or existing.expected_head_sha != request.expected_head_sha
+            or existing.archive_request_sha256 != request.archive_request_sha256
+            or existing.request_sha256 != request_sha256
+        ):
+            raise RunnerTransportRejected("fake Runner absence identity conflict")
+        return RunnerWireOutput(existing.to_json().encode("utf-8"))
 
 
 @dataclass(frozen=True, slots=True)

@@ -26,11 +26,13 @@ from codex_dispatcher.runner_protocol import (
 )
 from codex_dispatcher.runner_transport import (
     MAX_ARTIFACT_BYTES,
+    RunnerAbsenceReply,
     RunnerArchiveReply,
     RunnerArchiveState,
     RunnerAck,
     RunnerExportReply,
     RunnerWireOutput,
+    parse_runner_absence_reply,
 )
 from codex_dispatcher.source_bundle import SOURCE_BUNDLE_REF
 from codex_dispatcher.work_items import (
@@ -402,6 +404,43 @@ class RunnerWorkspace:
             RunnerArchiveState.ARCHIVING,
         )
 
+    def prove_absence(self, request: RunnerRequest) -> RunnerAbsenceReply:
+        """Persist and return exact proof that no reclaimable WorkItem state exists."""
+        if (
+            request.operation is not RunnerOperation.PROVE_ABSENCE
+            or request.version != NEXT_PROTOCOL_VERSION
+            or request.repository is None
+            or request.issue_number is None
+            or request.task_branch is None
+            or request.expected_head_sha is None
+            or request.archive_request_sha256 is None
+        ):
+            raise RunnerWorkspaceError(
+                "request must be a protocol-v2 PROVE_ABSENCE operation"
+            )
+        self._prepare_root()
+        request_sha256 = sha256(request.to_json().encode("utf-8")).hexdigest()
+        existing = self._read_absence_record(request.work_item_id, required=False)
+        if existing is not None:
+            self._validate_absence_request(existing, request, request_sha256)
+            self._assert_work_item_storage_absent(request)
+            return existing
+        self._assert_work_item_storage_absent(request)
+        reply = RunnerAbsenceReply(
+            work_item_id=request.work_item_id,
+            repository=request.repository,
+            issue_number=request.issue_number,
+            task_branch=request.task_branch,
+            expected_head_sha=request.expected_head_sha,
+            archive_request_sha256=request.archive_request_sha256,
+            request_sha256=request_sha256,
+            observed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self._write_json(
+            self._absence_record_path(request.work_item_id), reply.to_mapping()
+        )
+        return reply
+
     def archive_requires_safety_preflight(self, request: RunnerRequest) -> bool:
         """Return true only before the first durable Runner archive tombstone."""
         self._validate_archive_operation(request, RunnerOperation.ARCHIVE)
@@ -724,8 +763,13 @@ class RunnerWorkspace:
     def _paths_for_metadata(
         self, metadata: RunnerWorkspaceMetadata
     ) -> RunnerWorkspacePaths:
-        repository_key = metadata.repository.replace("/", "__")
-        root = self._root / repository_key / f"issue-{metadata.issue_number}"
+        return self._paths_for_identity(metadata.repository, metadata.issue_number)
+
+    def _paths_for_identity(
+        self, repository: str, issue_number: int
+    ) -> RunnerWorkspacePaths:
+        repository_key = repository.replace("/", "__")
+        root = self._root / repository_key / f"issue-{issue_number}"
         try:
             root.resolve(strict=False).relative_to(self._root.resolve(strict=False))
         except ValueError as exc:
@@ -740,7 +784,7 @@ class RunnerWorkspace:
         registry.mkdir(mode=0o700, exist_ok=True)
         if registry.is_symlink() or not registry.is_dir():
             raise RunnerWorkspaceError("Runner registry directory is invalid")
-        for name in (".archives", ".archive-staging"):
+        for name in (".archives", ".archive-staging", ".absences"):
             directory = self._root / name
             directory.mkdir(mode=0o700, exist_ok=True)
             if directory.is_symlink() or not directory.is_dir():
@@ -769,8 +813,105 @@ class RunnerWorkspace:
 
     def _require_not_archived(self, work_item_id: str) -> None:
         record = self._read_archive_record(work_item_id, required=False)
-        if record is not None:
+        absence = self._read_absence_record(work_item_id, required=False)
+        if record is not None or absence is not None:
             raise RunnerWorkspaceError("WorkItem has entered permanent archive lifecycle")
+
+    def _absence_record_path(self, work_item_id: str) -> Path:
+        return self._root / ".absences" / f"{validate_work_item_id(work_item_id)}.json"
+
+    def _read_absence_record(
+        self, work_item_id: str, *, required: bool
+    ) -> RunnerAbsenceReply | None:
+        path = self._absence_record_path(work_item_id)
+        if not path.exists():
+            if path.is_symlink():
+                raise RunnerWorkspaceError("WorkItem absence record is a dangling symlink")
+            if required:
+                raise RunnerWorkspaceError("WorkItem absence record is unavailable")
+            return None
+        try:
+            record_stat = path.lstat()
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise RunnerWorkspaceError("WorkItem absence record is unavailable") from exc
+        if (
+            not stat.S_ISREG(record_stat.st_mode)
+            or path.is_symlink()
+            or record_stat.st_mode & 0o022
+            or not raw
+            or len(raw) > _MAX_METADATA_BYTES
+            or b"\x00" in raw
+        ):
+            raise RunnerWorkspaceError("WorkItem absence record exceeds its safe boundary")
+        try:
+            reply = parse_runner_absence_reply(raw)
+        except (TypeError, ValueError) as exc:
+            raise RunnerWorkspaceError("WorkItem absence record is malformed") from exc
+        if reply.work_item_id != validate_work_item_id(work_item_id):
+            raise RunnerWorkspaceError(
+                "WorkItem absence filename conflicts with its receipt"
+            )
+        return reply
+
+    def _assert_work_item_storage_absent(self, request: RunnerRequest) -> None:
+        assert request.repository is not None
+        assert request.issue_number is not None
+        paths = self._paths_for_identity(request.repository, request.issue_number)
+        exact_paths = (
+            self._registry_path(request.work_item_id),
+            self._archive_record_path(request.work_item_id),
+            paths.root,
+            self._root
+            / ".archive-staging"
+            / f"{request.work_item_id}.workspace",
+        )
+        if any(path.exists() or path.is_symlink() for path in exact_paths):
+            raise RunnerWorkspaceError("WorkItem reclaimable state is still present")
+        staging = self._root / ".staging"
+        if staging.exists() or staging.is_symlink():
+            if staging.is_symlink() or not staging.is_dir():
+                raise RunnerWorkspaceError("Runner staging directory is invalid")
+            try:
+                if any(
+                    entry.name.startswith(f"{request.work_item_id}-")
+                    for entry in staging.iterdir()
+                ):
+                    raise RunnerWorkspaceError(
+                        "WorkItem workspace staging state is ambiguous"
+                    )
+            except OSError as exc:
+                raise RunnerWorkspaceError(
+                    "Runner staging directory is unavailable"
+                ) from exc
+        if self._work_item_disk is not None:
+            try:
+                disk_state = self._work_item_disk.classify_archive_storage(
+                    request.work_item_id, paths.root
+                )
+            except RunnerDiskError as exc:
+                raise RunnerWorkspaceError("WorkItem disk state is ambiguous") from exc
+            if disk_state is not WorkItemDiskArchiveState.ABSENT:
+                raise RunnerWorkspaceError("WorkItem disk state is still present")
+
+    @staticmethod
+    def _validate_absence_request(
+        record: RunnerAbsenceReply,
+        request: RunnerRequest,
+        request_sha256: str,
+    ) -> None:
+        if (
+            record.work_item_id != request.work_item_id
+            or record.repository != request.repository
+            or record.issue_number != request.issue_number
+            or record.task_branch != request.task_branch
+            or record.expected_head_sha != request.expected_head_sha
+            or record.archive_request_sha256 != request.archive_request_sha256
+            or record.request_sha256 != request_sha256
+        ):
+            raise RunnerWorkspaceError(
+                "WorkItem absence request conflicts with its permanent receipt"
+            )
 
     def _archive_record_path(self, work_item_id: str) -> Path:
         return self._root / ".archives" / f"{validate_work_item_id(work_item_id)}.json"

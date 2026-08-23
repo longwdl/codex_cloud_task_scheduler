@@ -55,7 +55,10 @@ from codex_dispatcher.work_items import (
     WorkItem,
     WorkItemState,
 )
-from codex_dispatcher.work_item_lifecycle import WorkItemArchive
+from codex_dispatcher.work_item_lifecycle import (
+    WorkItemAbsenceReconciliation,
+    WorkItemArchive,
+)
 
 
 class OfflineSshDispatchService:
@@ -112,6 +115,13 @@ class OfflineSshDispatchService:
 
     def reconcile_work_item_archive(self, work_item_id: str) -> WorkItemArchive:
         return self._orchestrator.reconcile_work_item_archive(work_item_id)
+
+    def reconcile_completed_work_item_absence(
+        self, work_item_id: str, *, eligible_at: str
+    ) -> WorkItemAbsenceReconciliation:
+        return self._orchestrator.reconcile_completed_work_item_absence(
+            work_item_id, eligible_at=eligible_at
+        )
 
     def resolve_and_prepare(
         self,

@@ -28,7 +28,9 @@ from codex_dispatcher.delegation_evidence import (
     parse_delegation_receipt,
 )
 from codex_dispatcher.work_items import (
+    validate_branch,
     validate_git_sha,
+    validate_repository,
     validate_session_id,
     validate_session_generation_id,
     validate_sha256,
@@ -207,6 +209,96 @@ def parse_runner_archive_reply(value: str | bytes) -> RunnerArchiveReply:
             state=state,
             archived_at=payload.get("archived_at"),
             reclaimed_bytes=payload.get("reclaimed_bytes"),
+            version=payload["version"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise RunnerProtocolError(str(exc)) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class RunnerAbsenceReply:
+    """Runner-persisted proof that one exact WorkItem has no reclaimable state."""
+
+    work_item_id: str
+    repository: str
+    issue_number: int
+    task_branch: str
+    expected_head_sha: str
+    archive_request_sha256: str
+    request_sha256: str
+    observed_at: str
+    operation: RunnerOperation = RunnerOperation.PROVE_ABSENCE
+    version: int = NEXT_PROTOCOL_VERSION
+
+    def __post_init__(self) -> None:
+        if self.operation is not RunnerOperation.PROVE_ABSENCE:
+            raise RunnerProtocolError("operation does not return an absence reply")
+        if self.version != NEXT_PROTOCOL_VERSION:
+            raise RunnerProtocolError("unsupported Runner absence response version")
+        validate_work_item_id(self.work_item_id)
+        validate_repository(self.repository)
+        if type(self.issue_number) is not int or self.issue_number <= 0:
+            raise RunnerProtocolError("issue_number must be a positive integer")
+        validate_branch(self.task_branch)
+        validate_git_sha(self.expected_head_sha, "expected_head_sha")
+        validate_sha256(self.archive_request_sha256, "archive_request_sha256")
+        validate_sha256(self.request_sha256, "request_sha256")
+        if not isinstance(self.observed_at, str):
+            raise RunnerProtocolError("observed_at must be an aware timestamp")
+        try:
+            parsed = datetime.fromisoformat(self.observed_at)
+        except ValueError as exc:
+            raise RunnerProtocolError("observed_at is invalid") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise RunnerProtocolError("observed_at must include a timezone")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "op": self.operation.value,
+            "work_item_id": self.work_item_id,
+            "repository": self.repository,
+            "issue_number": self.issue_number,
+            "task_branch": self.task_branch,
+            "expected_head_sha": self.expected_head_sha,
+            "archive_request_sha256": self.archive_request_sha256,
+            "request_sha256": self.request_sha256,
+            "state": "absent",
+            "observed_at": self.observed_at,
+        }
+
+    def to_json(self) -> str:
+        return _dump(self.to_mapping())
+
+
+def parse_runner_absence_reply(value: str | bytes) -> RunnerAbsenceReply:
+    payload = _load(value)
+    expected = {
+        "version",
+        "op",
+        "work_item_id",
+        "repository",
+        "issue_number",
+        "task_branch",
+        "expected_head_sha",
+        "archive_request_sha256",
+        "request_sha256",
+        "state",
+        "observed_at",
+    }
+    if set(payload) != expected or payload.get("state") != "absent":
+        raise RunnerProtocolError("Runner absence response fields are invalid")
+    try:
+        return RunnerAbsenceReply(
+            operation=RunnerOperation(payload["op"]),
+            work_item_id=payload["work_item_id"],
+            repository=payload["repository"],
+            issue_number=payload["issue_number"],
+            task_branch=payload["task_branch"],
+            expected_head_sha=payload["expected_head_sha"],
+            archive_request_sha256=payload["archive_request_sha256"],
+            request_sha256=payload["request_sha256"],
+            observed_at=payload["observed_at"],
             version=payload["version"],
         )
     except (TypeError, ValueError) as exc:

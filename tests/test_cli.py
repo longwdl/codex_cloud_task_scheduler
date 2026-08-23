@@ -205,6 +205,76 @@ class CliTests(unittest.TestCase):
         self.assertIn("ENABLE_SSH_WRITES", json.loads(stdout.getvalue())["error"])
         load.assert_not_called()
 
+    def test_ssh_absence_requires_apply_gate_and_emits_bounded_receipt(self) -> None:
+        with self.assertRaises(SystemExit):
+            main(
+                [
+                    "ssh-reconcile-absence",
+                    "--config",
+                    "config.toml",
+                    "--repository",
+                    "owner/repo",
+                    "--issue-number",
+                    "24",
+                ]
+            )
+
+        token = "github_pat_absence_fixture"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = make_config(global_max_active=1)
+            config = replace(
+                base,
+                scheduler=replace(
+                    base.scheduler, database_path=Path(temp_dir) / "state.db"
+                ),
+            )
+            receipt = SimpleNamespace(
+                work_item_id="wi_" + "a" * 24,
+                expected_head_sha="b" * 40,
+                evidence_sha256="c" * 64,
+                observed_by="runner_protocol_v2",
+                observed_at="2026-08-23T00:00:00+00:00",
+            )
+            stdout = io.StringIO()
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "CODEX_DISPATCHER_ENABLE_SSH_WRITES": "1",
+                        "GITHUB_TOKEN": token,
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "codex_dispatcher.ssh_runtime.load_protected_ssh_config",
+                    return_value=config,
+                ),
+                patch(
+                    "codex_dispatcher.ssh_runtime.run_ssh_absence_reconciliation",
+                    return_value=receipt,
+                ) as reconcile,
+                contextlib.redirect_stdout(stdout),
+            ):
+                exit_code = main(
+                    [
+                        "ssh-reconcile-absence",
+                        "--apply",
+                        "--config",
+                        "config.toml",
+                        "--repository",
+                        "owner/repo",
+                        "--issue-number",
+                        "24",
+                        "--json",
+                    ]
+                )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(0, exit_code)
+        self.assertTrue(payload["ssh_absence_reconciliation"])
+        self.assertEqual("c" * 64, payload["evidence_sha256"])
+        self.assertNotIn(token, stdout.getvalue())
+        self.assertEqual(24, reconcile.call_args.kwargs["issue_number"])
+
     def test_ssh_run_once_requires_recognized_explicit_token(self) -> None:
         stdout = io.StringIO()
         with (

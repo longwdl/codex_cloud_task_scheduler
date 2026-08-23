@@ -21,6 +21,7 @@ from codex_dispatcher.runner_protocol import (
     RunnerRequest,
 )
 from codex_dispatcher.runner_transport import (
+    RunnerAbsenceReply,
     RunnerArchiveState,
     RunnerTransport,
     RunnerTransportInterrupted,
@@ -28,12 +29,14 @@ from codex_dispatcher.runner_transport import (
     RunnerTurnRemoteState,
     RunnerTurnReply,
     parse_runner_ack,
+    parse_runner_absence_reply,
     parse_runner_archive_reply,
     parse_runner_export_reply,
     parse_runner_turn_reply,
 )
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.work_item_lifecycle import (
+    WorkItemAbsenceReconciliation,
     WorkItemArchive,
     WorkItemArchiveStatus,
 )
@@ -165,6 +168,97 @@ class OfflineTurnOrchestrator:
                 "Runner disposed archive requires durable operator intent"
             )
         return self._archive_terminal_work_item(work_item, eligible_at=eligible_at)
+
+    def reconcile_completed_work_item_absence(
+        self, work_item_id: str, *, eligible_at: str
+    ) -> WorkItemAbsenceReconciliation:
+        """Record only a strict, persistent Runner proof of missing legacy state."""
+        work_item = self._require_work_item(work_item_id)
+        if (
+            work_item.state is not WorkItemState.COMPLETED
+            or work_item.last_published_sha is None
+        ):
+            raise TurnOrchestrationError(
+                "Runner absence reconciliation requires a completed exact checkpoint"
+            )
+        existing = self._store.get_work_item_absence_reconciliation(work_item_id)
+        if existing is not None:
+            return existing
+        archive_request = RunnerRequest(
+            RunnerOperation.ARCHIVE,
+            work_item_id,
+            version=NEXT_PROTOCOL_VERSION,
+            expected_head_sha=work_item.last_published_sha,
+        )
+        archive_request_sha256 = sha256(
+            archive_request.to_json().encode("utf-8")
+        ).hexdigest()
+        archive = self._store.prepare_work_item_archive(
+            work_item_id,
+            expected_head_sha=work_item.last_published_sha,
+            eligible_at=eligible_at,
+            request_sha256=archive_request_sha256,
+        )
+        if archive.status is not WorkItemArchiveStatus.PREPARED:
+            raise TurnOrchestrationError(
+                "Runner absence reconciliation requires a prepared archive request"
+            )
+        request = RunnerRequest(
+            RunnerOperation.PROVE_ABSENCE,
+            work_item_id,
+            version=NEXT_PROTOCOL_VERSION,
+            repository=work_item.repository,
+            issue_number=work_item.issue_number,
+            task_branch=work_item.task_branch,
+            expected_head_sha=work_item.last_published_sha,
+            archive_request_sha256=archive_request_sha256,
+        )
+        request_sha256 = sha256(request.to_json().encode("utf-8")).hexdigest()
+        try:
+            output = self._transport.invoke(request)
+        except (RunnerTransportInterrupted, RunnerTransportRejected) as exc:
+            raise TurnOrchestrationError(
+                "Runner absence proof is unavailable; retry the exact request"
+            ) from exc
+        if output.artifact is not None:
+            raise RunnerProtocolError("Runner absence proof cannot contain an artifact")
+        reply = parse_runner_absence_reply(output.payload)
+        canonical = reply.to_json().encode("utf-8")
+        if output.payload != canonical:
+            raise RunnerProtocolError("Runner absence proof is not canonical JSON")
+        if not self._absence_reply_matches(
+            reply,
+            work_item=work_item,
+            archive_request_sha256=archive_request_sha256,
+            request_sha256=request_sha256,
+        ):
+            raise RunnerProtocolError("Runner absence proof identity is invalid")
+        return self._store.record_work_item_absence_reconciliation(
+            work_item_id,
+            expected_head_sha=work_item.last_published_sha,
+            evidence_sha256=sha256(canonical).hexdigest(),
+            observed_by="runner_protocol_v2",
+            observed_at=reply.observed_at,
+        )
+
+    @staticmethod
+    def _absence_reply_matches(
+        reply: RunnerAbsenceReply,
+        *,
+        work_item: WorkItem,
+        archive_request_sha256: str,
+        request_sha256: str,
+    ) -> bool:
+        return (
+            reply.operation is RunnerOperation.PROVE_ABSENCE
+            and reply.work_item_id == work_item.work_item_id
+            and reply.repository == work_item.repository
+            and reply.issue_number == work_item.issue_number
+            and reply.task_branch == work_item.task_branch
+            and reply.expected_head_sha == work_item.last_published_sha
+            and reply.archive_request_sha256 == archive_request_sha256
+            and reply.request_sha256 == request_sha256
+        )
 
     def _archive_terminal_work_item(
         self, work_item: WorkItem, *, eligible_at: str

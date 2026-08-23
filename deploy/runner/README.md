@@ -140,10 +140,22 @@ classifier proves final, provisioning-staging, archive-staging, and mount state 
 The v2 tombstone binds `bounded_image` or `legacy_directory`; retries may not switch kind.
 
 If old state was already manually removed, ordinary `ARCHIVE` must continue to fail closed. Schema
-13 reserves a separate absence-reconciliation ledger, but this release deliberately exposes no
-operator command for it: a local JSON assertion is not live Runner evidence and can be stale or
-refer to the wrong host. Such WorkItems remain blocked until a Runner-generated, request-bound
-absence receipt is implemented; no Runner archive receipt may be fabricated.
+13 keeps a separate absence-reconciliation ledger. After stopping the dispatcher timer, an operator
+may target one exact completed WorkItem with:
+
+```bash
+codex-dispatcher ssh-reconcile-absence \
+  --config /etc/codex-dispatcher/config.toml \
+  --repository OWNER/REPOSITORY --issue-number NUMBER --apply --json
+```
+
+Control revalidates the open completed Issue and exact merged bound PR under its global lock, then
+persists the normal ARCHIVE request. Protocol-v2 `PROVE_ABSENCE` binds that request SHA plus the
+repository, Issue, branch, WorkItem, and expected HEAD. Under the Runner global lock it rejects any
+registry, workspace, archive tombstone, workspace/image staging, image, or mount evidence. Only an
+all-absent result creates `work-items/.absences/<work-item-id>.json` mode `0600`; an interrupted retry
+returns that exact receipt. Control stores its canonical SHA and Runner timestamp. A local JSON
+assertion is never accepted, and no Runner `ARCHIVED` receipt is fabricated.
 
 ## SSH contract
 
