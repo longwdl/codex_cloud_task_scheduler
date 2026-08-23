@@ -67,9 +67,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise RunnerAssetReclamationError(
                         "requested recovery commit differs from Runner current"
                     )
+                owner_uid = WORK_ITEMS_ROOT.stat(follow_symlinks=False).st_uid
+                if owner_uid != Path("/srv/codex-runner/run/active.lock").stat(
+                    follow_symlinks=False
+                ).st_uid:
+                    raise RunnerAssetReclamationError(
+                        "Runner evidence and active lock owners differ"
+                    )
                 payload = collect_runner_recovery_snapshot(
                     work_items_root=WORK_ITEMS_ROOT,
                     current_release_commit=args.current_release_commit,
+                    trusted_owner_uid=owner_uid,
                 )
             else:
                 payload = _run_reclamation(args)

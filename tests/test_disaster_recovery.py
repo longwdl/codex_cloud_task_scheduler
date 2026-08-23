@@ -6,9 +6,11 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from codex_dispatcher.control_host_backup import create_state_backup
 from codex_dispatcher.disaster_recovery import (
+    collect_runner_recovery_snapshot,
     DisasterRecoveryError,
     run_schema18_disaster_recovery_drill,
 )
@@ -48,6 +50,26 @@ class _SlackVerifier:
 
 
 class DisasterRecoveryTests(unittest.TestCase):
+    def test_root_admin_can_bind_snapshot_to_explicit_runner_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            work_items = Path(temp_dir) / "work-items"
+            for name in (".registry", ".archives", ".absences"):
+                (work_items / name).mkdir(mode=0o700, parents=True)
+            owner_uid = work_items.stat().st_uid
+
+            with patch(
+                "codex_dispatcher.disaster_recovery.os.geteuid",
+                return_value=owner_uid + 1000,
+            ):
+                snapshot = collect_runner_recovery_snapshot(
+                    work_items_root=work_items,
+                    current_release_commit=COMMIT,
+                    trusted_owner_uid=owner_uid,
+                )
+
+            self.assertEqual(COMMIT, snapshot["current_release_commit"])
+            self.assertEqual([], snapshot["registry_work_item_ids"])
+
     def _fixture(self, root: Path) -> dict[str, object]:
         database = root / "state.db"
         backups = root / "backups"

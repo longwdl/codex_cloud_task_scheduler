@@ -137,14 +137,29 @@ class DisasterRecoveryResult:
 
 
 def collect_runner_recovery_snapshot(
-    *, work_items_root: Path, current_release_commit: str
+    *,
+    work_items_root: Path,
+    current_release_commit: str,
+    trusted_owner_uid: int | None = None,
 ) -> dict[str, object]:
     """Collect bounded Runner registry and permanent tombstone evidence locally."""
     _validate_commit(current_release_commit, "current_release_commit")
-    _protected_directory(work_items_root, "Runner work-items root")
-    registry = _json_directory(work_items_root / ".registry")
-    archives = _json_directory(work_items_root / ".archives")
-    absences = _json_directory(work_items_root / ".absences")
+    if trusted_owner_uid is not None and (
+        type(trusted_owner_uid) is not int or trusted_owner_uid < 0
+    ):
+        raise ValueError("trusted_owner_uid must be a non-negative integer or None")
+    _protected_directory(
+        work_items_root, "Runner work-items root", trusted_owner_uid=trusted_owner_uid
+    )
+    registry = _json_directory(
+        work_items_root / ".registry", trusted_owner_uid=trusted_owner_uid
+    )
+    archives = _json_directory(
+        work_items_root / ".archives", trusted_owner_uid=trusted_owner_uid
+    )
+    absences = _json_directory(
+        work_items_root / ".absences", trusted_owner_uid=trusted_owner_uid
+    )
 
     registry_ids: list[str] = []
     for path, payload, _ in registry:
@@ -591,19 +606,36 @@ def _prepare_new_recovery_root(path: Path) -> None:
         raise DisasterRecoveryError("recovery_root already exists") from exc
 
 
-def _json_directory(path: Path) -> tuple[tuple[Path, dict[str, Any], str], ...]:
-    _protected_directory(path, "Runner evidence directory")
+def _json_directory(
+    path: Path, *, trusted_owner_uid: int | None
+) -> tuple[tuple[Path, dict[str, Any], str], ...]:
+    _protected_directory(
+        path, "Runner evidence directory", trusted_owner_uid=trusted_owner_uid
+    )
     rows: list[tuple[Path, dict[str, Any], str]] = []
     for child in sorted(path.iterdir()):
         if child.suffix != ".json":
             raise DisasterRecoveryError("Runner evidence directory has an unknown entry")
-        payload = _read_json_file(child, "Runner evidence", maximum=16 * 1024)
+        payload = _read_json_file(
+            child,
+            "Runner evidence",
+            maximum=16 * 1024,
+            trusted_owner_uid=trusted_owner_uid,
+        )
         rows.append((child, payload, _sha256_file(child)))
     return tuple(rows)
 
 
-def _read_json_file(path: Path, field: str, *, maximum: int) -> dict[str, Any]:
-    raw = _validate_protected_file(path, field, maximum=maximum)
+def _read_json_file(
+    path: Path,
+    field: str,
+    *,
+    maximum: int,
+    trusted_owner_uid: int | None = None,
+) -> dict[str, Any]:
+    raw = _validate_protected_file(
+        path, field, maximum=maximum, trusted_owner_uid=trusted_owner_uid
+    )
     try:
         payload = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
@@ -613,7 +645,13 @@ def _read_json_file(path: Path, field: str, *, maximum: int) -> dict[str, Any]:
     return payload
 
 
-def _validate_protected_file(path: Path, field: str, *, maximum: int) -> bytes:
+def _validate_protected_file(
+    path: Path,
+    field: str,
+    *,
+    maximum: int,
+    trusted_owner_uid: int | None = None,
+) -> bytes:
     try:
         metadata = path.stat(follow_symlinks=False)
         raw = path.read_bytes()
@@ -622,7 +660,11 @@ def _validate_protected_file(path: Path, field: str, *, maximum: int) -> bytes:
     if (
         not stat.S_ISREG(metadata.st_mode)
         or path.is_symlink()
-        or metadata.st_uid not in {0, os.geteuid()}
+        or metadata.st_uid not in {
+            0,
+            os.geteuid(),
+            *(set() if trusted_owner_uid is None else {trusted_owner_uid}),
+        }
         or metadata.st_mode & 0o022
         or metadata.st_nlink != 1
         or not 0 < len(raw) <= maximum
@@ -671,7 +713,9 @@ def _validate_commit(value: object, field: str) -> str:
     return value
 
 
-def _protected_directory(path: Path, field: str) -> None:
+def _protected_directory(
+    path: Path, field: str, *, trusted_owner_uid: int | None = None
+) -> None:
     try:
         metadata = path.stat(follow_symlinks=False)
     except OSError as exc:
@@ -679,7 +723,11 @@ def _protected_directory(path: Path, field: str) -> None:
     if (
         not stat.S_ISDIR(metadata.st_mode)
         or path.is_symlink()
-        or metadata.st_uid not in {0, os.geteuid()}
+        or metadata.st_uid not in {
+            0,
+            os.geteuid(),
+            *(set() if trusted_owner_uid is None else {trusted_owner_uid}),
+        }
         or metadata.st_mode & 0o022
     ):
         raise DisasterRecoveryError(f"{field} must be owned and protected")
