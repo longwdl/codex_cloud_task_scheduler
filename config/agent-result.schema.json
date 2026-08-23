@@ -7,7 +7,7 @@
     "needs_input", "tests", "changed_paths", "blocker_code", "next_step"
   ],
   "properties": {
-    "schema_version": {"const": 2},
+    "schema_version": {"type": "integer", "enum": [2]},
     "status": {
       "type": "string",
       "enum": ["checkpoint", "completed", "needs_input", "blocked"],
@@ -54,35 +54,5 @@
       "pattern": "^[a-z][a-z0-9_]{0,127}$"
     },
     "next_step": {"type": "string", "minLength": 1, "maxLength": 2000}
-  },
-  "allOf": [
-    {
-      "if": {"properties": {"status": {"const": "checkpoint"}}},
-      "then": {"properties": {
-        "remaining_work": {"minItems": 1}, "needs_input": {"maxItems": 0},
-        "blocker_code": {"type": "null"}
-      }}
-    },
-    {
-      "if": {"properties": {"status": {"const": "completed"}}},
-      "then": {"properties": {
-        "remaining_work": {"maxItems": 0}, "needs_input": {"maxItems": 0},
-        "blocker_code": {"type": "null"},
-        "acceptance": {"items": {"properties": {"status": {"enum": ["passed", "not_verified"]}}}},
-        "tests": {"items": {"properties": {"status": {"enum": ["passed", "not_run"]}}}}
-      }}
-    },
-    {
-      "if": {"properties": {"status": {"const": "needs_input"}}},
-      "then": {"properties": {
-        "needs_input": {"minItems": 1}, "blocker_code": {"type": "null"}
-      }}
-    },
-    {
-      "if": {"properties": {"status": {"const": "blocked"}}},
-      "then": {"properties": {
-        "needs_input": {"maxItems": 0}, "blocker_code": {"type": "string"}
-      }}
-    }
-  ]
+  }
 }

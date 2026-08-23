@@ -152,13 +152,31 @@ class ReleaseDeploymentTests(unittest.TestCase):
             },
             set(schema["required"]),
         )
-        self.assertEqual(2, schema["properties"]["schema_version"]["const"])
+        self.assertEqual(
+            {"type": "integer", "enum": [2]},
+            schema["properties"]["schema_version"],
+        )
         self.assertEqual(
             {"checkpoint", "completed", "needs_input", "blocked"},
             set(schema["properties"]["status"]["enum"]),
         )
         self.assertEqual("array", schema["properties"]["acceptance"]["type"])
         self.assertEqual("array", schema["properties"]["remaining_work"]["type"])
+        unsupported = {
+            "allOf", "not", "dependentRequired", "dependentSchemas",
+            "if", "then", "else", "const",
+        }
+
+        def assert_supported_subset(value: object) -> None:
+            if isinstance(value, dict):
+                self.assertTrue(unsupported.isdisjoint(value))
+                for child in value.values():
+                    assert_supported_subset(child)
+            elif isinstance(value, list):
+                for child in value:
+                    assert_supported_subset(child)
+
+        assert_supported_subset(schema)
 
     def test_runner_validator_enforces_protected_cwd_and_umask(self) -> None:
         text = RUNNER_VALIDATOR.read_text(encoding="utf-8")
