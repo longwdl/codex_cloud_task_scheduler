@@ -135,6 +135,21 @@ codex-dispatcher runner-capacity --config /srv/codex-runner/etc/config.json --js
 It reports capacity, available bytes, fixed reserve, image size, Turn admission, image-provision
 admission, and the exact shortfall without reading credentials or WorkItem contents.
 
+Install `scripts/codex-runner-capacity-v1` as the root-owned mode-`0755`
+`/srv/codex-runner/bin/codex-runner-capacity-v1`, and install the matching
+`codex-runner-capacity.service` and `.timer` as root-owned system units. The credential-free,
+network-isolated timer runs every 15 minutes as `codex-runner` and exits nonzero unless one new
+bounded WorkItem image can still be provisioned. Its JSON journal record is read-only capacity
+evidence; it never deletes an image or inspects a WorkItem repository. Validate with:
+
+```bash
+sh -n scripts/codex-runner-capacity-v1
+systemd-analyze verify deploy/runner/codex-runner-capacity.service \
+  deploy/runner/codex-runner-capacity.timer
+systemctl status codex-runner-capacity.timer codex-runner-capacity.service
+journalctl -u codex-runner-capacity.service -n 20
+```
+
 Legacy directories are eligible only when the exact registry/workspace exists and the disk
 classifier proves final, provisioning-staging, archive-staging, and mount state contain no image.
 The v2 tombstone binds `bounded_image` or `legacy_directory`; retries may not switch kind.

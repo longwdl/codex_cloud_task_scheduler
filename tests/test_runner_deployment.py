@@ -9,6 +9,9 @@ DEPLOYMENT = ROOT / "deploy" / "runner"
 SSHD_CONFIG = DEPLOYMENT / "codex-runner-sshd.conf"
 DOCUMENTATION = DEPLOYMENT / "README.md"
 WRAPPER = ROOT / "scripts" / "codex-runner-v1"
+CAPACITY_WRAPPER = ROOT / "scripts" / "codex-runner-capacity-v1"
+CAPACITY_SERVICE = DEPLOYMENT / "codex-runner-capacity.service"
+CAPACITY_TIMER = DEPLOYMENT / "codex-runner-capacity.timer"
 
 
 class RunnerDeploymentTests(unittest.TestCase):
@@ -73,6 +76,26 @@ class RunnerDeploymentTests(unittest.TestCase):
         self.assertIn("successful container RESUME Turn", documentation)
         self.assertIn("does not authorize\nhigher-value repositories", documentation)
         self.assertIn("do not move or\nrewrite their contents", documentation)
+
+    def test_capacity_monitor_is_fixed_read_only_and_hardened(self) -> None:
+        wrapper = CAPACITY_WRAPPER.read_text(encoding="utf-8")
+        service = CAPACITY_SERVICE.read_text(encoding="utf-8")
+        timer = CAPACITY_TIMER.read_text(encoding="utf-8")
+
+        self.assertNotEqual(0, CAPACITY_WRAPPER.stat().st_mode & 0o111)
+        self.assertIn('if [ "$#" -ne 0 ]; then', wrapper)
+        self.assertIn("runner-capacity", wrapper)
+        self.assertIn("--require-provision-admissible", wrapper)
+        self.assertNotIn("--apply", wrapper)
+        self.assertNotIn('"$@"', wrapper)
+        self.assertIn("User=codex-runner", service)
+        self.assertIn("PrivateNetwork=yes", service)
+        self.assertIn("ProtectSystem=strict", service)
+        self.assertIn("CapabilityBoundingSet=\n", service)
+        self.assertNotIn("ReadWritePaths=", service)
+        self.assertIn("OnBootSec=5min", timer)
+        self.assertIn("OnUnitInactiveSec=15min", timer)
+        self.assertIn("Persistent=false", timer)
 
 
 if __name__ == "__main__":

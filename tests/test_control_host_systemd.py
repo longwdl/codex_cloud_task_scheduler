@@ -9,9 +9,12 @@ SERVICE_PATH = ROOT / "deploy/systemd/codex-dispatcher.service"
 TIMER_PATH = ROOT / "deploy/systemd/codex-dispatcher.timer"
 BACKUP_SERVICE_PATH = ROOT / "deploy/systemd/codex-dispatcher-backup.service"
 BACKUP_TIMER_PATH = ROOT / "deploy/systemd/codex-dispatcher-backup.timer"
+HEALTH_SERVICE_PATH = ROOT / "deploy/systemd/codex-dispatcher-health.service"
+HEALTH_TIMER_PATH = ROOT / "deploy/systemd/codex-dispatcher-health.timer"
 ENVIRONMENT_EXAMPLE_PATH = ROOT / "deploy/systemd/dispatcher.env.example"
 WRAPPER_PATH = ROOT / "scripts/codex-dispatcher-v1"
 BACKUP_WRAPPER_PATH = ROOT / "scripts/codex-dispatcher-backup-v1"
+HEALTH_WRAPPER_PATH = ROOT / "scripts/codex-dispatcher-health-v1"
 
 
 def _unit_sections(path: Path) -> dict[str, list[tuple[str, str]]]:
@@ -167,6 +170,38 @@ class ControlHostSystemdTests(unittest.TestCase):
             ["15min"], _values(sections, "Timer", "RandomizedDelaySec")
         )
         self.assertEqual(["true"], _values(sections, "Timer", "Persistent"))
+
+    def test_health_service_is_credential_free_read_only_and_network_isolated(self) -> None:
+        sections = _unit_sections(HEALTH_SERVICE_PATH)
+        self.assertEqual(["oneshot"], _values(sections, "Service", "Type"))
+        self.assertEqual([], _values(sections, "Service", "EnvironmentFile"))
+        self.assertEqual(["yes"], _values(sections, "Service", "PrivateNetwork"))
+        self.assertEqual([], _values(sections, "Service", "ReadWritePaths"))
+        self.assertEqual([""], _values(sections, "Service", "CapabilityBoundingSet"))
+        self.assertEqual(
+            ["/opt/codex-dispatcher/current/scripts/codex-dispatcher-health-v1"],
+            _values(sections, "Service", "ExecStart"),
+        )
+
+        wrapper = HEALTH_WRAPPER_PATH.read_text(encoding="utf-8")
+        self.assertNotEqual(0, HEALTH_WRAPPER_PATH.stat().st_mode & 0o111)
+        self.assertIn('if [ "$#" -ne 0 ]; then', wrapper)
+        self.assertIn("lifecycle-health", wrapper)
+        self.assertIn("--systemd", wrapper)
+        self.assertNotIn("--apply", wrapper)
+        self.assertNotIn('"$@"', wrapper)
+
+    def test_health_timer_is_nonpersistent_and_runs_every_fifteen_minutes(self) -> None:
+        sections = _unit_sections(HEALTH_TIMER_PATH)
+        self.assertEqual(
+            ["codex-dispatcher-health.service"],
+            _values(sections, "Timer", "Unit"),
+        )
+        self.assertEqual(["5min"], _values(sections, "Timer", "OnBootSec"))
+        self.assertEqual(
+            ["15min"], _values(sections, "Timer", "OnUnitInactiveSec")
+        )
+        self.assertEqual(["false"], _values(sections, "Timer", "Persistent"))
 
 
 if __name__ == "__main__":

@@ -57,6 +57,8 @@ executor. The environment-independent implementation now includes:
   root-only environment-file template; live installation and activation remain operator actions.
 - a credential-free, network-isolated daily systemd job that atomically publishes an
   integrity-checked SQLite Online Backup without automatic deletion.
+- credential-free, network-isolated 15-minute health timers for Control lifecycle/systemd backlog
+  and Runner capacity admission; both emit bounded JSON and never repair or delete state.
 
 The Runner path has now been exercised against the private Fixture through the real pinned SSH
 transport and Codex CLI 0.147.0 using ChatGPT login. A migrated Issue binding completed PREPARE,

@@ -50,6 +50,25 @@ def _build_parser() -> argparse.ArgumentParser:
     runner_capacity.add_argument(
         "--json", action="store_true", help="Emit machine-readable output."
     )
+    runner_capacity.add_argument(
+        "--require-provision-admissible",
+        action="store_true",
+        help="Exit nonzero unless one additional bounded WorkItem image can be provisioned.",
+    )
+
+    lifecycle_health = subparsers.add_parser(
+        "lifecycle-health",
+        help="Inspect lifecycle backlog and optional Control Host systemd state.",
+    )
+    lifecycle_health.add_argument("--config", required=True, type=Path)
+    lifecycle_health.add_argument(
+        "--systemd",
+        action="store_true",
+        help="Also inspect the fixed Control Host service and timer allowlist.",
+    )
+    lifecycle_health.add_argument(
+        "--json", action="store_true", help="Emit machine-readable output."
+    )
 
     state_backup = subparsers.add_parser(
         "state-backup", help="Create one protected SQLite Online Backup."
@@ -281,7 +300,9 @@ def _state_backup(config_path: Path) -> tuple[int, dict[str, object]]:
     }
 
 
-def _runner_capacity(config_path: Path) -> tuple[int, dict[str, object]]:
+def _runner_capacity(
+    config_path: Path, *, require_provision_admissible: bool = False
+) -> tuple[int, dict[str, object]]:
     try:
         from codex_dispatcher.runner_disk import FusedWorkItemDisk
         from codex_dispatcher.runner_main import load_runner_configuration
@@ -295,9 +316,11 @@ def _runner_capacity(config_path: Path) -> tuple[int, dict[str, object]]:
         ).capacity_snapshot()
     except (OSError, ValueError, RuntimeError) as exc:
         return 1, {"ok": False, "error": str(exc)}
-    return 0, {
-        "ok": True,
+    ok = not require_provision_admissible or snapshot.provision_admissible
+    return (0 if ok else 1), {
+        "ok": ok,
         "runner_capacity": True,
+        "require_provision_admissible": require_provision_admissible,
         "capacity_bytes": snapshot.capacity_bytes,
         "available_bytes": snapshot.available_bytes,
         "image_size_bytes": snapshot.image_size_bytes,
@@ -306,6 +329,40 @@ def _runner_capacity(config_path: Path) -> tuple[int, dict[str, object]]:
         "provision_admissible": snapshot.provision_admissible,
         "provision_shortfall_bytes": snapshot.provision_shortfall_bytes,
     }
+
+
+def _lifecycle_health(
+    config_path: Path, *, check_systemd: bool
+) -> tuple[int, dict[str, object]]:
+    try:
+        from codex_dispatcher.lifecycle_health import (
+            MAX_REPORTED_ALERTS,
+            inspect_lifecycle_health,
+            inspect_systemd_health,
+        )
+        from codex_dispatcher.ssh_runtime import load_protected_ssh_config
+
+        config = load_protected_ssh_config(config_path)
+        with StateStore(config.scheduler.database_path, read_only=True) as store:
+            snapshot = inspect_lifecycle_health(config, store)
+        payload = snapshot.to_mapping()
+        if check_systemd:
+            unit_states, systemd_alerts = inspect_systemd_health()
+            payload["systemd_checked"] = True
+            payload["systemd_units"] = [state.to_mapping() for state in unit_states]
+            alerts = list(payload["alerts"])
+            alerts.extend(alert.to_mapping() for alert in systemd_alerts)
+            payload["alerts"] = alerts[:MAX_REPORTED_ALERTS]
+            payload["alert_count"] = len(payload["alerts"])
+            payload["alerts_truncated"] = bool(payload["alerts_truncated"]) or (
+                len(alerts) > MAX_REPORTED_ALERTS
+            )
+            payload["ok"] = bool(payload["ok"]) and not systemd_alerts
+        else:
+            payload["systemd_checked"] = False
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        return 1, {"ok": False, "lifecycle_health": True, "error": str(exc)}
+    return (0 if payload["ok"] else 1), payload
 
 
 def _run_once(config_path: Path) -> tuple[int, dict[str, object]]:
@@ -615,7 +672,7 @@ def _emit(payload: dict[str, object], as_json: bool) -> None:
         if isinstance(check, dict):
             marker = "PASS" if check.get("ok") else "WARN"
             print(f"{marker} {check.get('name')}: {check.get('detail')}")
-    if "integrity" in payload:
+    if "integrity" in payload and payload.get("lifecycle_health") is not True:
         print(f"integrity: {payload['integrity']}")
         print(f"active_runs: {len(payload.get('active_runs', []))}")
     if "error" in payload:
@@ -655,6 +712,14 @@ def _emit(payload: dict[str, object], as_json: bool) -> None:
         print(f"turn_admissible: {str(payload.get('turn_admissible')).lower()}")
         print(f"provision_admissible: {str(payload.get('provision_admissible')).lower()}")
         print(f"provision_shortfall_bytes: {payload.get('provision_shortfall_bytes')}")
+    if payload.get("lifecycle_health") is True:
+        print(f"integrity: {payload.get('integrity')}")
+        print(f"active_turns: {payload.get('active_turns')}")
+        print(f"blocked_work_items: {payload.get('blocked_work_items')}")
+        print(f"pending_archives: {payload.get('pending_archives')}")
+        print(f"alert_count: {payload.get('alert_count')}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "doctor":
@@ -666,7 +731,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         _emit(payload, args.json)
         return code
     if args.command == "runner-capacity":
-        code, payload = _runner_capacity(args.config)
+        code, payload = _runner_capacity(
+            args.config,
+            require_provision_admissible=args.require_provision_admissible,
+        )
+        _emit(payload, args.json)
+        return code
+    if args.command == "lifecycle-health":
+        code, payload = _lifecycle_health(
+            args.config, check_systemd=args.systemd
+        )
         _emit(payload, args.json)
         return code
     if args.command == "state-backup":

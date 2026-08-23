@@ -9,6 +9,14 @@ The separate daily backup timer invokes a credential-free, network-isolated ones
 SQLite Online Backup API, verifies both source and backup integrity, publishes a mode-`0600` file
 without overwriting a same-name backup, and never deletes an older backup automatically.
 
+The 15-minute health timer is also credential-free and network-isolated. It opens SQLite read-only,
+checks integrity and foreign keys, and reports bounded structured alerts for a Turn older than the
+configured SSH operation timeout plus five minutes, a WorkItem blocked for more than 24 hours, an
+archive pending for more than 15 minutes, an ambiguous/blocked archive, or an overdue disposition
+or completed-retention archive. With `--systemd`, the fixed wrapper also requires all three timers
+to be loaded, enabled, and active and rejects a failed dispatcher or backup service result. It does
+not repair state or contact GitHub, Slack, or the Runner.
+
 The files are deployment artifacts, not an installer. Copying them into `/etc/systemd/system` or
 enabling the timer changes a real host and can trigger GitHub, SSH, Publisher, and optional Slack
 writes. Perform those steps only after a separately approved deployment command set.
@@ -48,12 +56,14 @@ Before touching systemd, stage one root-owned release and validate it offline:
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 PYTHONPATH=src python3 -m compileall -q src tests
-sh -n scripts/codex-dispatcher-v1
+sh -n scripts/codex-dispatcher-v1 scripts/codex-dispatcher-health-v1
 systemd-analyze verify \
   deploy/systemd/codex-dispatcher.service \
   deploy/systemd/codex-dispatcher.timer \
   deploy/systemd/codex-dispatcher-backup.service \
-  deploy/systemd/codex-dispatcher-backup.timer
+  deploy/systemd/codex-dispatcher-backup.timer \
+  deploy/systemd/codex-dispatcher-health.service \
+  deploy/systemd/codex-dispatcher-health.timer
 ```
 
 Prepare these persistent subdirectories with owner/group `codex-dispatcher` and mode `0700`:
@@ -91,12 +101,17 @@ After installation, validate unit expansion and hardening before the first start
 systemd-analyze verify /etc/systemd/system/codex-dispatcher.service \
   /etc/systemd/system/codex-dispatcher.timer \
   /etc/systemd/system/codex-dispatcher-backup.service \
-  /etc/systemd/system/codex-dispatcher-backup.timer
+  /etc/systemd/system/codex-dispatcher-backup.timer \
+  /etc/systemd/system/codex-dispatcher-health.service \
+  /etc/systemd/system/codex-dispatcher-health.timer
 systemd-analyze security codex-dispatcher.service
 systemd-analyze security codex-dispatcher-backup.service
+systemd-analyze security codex-dispatcher-health.service
 systemctl cat codex-dispatcher.service codex-dispatcher.timer \
-  codex-dispatcher-backup.service codex-dispatcher-backup.timer
-systemctl list-timers codex-dispatcher.timer codex-dispatcher-backup.timer
+  codex-dispatcher-backup.service codex-dispatcher-backup.timer \
+  codex-dispatcher-health.service codex-dispatcher-health.timer
+systemctl list-timers codex-dispatcher.timer codex-dispatcher-backup.timer \
+  codex-dispatcher-health.timer
 ```
 
 Do not use `systemctl show-environment`, dump `/proc/<pid>/environ`, or enable shell tracing while
@@ -108,15 +123,19 @@ The state-changing activation sequence is intentionally not automated. Once sepa
 the operator installs the reviewed units, runs `systemctl daemon-reload`, manually starts exactly
 one service sweep, verifies its bounded journal result and SQLite/GitHub/Runner state, and only then
 enables the dispatcher timer. It separately starts and verifies one backup before enabling the
-backup timer.
+backup timer. Enable the three operational timers before manually starting the health service,
+because its systemd assertion intentionally treats a disabled timer as unhealthy.
 
 Observe with `systemctl status`, `systemctl list-timers`, and bounded queries such as
 `journalctl -u codex-dispatcher.service -n 100` and
-`journalctl -u codex-dispatcher-backup.service -n 20`. A non-zero sweep remains visible as a failed
-service activation; the timer will try another recovery-first sweep after the inactive interval.
+`journalctl -u codex-dispatcher-backup.service -n 20`, plus
+`journalctl -u codex-dispatcher-health.service -n 20`. A non-zero sweep or health check remains
+visible as a failed service activation; the dispatcher timer will try another recovery-first sweep
+after the inactive interval, while the health timer only observes and reports.
 
-Emergency stop disables both `codex-dispatcher.timer` and `codex-dispatcher-backup.timer`, followed,
-if necessary, by stopping their services. Preserve SQLite, WAL/SHM files, backups, quarantine,
-mirrors, Runner directories, branches, and PRs. Roll back code by atomically restoring the previous
-`/opt/codex-dispatcher/current` release symlink, re-running unit verification, and starting one
-manually observed recovery sweep and backup before re-enabling the timers.
+Emergency stop disables `codex-dispatcher.timer`, `codex-dispatcher-backup.timer`, and
+`codex-dispatcher-health.timer`, followed, if necessary, by stopping their services. Preserve
+SQLite, WAL/SHM files, backups, quarantine, mirrors, Runner directories, branches, and PRs. Roll
+back code by atomically restoring the previous `/opt/codex-dispatcher/current` release symlink,
+re-running unit verification, and starting one manually observed recovery sweep and backup before
+re-enabling the timers.

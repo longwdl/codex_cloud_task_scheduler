@@ -4133,6 +4133,10 @@ class StateStore:
             raise RuntimeError("SQLite integrity check returned no result")
         return str(result[0])
 
+    def foreign_key_violation_count(self) -> int:
+        """Return the number of read-only SQLite foreign-key violations."""
+        return sum(1 for _ in self._connection.execute("PRAGMA foreign_key_check"))
+
     @staticmethod
     def _row_to_run(row: sqlite3.Row) -> Run:
         values = dict(row)

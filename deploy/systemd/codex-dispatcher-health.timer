@@ -1,0 +1,12 @@
+[Unit]
+Description=Check Codex dispatcher lifecycle health every 15 minutes
+
+[Timer]
+Unit=codex-dispatcher-health.service
+OnBootSec=5min
+OnUnitInactiveSec=15min
+AccuracySec=1min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

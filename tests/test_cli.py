@@ -64,6 +64,46 @@ class CliTests(unittest.TestCase):
         self.assertFalse(payload["provision_admissible"])
         self.assertEqual(50, payload["provision_shortfall_bytes"])
 
+    def test_runner_capacity_monitor_fails_when_provision_is_not_admissible(self) -> None:
+        snapshot = SimpleNamespace(
+            capacity_bytes=1000,
+            available_bytes=200,
+            image_size_bytes=100,
+            host_reserve_bytes=150,
+            turn_admissible=True,
+            provision_admissible=False,
+            provision_shortfall_bytes=50,
+        )
+        configuration = SimpleNamespace(
+            work_item_disk=object(),
+            work_items_root=Path("/srv/codex-runner/work-items"),
+        )
+        stdout = io.StringIO()
+        with (
+            patch(
+                "codex_dispatcher.runner_main.load_runner_configuration",
+                return_value=configuration,
+            ),
+            patch(
+                "codex_dispatcher.runner_disk.FusedWorkItemDisk",
+                return_value=SimpleNamespace(capacity_snapshot=lambda: snapshot),
+            ),
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = main(
+                [
+                    "runner-capacity",
+                    "--config",
+                    "/srv/codex-runner/etc/config.json",
+                    "--require-provision-admissible",
+                    "--json",
+                ]
+            )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(1, exit_code)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["require_provision_admissible"])
+
     def test_doctor_json_is_read_only_and_machine_readable(self) -> None:
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):

@@ -153,6 +153,12 @@ system units are active on the dedicated `s2` Control Host; repository artifacts
 or activate themselves. A separate `systemd --user` variant remains only a fallback when `sudo` is
 unavailable and is not the production deployment profile.
 
+The system deployment also includes credential-free 15-minute health timers. Control opens SQLite
+read-only and reports bounded lifecycle, retention, archive, and fixed-unit failures; Runner reports
+whether the fixed reserve and one additional bounded image remain admissible. These checks emit JSON
+to journald and exit nonzero on an alert, but never mutate the database, delete disk state, contact an
+external API, or attempt automated repair.
+
 ## Architecture constraints for offline code
 
 - One GitHub Issue maps to one WorkItem, stable branch, directory, Slack thread, and Draft PR until

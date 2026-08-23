@@ -1,0 +1,23 @@
+#!/bin/sh
+
+set -eu
+umask 077
+
+if [ "$#" -ne 0 ]; then
+    printf '%s\n' 'codex-runner-capacity-v1: arguments are not accepted' >&2
+    exit 2
+fi
+
+exec /usr/bin/env -i \
+    HOME=/var/lib/codex-runner/home \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PATH=/usr/bin:/bin \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONNOUSERSITE=1 \
+    PYTHONPATH=/srv/codex-runner/current/src \
+    /usr/bin/python3 -P -s -m codex_dispatcher \
+    runner-capacity \
+    --config /srv/codex-runner/etc/config.json \
+    --require-provision-admissible \
+    --json

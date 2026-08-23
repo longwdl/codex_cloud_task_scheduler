@@ -1,0 +1,23 @@
+#!/bin/sh
+
+set -eu
+umask 077
+
+if [ "$#" -ne 0 ]; then
+    printf '%s\n' 'codex-dispatcher-health-v1: arguments are not accepted' >&2
+    exit 2
+fi
+
+export HOME=/var/lib/codex-dispatcher/home
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+export PATH=/opt/codex-python/current/bin:/usr/bin:/bin
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONNOUSERSITE=1
+export PYTHONPATH=/opt/codex-dispatcher/current/src
+
+exec /opt/codex-python/current/bin/python3 -P -s -m codex_dispatcher \
+    lifecycle-health \
+    --config /etc/codex-dispatcher/config.toml \
+    --systemd \
+    --json
