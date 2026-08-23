@@ -84,7 +84,7 @@ def _post_success(*, message_ts: str, thread_ts: str | None = None) -> dict[str,
 
 
 class SlackWebApiPublisherTests(unittest.TestCase):
-    def test_receipt_readback_is_get_only_and_requires_exact_permalink(self) -> None:
+    def test_receipt_readback_is_get_only_and_accepts_exact_permalink(self) -> None:
         permalink = (
             f"https://fixture.slack.com/archives/{CHANNEL}/"
             f"p{ROOT_TS.replace('.', '')}"
@@ -114,6 +114,78 @@ class SlackWebApiPublisherTests(unittest.TestCase):
         self.assertEqual(receipt, publisher.verify_receipt(receipt))
         self.assertEqual("GET", transport.calls[0]["method"])
         self.assertIsNone(transport.calls[0]["body"])
+
+    def test_receipt_readback_accepts_redundant_root_thread_query(self) -> None:
+        permalink = (
+            f"https://fixture.slack.com/archives/{CHANNEL}/"
+            f"p{ROOT_TS.replace('.', '')}"
+        )
+        current_permalink = f"{permalink}?thread_ts={ROOT_TS}&cid={CHANNEL}"
+        transport = _ScriptedTransport(
+            [
+                (
+                    200,
+                    {
+                        "ok": True,
+                        "channel": CHANNEL,
+                        "permalink": current_permalink,
+                    },
+                    None,
+                )
+            ]
+        )
+        publisher = SlackWebApiPublisher(
+            bot_token=TOKEN,
+            timeout_seconds=10,
+            transport=transport,
+        )
+        receipt = SlackDeliveryReceipt(
+            f"slack:{WORK_ITEM}:root",
+            CHANNEL,
+            ROOT_TS,
+            ROOT_TS,
+            permalink,
+        )
+
+        self.assertEqual(receipt, publisher.verify_receipt(receipt))
+
+    def test_receipt_readback_rejects_a_different_root_thread_query(self) -> None:
+        permalink = (
+            f"https://fixture.slack.com/archives/{CHANNEL}/"
+            f"p{ROOT_TS.replace('.', '')}"
+        )
+        transport = _ScriptedTransport(
+            [
+                (
+                    200,
+                    {
+                        "ok": True,
+                        "channel": CHANNEL,
+                        "permalink": (
+                            f"{permalink}?thread_ts={REPLY_TS}&cid={CHANNEL}"
+                        ),
+                    },
+                    None,
+                )
+            ]
+        )
+        publisher = SlackWebApiPublisher(
+            bot_token=TOKEN,
+            timeout_seconds=10,
+            transport=transport,
+        )
+        receipt = SlackDeliveryReceipt(
+            f"slack:{WORK_ITEM}:root",
+            CHANNEL,
+            ROOT_TS,
+            ROOT_TS,
+            permalink,
+        )
+
+        with self.assertRaisesRegex(
+            SlackPublishAmbiguous, "conflicts with durable state"
+        ):
+            publisher.verify_receipt(receipt)
 
     def test_root_publish_uses_exact_safe_requests_and_returns_receipt(self) -> None:
         report = _root_report()

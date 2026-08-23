@@ -14,7 +14,7 @@ import ssl
 from dataclasses import dataclass
 from typing import Mapping, Protocol
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit
 from urllib.request import (
     HTTPRedirectHandler,
     HTTPSHandler,
@@ -28,6 +28,7 @@ from codex_dispatcher.slack_reporting import (
     SlackDeliveryReceipt,
     SlackOutboundMessage,
     SlackReport,
+    validate_slack_permalink,
 )
 
 
@@ -51,6 +52,39 @@ _AMBIGUOUS_POST_ERRORS = frozenset(
         "service_unavailable",
     }
 )
+
+
+def _same_receipt_permalink(
+    receipt: SlackDeliveryReceipt, actual_permalink: object
+) -> bool:
+    """Allow Slack's redundant thread query for a root that later gained replies."""
+    if actual_permalink == receipt.permalink:
+        return True
+    if (
+        not isinstance(actual_permalink, str)
+        or receipt.thread_ts != receipt.message_ts
+    ):
+        return False
+    try:
+        validate_slack_permalink(
+            actual_permalink,
+            channel_id=receipt.channel_id,
+            message_ts=receipt.message_ts,
+        )
+    except ValueError:
+        return False
+    expected = urlsplit(receipt.permalink)
+    actual = urlsplit(actual_permalink)
+    if (
+        (actual.scheme, actual.netloc, actual.path)
+        != (expected.scheme, expected.netloc, expected.path)
+        or expected.query
+    ):
+        return False
+    return dict(parse_qsl(actual.query, keep_blank_values=True)) == {
+        "thread_ts": receipt.message_ts,
+        "cid": receipt.channel_id,
+    }
 
 
 class SlackWebApiError(RuntimeError):
@@ -231,9 +265,8 @@ class SlackWebApiPublisher:
             channel_id=receipt.channel_id,
             message_ts=receipt.message_ts,
         )
-        if (
-            result.get("channel") != receipt.channel_id
-            or result.get("permalink") != receipt.permalink
+        if result.get("channel") != receipt.channel_id or not _same_receipt_permalink(
+            receipt, result.get("permalink")
         ):
             raise SlackPublishAmbiguous(
                 "Slack receipt read-back conflicts with durable state"
