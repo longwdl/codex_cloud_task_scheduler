@@ -142,21 +142,47 @@ the credential file is loaded.
 ## Activation, observation, and rollback
 
 For the reviewed `s2` / `codex-runner` layout, `scripts/codex-dispatcher-release-v1` packages the
-previous manual activation boundary into one fail-closed transaction. The operator must first
-create one exact `git archive` at
+previous manual activation boundary into one fail-closed transaction. Its command name remains
+stable, while its durable receipt format is schema version 2. The operator must first create one
+exact `git archive` at
 `/var/tmp/codex-dispatcher-release-<40-hex-commit>.tar` and independently record its SHA-256. The
 tool accepts only that path shape and exact digest, rejects links and unsafe tar members, creates a
-fresh Online Backup, stops all four Control timers, requires both host locks to be available, and
-runs the complete tests and compilation from short service-owned copies under `umask 077`.
+fresh Online Backup, stops all four Control timers, masks service activation while it waits up to the
+explicit `--wait-active-seconds` bound for an already-running service to finish naturally, requires
+both host locks to be available, and runs the complete tests and compilation from short
+service-owned copies under `umask 077`. It never kills an active Dispatcher or maintenance job.
+
+Run the same exact arguments with `--plan` first. Plan validates the immutable inputs, both current
+links, candidate absence, configuration compatibility when requested, and current service state; its
+JSON always carries `authorizes_apply=false` and `state_writes=0`. Plan is evidence, not permission
+to apply. A separate approved invocation replaces `--plan` with `--apply`. Every apply owns one new
+commit only: an existing candidate directory or receipt is an error and is never deleted as an
+assumed retry artifact.
+
+An optional configuration change must be paired with
+`--config /var/tmp/codex-dispatcher-config-<commit>.toml --config-sha256 <digest>`. The candidate must
+be root-owned mode `0600`; both the old and candidate release parsers must accept it before any
+activation. The old configuration is retained by content digest in the root-only configuration
+backup directory, and the candidate is atomically installed only after both releases and units pass
+validation.
 
 The identical archive bytes are verified on both hosts. Activation switches the Runner symlink
 first and the Control symlink second, both atomically. Any staging, unit-verification, or Runner
-capacity failure before handoff restores both previous symlinks and removes incoming/validation
-files. The tool deliberately does not start the write-enabled Dispatcher or restart timers: after
-its `requires_manual_sweep=true` receipt, inspect the recorded backup, start exactly one Dispatcher
-sweep, require an expected result, then run backup, restore, and health checks before starting the
-timers. Once that sweep begins, external state or schema may have changed and automatic binary-only
-rollback would be unsafe; use the matching backup and the documented recovery-first rollback.
+capacity failure before handoff reconciles possibly lost switch responses, restores both previous
+symlinks and configuration, and removes only candidates proven to have been created by that
+invocation and not currently active. Each phase is atomically fsynced to a root-only receipt at
+`/opt/codex-dispatcher/release-receipts/<commit>.json`; inspect it with `--status --commit <commit>`.
+The tool deliberately does not start the write-enabled Dispatcher or restart timers: after its
+`requires_manual_sweep=true` committed receipt, inspect the recorded backup, start exactly one
+Dispatcher sweep, require an expected result, then run backup, restore, and health checks before
+starting the timers.
+
+Before that first sweep only, `--rollback --commit <commit> --apply` may restore the recorded links,
+units, and optional configuration. It rejects rollback if a Control timer/service is active, the
+Dispatcher `InvocationID` changed, either current link drifted, or the installed configuration no
+longer has the recorded candidate digest. After any sweep begins, external state or schema may have
+changed and automatic binary-only rollback is forbidden; use the matching database backup and the
+documented recovery-first rollback instead.
 
 The state-changing activation sequence is intentionally not automated. Once separately approved,
 the operator installs the reviewed units, runs `systemctl daemon-reload`, manually starts exactly

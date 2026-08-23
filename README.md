@@ -63,9 +63,9 @@ Fixture target is the remote Linux Codex CLI executor, and the implementation no
 - 15-minute health timers for Control lifecycle/systemd backlog and Runner capacity admission;
   Control durably deduplicates outbound-only Slack alert/recovery notifications, while neither
   monitor performs automated repair.
-- a transactional two-host release tool that validates one exact Git archive under both service
-  accounts, switches Runner before Control, preserves rollback anchors, and deliberately requires a
-  manually observed sweep before restarting timers;
+- a transactional two-host release tool with a read-only plan, durable schema-v2 phase receipts,
+  bounded natural quiescence, exact optional configuration rollback, lost-response reconciliation,
+  Runner-before-Control activation, and a manually observed sweep before restarting timers;
 - a durable daily terminal-audit cursor plus bounded per-sweep GitHub command, latency, and
   rate-limit evidence, so ordinary sweeps skip already-proved terminal WorkItems;
 - permanent open terminal Issues and exact-evidence task-branch reclamation after an explicitly

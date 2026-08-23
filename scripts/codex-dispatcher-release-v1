@@ -1,67 +1,370 @@
 #!/bin/sh
 
-# Transactional two-host release activation for the reviewed Control/Runner layout.
-# Run this on the Linux Control Host as the administrator account.  It deliberately
-# stops before the first write-enabled Dispatcher sweep.
+# Durable, transactional two-host release activation for the reviewed
+# Control/Runner layout. This bootstrap is self-contained and stops before the
+# first write-enabled Dispatcher sweep.
 
 set -eu
 umask 077
 
 usage() {
     printf '%s\n' \
-        'usage: codex-dispatcher-release-v1 --archive PATH --commit SHA --sha256 SHA256 --apply' >&2
+        'usage: codex-dispatcher-release-v1 --archive PATH --commit SHA --sha256 SHA256 (--plan|--apply) [--wait-active-seconds N] [--config PATH --config-sha256 SHA256]' \
+        '       codex-dispatcher-release-v1 --status --commit SHA' \
+        '       codex-dispatcher-release-v1 --rollback --commit SHA --apply' >&2
     exit 2
 }
 
-if [ "$#" -ne 7 ] || [ "$1" != "--archive" ] || [ "$3" != "--commit" ] || \
-    [ "$5" != "--sha256" ] || [ "$7" != "--apply" ]; then
-    usage
+mode=
+archive=
+commit=
+expected_archive_sha256=
+wait_active_seconds=0
+candidate_config=
+expected_config_sha256=
+seen_archive=0
+seen_commit=0
+seen_sha256=0
+seen_wait=0
+seen_config=0
+seen_config_sha=0
+seen_apply=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --plan|--status|--rollback)
+            [ -z "$mode" ] || usage
+            mode=${1#--}
+            shift
+            ;;
+        --apply)
+            [ "$seen_apply" -eq 0 ] || usage
+            seen_apply=1
+            if [ -z "$mode" ]; then
+                mode=apply
+            elif [ "$mode" != rollback ]; then
+                usage
+            fi
+            shift
+            ;;
+        --archive)
+            [ "$seen_archive" -eq 0 ] && [ "$#" -ge 2 ] || usage
+            seen_archive=1
+            archive=$2
+            shift 2
+            ;;
+        --commit)
+            [ "$seen_commit" -eq 0 ] && [ "$#" -ge 2 ] || usage
+            seen_commit=1
+            commit=$2
+            shift 2
+            ;;
+        --sha256)
+            [ "$seen_sha256" -eq 0 ] && [ "$#" -ge 2 ] || usage
+            seen_sha256=1
+            expected_archive_sha256=$2
+            shift 2
+            ;;
+        --wait-active-seconds)
+            [ "$seen_wait" -eq 0 ] && [ "$#" -ge 2 ] || usage
+            seen_wait=1
+            wait_active_seconds=$2
+            shift 2
+            ;;
+        --config)
+            [ "$seen_config" -eq 0 ] && [ "$#" -ge 2 ] || usage
+            seen_config=1
+            candidate_config=$2
+            shift 2
+            ;;
+        --config-sha256)
+            [ "$seen_config_sha" -eq 0 ] && [ "$#" -ge 2 ] || usage
+            seen_config_sha=1
+            expected_config_sha256=$2
+            shift 2
+            ;;
+        *) usage ;;
+    esac
+done
+
+validate_hex() {
+    value=$1
+    length=$2
+    case "$value" in *[!0-9a-f]*|'') return 1 ;; esac
+    [ "${#value}" -eq "$length" ]
+}
+
+validate_hex "$commit" 40 || usage
+case "$mode" in
+    plan|apply)
+        [ "$seen_archive" -eq 1 ] && [ "$seen_sha256" -eq 1 ] || usage
+        validate_hex "$expected_archive_sha256" 64 || usage
+        case "$wait_active_seconds" in *[!0-9]*|'') usage ;; esac
+        [ "$wait_active_seconds" -le 3600 ] || usage
+        [ "$seen_config" -eq "$seen_config_sha" ] || usage
+        if [ "$seen_config" -eq 1 ]; then
+            validate_hex "$expected_config_sha256" 64 || usage
+            [ "$candidate_config" = "/var/tmp/codex-dispatcher-config-$commit.toml" ] || usage
+        fi
+        if [ "$mode" = plan ]; then
+            [ "$seen_apply" -eq 0 ] || usage
+        else
+            [ "$seen_apply" -eq 1 ] || usage
+        fi
+        ;;
+    status)
+        [ "$seen_archive" -eq 0 ] && [ "$seen_sha256" -eq 0 ] && \
+            [ "$seen_wait" -eq 0 ] && [ "$seen_config" -eq 0 ] && \
+            [ "$seen_config_sha" -eq 0 ] && [ "$seen_apply" -eq 0 ] || usage
+        ;;
+    rollback)
+        [ "$seen_archive" -eq 0 ] && [ "$seen_sha256" -eq 0 ] && \
+            [ "$seen_wait" -eq 0 ] && [ "$seen_config" -eq 0 ] && \
+            [ "$seen_config_sha" -eq 0 ] && [ "$seen_apply" -eq 1 ] || usage
+        ;;
+    *) usage ;;
+esac
+
+receipt_root=/opt/codex-dispatcher/release-receipts
+receipt=$receipt_root/$commit.json
+control_release=/opt/codex-dispatcher/releases/$commit
+runner_release=/srv/codex-runner/releases/$commit
+short_commit=$(/usr/bin/printf '%s' "$commit" | /usr/bin/cut -c 1-12)
+control_validation=/var/lib/codex-dispatcher/release-validation-$short_commit
+runner_validation=/srv/codex-runner/run/release-validation-$short_commit
+runner_archive=/var/tmp/codex-dispatcher-release-$commit.tar
+control_units='codex-dispatcher.service codex-dispatcher.timer codex-dispatcher-backup.service codex-dispatcher-backup.timer codex-dispatcher-health.service codex-dispatcher-health.timer codex-dispatcher-restore-drill.service codex-dispatcher-restore-drill.timer'
+control_services='codex-dispatcher.service codex-dispatcher-health.service codex-dispatcher-backup.service codex-dispatcher-restore-drill.service'
+control_timers='codex-dispatcher.timer codex-dispatcher-health.timer codex-dispatcher-backup.timer codex-dispatcher-restore-drill.timer'
+
+receipt_status() {
+    if ! /usr/bin/sudo -n /usr/bin/test -f "$receipt" || \
+            /usr/bin/sudo -n /usr/bin/test -L "$receipt"; then
+        printf '%s\n' 'release receipt is unavailable or unsafe' >&2
+        exit 1
+    fi
+    /usr/bin/sudo -n /usr/bin/python3 - "$receipt" "$commit" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+data = json.loads(path.read_text(encoding="utf-8"))
+if (not isinstance(data, dict) or data.get("schema_version") != 2
+        or data.get("release_commit") != sys.argv[2]):
+    raise SystemExit("release receipt identity is invalid")
+print(json.dumps(data, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+receipt_field() {
+    field=$1
+    /usr/bin/sudo -n /usr/bin/python3 - "$receipt" "$commit" "$field" <<'PY'
+import json, pathlib, sys
+data = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+if data.get("schema_version") != 2 or data.get("release_commit") != sys.argv[2]:
+    raise SystemExit("release receipt identity is invalid")
+value = data.get(sys.argv[3])
+if value is None:
+    print("")
+elif isinstance(value, bool):
+    print("1" if value else "0")
+elif isinstance(value, (str, int)):
+    print(value)
+else:
+    raise SystemExit("release receipt field is invalid")
+PY
+}
+
+receipt_update_existing() {
+    update_status=$1
+    update_phase=$2
+    update_error=$3
+    update_operation=$4
+    /usr/bin/sudo -n /usr/bin/python3 - \
+        "$receipt" "$commit" "$update_status" "$update_phase" \
+        "$update_error" "$update_operation" <<'PY'
+import json, os, pathlib, sys, tempfile
+path = pathlib.Path(sys.argv[1])
+data = json.loads(path.read_text(encoding="utf-8"))
+if data.get("schema_version") != 2 or data.get("release_commit") != sys.argv[2]:
+    raise SystemExit("release receipt identity is invalid")
+data.update(status=sys.argv[3], phase=sys.argv[4],
+            error_code=sys.argv[5] or None, operation=sys.argv[6])
+data["updated_at"] = __import__("datetime").datetime.now(
+    __import__("datetime").timezone.utc).isoformat().replace("+00:00", "Z")
+fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(data, stream, sort_keys=True, separators=(",", ":"))
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(raw, path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    try:
+        os.unlink(raw)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+if [ "$mode" = status ]; then
+    receipt_status
+    exit 0
 fi
 
-archive=$2
-commit=$4
-expected_archive_sha256=$6
+if [ "$(/usr/bin/id -u)" -eq 0 ]; then
+    printf '%s\n' 'run as the administrator account, not root' >&2
+    exit 1
+fi
+/usr/bin/sudo -n true
+/usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n true
 
-case "$commit" in
-    *[!0-9a-f]*|'') usage ;;
-esac
-[ "${#commit}" -eq 40 ] || usage
-case "$expected_archive_sha256" in
-    *[!0-9a-f]*|'') usage ;;
-esac
-[ "${#expected_archive_sha256}" -eq 64 ] || usage
+valid_control_link() {
+    link=$1
+    case "$link" in /opt/codex-dispatcher/releases/*) ;; *) return 1 ;; esac
+    validate_hex "${link##*/}" 40
+}
+
+valid_runner_link() {
+    link=$1
+    case "$link" in
+        releases/*) value=${link#releases/} ;;
+        /srv/codex-runner/releases/*) value=${link##*/} ;;
+        *) return 1 ;;
+    esac
+    validate_hex "$value" 40
+}
+
+restore_units() {
+    restore_control=$1
+    restore_runner=$2
+    for unit in $control_units; do
+        /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 \
+            "$restore_control/deploy/systemd/$unit" "/etc/systemd/system/$unit"
+    done
+    case "$restore_runner" in
+        /*) restore_runner_release=$restore_runner ;;
+        *) restore_runner_release=/srv/codex-runner/$restore_runner ;;
+    esac
+    /usr/bin/ssh -o BatchMode=yes codex-runner \
+        "/usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$restore_runner_release/scripts/codex-runner-v1' /srv/codex-runner/bin/codex-runner-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$restore_runner_release/scripts/codex-runner-capacity-v1' /srv/codex-runner/bin/codex-runner-capacity-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$restore_runner_release/deploy/runner/codex-runner-capacity.service' /etc/systemd/system/codex-runner-capacity.service && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$restore_runner_release/deploy/runner/codex-runner-capacity.timer' /etc/systemd/system/codex-runner-capacity.timer"
+    /usr/bin/sudo -n /usr/bin/systemctl daemon-reload
+    /usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n /usr/bin/systemctl daemon-reload
+}
+
+if [ "$mode" = rollback ]; then
+    if ! /usr/bin/sudo -n /usr/bin/test -f "$receipt" || \
+            /usr/bin/sudo -n /usr/bin/test -L "$receipt"; then
+        printf '%s\n' 'release receipt is unavailable or unsafe' >&2
+        exit 1
+    fi
+    [ "$(receipt_field status)" = committed ] || {
+        printf '%s\n' 'only a committed pre-sweep release can be rolled back' >&2
+        exit 1
+    }
+    recorded_invocation=$(receipt_field dispatcher_invocation_id_before)
+    current_invocation=$(/usr/bin/systemctl show codex-dispatcher.service -p InvocationID --value)
+    [ "$recorded_invocation" = "$current_invocation" ] || {
+        printf '%s\n' 'Dispatcher has run since activation; automatic rollback is forbidden' >&2
+        exit 1
+    }
+    for timer in $control_timers; do
+        [ "$(/usr/bin/systemctl show "$timer" -p ActiveState --value)" = inactive ] || {
+            printf '%s\n' 'rollback requires all Control timers inactive' >&2
+            exit 1
+        }
+    done
+    for service in $control_services; do
+        case "$(/usr/bin/systemctl show "$service" -p ActiveState --value)" in
+            inactive|failed) ;;
+            *) printf '%s\n' 'rollback requires all Control services inactive' >&2; exit 1 ;;
+        esac
+    done
+    previous_control=$(receipt_field previous_control)
+    previous_runner=$(receipt_field previous_runner)
+    if ! valid_control_link "$previous_control" || \
+            ! valid_runner_link "$previous_runner"; then
+        printf '%s\n' 'release receipt rollback links are invalid' >&2
+        exit 1
+    fi
+    current_control=$(/usr/bin/readlink /opt/codex-dispatcher/current)
+    current_runner=$(/usr/bin/ssh -o BatchMode=yes codex-runner \
+        /usr/bin/readlink /srv/codex-runner/current)
+    if [ "$current_control" != "$control_release" ] || \
+            { [ "$current_runner" != "releases/$commit" ] && \
+              [ "$current_runner" != "$runner_release" ]; }; then
+        printf '%s\n' 'release links changed after activation; automatic rollback is forbidden' >&2
+        exit 1
+    fi
+    config_applied=$(receipt_field config_applied)
+    if [ "$config_applied" = 1 ]; then
+        current_config_sha=$(/usr/bin/sudo -n /usr/bin/sha256sum \
+            /etc/codex-dispatcher/config.toml | /usr/bin/cut -d ' ' -f 1)
+        [ "$current_config_sha" = "$(receipt_field config_new_sha256)" ] || {
+            printf '%s\n' 'configuration changed after activation; automatic rollback is forbidden' >&2
+            exit 1
+        }
+    fi
+    receipt_update_existing rollback_in_progress rollback_intent '' rollback
+    /usr/bin/sudo -n /usr/bin/ln -sfn "$previous_control" /opt/codex-dispatcher/current.rollback
+    /usr/bin/sudo -n /usr/bin/mv -Tf /opt/codex-dispatcher/current.rollback /opt/codex-dispatcher/current
+    /usr/bin/ssh -o BatchMode=yes codex-runner \
+        "/usr/bin/sudo -n /usr/bin/ln -sfn '$previous_runner' /srv/codex-runner/current.rollback && /usr/bin/sudo -n /usr/bin/mv -Tf /srv/codex-runner/current.rollback /srv/codex-runner/current"
+    if [ "$config_applied" = 1 ]; then
+        old_config_sha=$(receipt_field config_old_sha256)
+        validate_hex "$old_config_sha" 64 || exit 1
+        config_uid=$(receipt_field config_previous_uid)
+        config_gid=$(receipt_field config_previous_gid)
+        config_mode=$(receipt_field config_previous_mode)
+        /usr/bin/sudo -n /usr/bin/install -o "$config_uid" -g "$config_gid" \
+            -m "$config_mode" "/opt/codex-dispatcher/config-backups/$old_config_sha.toml" \
+            /etc/codex-dispatcher/config.toml.rollback
+        /usr/bin/sudo -n /usr/bin/mv -Tf /etc/codex-dispatcher/config.toml.rollback \
+            /etc/codex-dispatcher/config.toml
+        [ "$(/usr/bin/sudo -n /usr/bin/sha256sum /etc/codex-dispatcher/config.toml | /usr/bin/cut -d ' ' -f 1)" = "$old_config_sha" ]
+    fi
+    restore_units "$previous_control" "$previous_runner"
+    [ "$(/usr/bin/readlink /opt/codex-dispatcher/current)" = "$previous_control" ]
+    [ "$(/usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/readlink /srv/codex-runner/current)" = "$previous_runner" ]
+    receipt_update_existing rolled_back rollback_observed '' rollback
+    receipt_status
+    exit 0
+fi
+
 case "$archive" in
     /var/tmp/codex-dispatcher-release-"$commit".tar) ;;
     *) printf '%s\n' 'release archive must use the exact protected /var/tmp path' >&2; exit 2 ;;
 esac
-
 [ -f "$archive" ] && [ ! -L "$archive" ] || {
     printf '%s\n' 'release archive is unavailable or is a symlink' >&2
     exit 1
 }
-[ "$(id -u)" -ne 0 ] || {
-    printf '%s\n' 'run as the administrator account, not root' >&2
+archive_uid=$(/usr/bin/stat -c %u "$archive")
+[ "$archive_uid" -eq "$(/usr/bin/id -u)" ] || {
+    printf '%s\n' 'release archive must be owned by the administrator account' >&2
     exit 1
 }
-/usr/bin/sudo -n true
-/usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n true
-
+archive_mode=$(/usr/bin/stat -c %a "$archive")
+[ $((0$archive_mode & 022)) -eq 0 ] || {
+    printf '%s\n' 'release archive must not be group/world writable' >&2
+    exit 1
+}
 actual_archive_sha256=$(/usr/bin/sha256sum "$archive" | /usr/bin/cut -d ' ' -f 1)
 [ "$actual_archive_sha256" = "$expected_archive_sha256" ] || {
     printf '%s\n' 'release archive SHA-256 mismatch' >&2
     exit 1
 }
-
-# Reject links, devices, absolute members, traversal, and duplicate names before
-# either root account extracts the reviewed Git archive.
 /usr/bin/python3 -c '
 import pathlib, sys, tarfile
-p = pathlib.Path(sys.argv[1])
-seen = set()
+p = pathlib.Path(sys.argv[1]); seen = set()
 with tarfile.open(p, "r:") as archive:
     members = archive.getmembers()
-    if not members:
-        raise SystemExit("release archive is empty")
+    if not members: raise SystemExit("release archive is empty")
     for member in members:
         parts = pathlib.PurePosixPath(member.name).parts
         if (not member.name or member.name.startswith("/") or ".." in parts
@@ -70,165 +373,382 @@ with tarfile.open(p, "r:") as archive:
         seen.add(member.name)
 ' "$archive"
 
-control_release=/opt/codex-dispatcher/releases/$commit
-runner_release=/srv/codex-runner/releases/$commit
-short_commit=$(/usr/bin/printf '%s' "$commit" | /usr/bin/cut -c 1-12)
-control_validation=/var/lib/codex-dispatcher/release-validation-$short_commit
-runner_validation=/srv/codex-runner/run/release-validation-$short_commit
-runner_archive=/var/tmp/codex-dispatcher-release-$commit.tar
-
 previous_control=$(/usr/bin/readlink /opt/codex-dispatcher/current)
 previous_runner=$(/usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/readlink /srv/codex-runner/current)
-case "$previous_control" in /opt/codex-dispatcher/releases/[0-9a-f]*) ;;
-    *) printf '%s\n' 'current Control release link is unsafe' >&2; exit 1 ;;
-esac
-case "$previous_runner" in releases/[0-9a-f]*|/srv/codex-runner/releases/[0-9a-f]*) ;;
-    *) printf '%s\n' 'current Runner release link is unsafe' >&2; exit 1 ;;
-esac
-case "$previous_runner" in
-    /*) previous_runner_release=$previous_runner ;;
-    *) previous_runner_release=/srv/codex-runner/$previous_runner ;;
-esac
+if ! valid_control_link "$previous_control" || \
+        ! valid_runner_link "$previous_runner"; then
+    printf '%s\n' 'current release link is unsafe' >&2
+    exit 1
+fi
+if /usr/bin/sudo -n /usr/bin/test -e "$control_release" || \
+        /usr/bin/sudo -n /usr/bin/test -L "$control_release" || \
+        /usr/bin/ssh -o BatchMode=yes codex-runner \
+            "/usr/bin/sudo -n /usr/bin/test -e '$runner_release' || /usr/bin/sudo -n /usr/bin/test -L '$runner_release'"; then
+        printf '%s\n' 'candidate release already exists' >&2
+        exit 1
+fi
 
-control_units='codex-dispatcher.service codex-dispatcher.timer codex-dispatcher-backup.service codex-dispatcher-backup.timer codex-dispatcher-health.service codex-dispatcher-health.timer codex-dispatcher-restore-drill.service codex-dispatcher-restore-drill.timer'
+if [ "$seen_config" -eq 1 ]; then
+    [ -f "$candidate_config" ] && [ ! -L "$candidate_config" ] || {
+        printf '%s\n' 'candidate config is unavailable or unsafe' >&2
+        exit 1
+    }
+    [ "$(/usr/bin/sudo -n /usr/bin/stat -c %u "$candidate_config")" -eq 0 ] && \
+        [ "$(/usr/bin/sudo -n /usr/bin/stat -c %a "$candidate_config")" = 600 ] || {
+            printf '%s\n' 'candidate config must be root-owned mode 0600' >&2
+            exit 1
+        }
+    observed_config_sha=$(/usr/bin/sudo -n /usr/bin/sha256sum "$candidate_config" | /usr/bin/cut -d ' ' -f 1)
+    [ "$observed_config_sha" = "$expected_config_sha256" ] || {
+        printf '%s\n' 'candidate config SHA-256 mismatch' >&2
+        exit 1
+    }
+    /usr/bin/sudo -n /usr/bin/env -i HOME=/var/lib/codex-dispatcher \
+        LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/bin:/bin \
+        PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+        "PYTHONPATH=$previous_control/src:$previous_control" \
+        /opt/codex-python/current/bin/python3 -P -s -c \
+        'from pathlib import Path; import sys; from codex_dispatcher.config import load_config; load_config(Path(sys.argv[1]))' \
+        "$candidate_config"
+fi
 
-switched=0
+active_services=
+for service in $control_services; do
+    state=$(/usr/bin/systemctl show "$service" -p ActiveState --value)
+    case "$state" in
+        inactive|failed) ;;
+        *) active_services="$active_services $service" ;;
+    esac
+done
+
+if [ "$mode" = plan ]; then
+    /usr/bin/python3 - "$commit" "$expected_archive_sha256" "$previous_control" \
+        "$previous_runner" "$active_services" "$seen_config" <<'PY'
+import json, sys
+print(json.dumps({"ok": True, "operation": "plan", "release_commit": sys.argv[1],
+    "archive_sha256": sys.argv[2], "previous_control": sys.argv[3],
+    "previous_runner": sys.argv[4], "active_services": sys.argv[5].split(),
+    "config_requested": sys.argv[6] == "1", "authorizes_apply": False,
+    "state_writes": 0}, sort_keys=True, separators=(",", ":")))
+PY
+    exit 0
+fi
+
+if /usr/bin/sudo -n /usr/bin/test -e "$receipt" || \
+        /usr/bin/sudo -n /usr/bin/test -L "$receipt"; then
+    printf '%s\n' 'release receipt already exists; use --status' >&2
+    exit 1
+fi
+
+created_control=0
+created_runner=0
+activated_control=0
+activated_runner=0
+committed=0
+commit_intent=0
+receipt_committed=0
+config_applied=0
+config_install_started=0
+runner_switch_started=0
+control_switch_started=0
+config_old_sha256=
+config_new_sha256=
+config_previous_uid=
+config_previous_gid=
+config_previous_mode=
+current_phase=arguments
+active_timers_before=
+dispatcher_invocation_id_before=$(/usr/bin/systemctl show codex-dispatcher.service -p InvocationID --value)
+started_at=$(/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ)
+
+for timer in $control_timers; do
+    if [ "$(/usr/bin/systemctl show "$timer" -p ActiveState --value)" = active ]; then
+        active_timers_before="$active_timers_before $timer"
+    fi
+done
+
+/usr/bin/sudo -n /usr/bin/install -d -o root -g root -m 0700 "$receipt_root"
+
+receipt_write() {
+    write_status=$1
+    write_phase=$2
+    write_error=$3
+    /usr/bin/sudo -n /usr/bin/python3 - \
+        "$receipt" "$commit" "$expected_archive_sha256" "$write_status" \
+        "$write_phase" "$write_error" "$previous_control" "$previous_runner" \
+        "$created_control" "$created_runner" "$activated_control" \
+        "$activated_runner" "$committed" "$config_applied" \
+        "$config_old_sha256" "$config_new_sha256" "$config_previous_uid" \
+        "$config_previous_gid" "$config_previous_mode" \
+        "$dispatcher_invocation_id_before" "$active_timers_before" "$started_at" <<'PY'
+import json, os, pathlib, sys, tempfile
+path = pathlib.Path(sys.argv[1])
+data = {"schema_version": 2, "kind": "codex_dispatcher_release",
+    "operation": "apply", "release_commit": sys.argv[2],
+    "archive_sha256": sys.argv[3], "status": sys.argv[4], "phase": sys.argv[5],
+    "error_code": sys.argv[6] or None, "previous_control": sys.argv[7],
+    "previous_runner": sys.argv[8], "created_control": sys.argv[9] == "1",
+    "created_runner": sys.argv[10] == "1", "activated_control": sys.argv[11] == "1",
+    "activated_runner": sys.argv[12] == "1", "committed": sys.argv[13] == "1",
+    "config_applied": sys.argv[14] == "1", "config_old_sha256": sys.argv[15] or None,
+    "config_new_sha256": sys.argv[16] or None, "config_previous_uid": sys.argv[17] or None,
+    "config_previous_gid": sys.argv[18] or None, "config_previous_mode": sys.argv[19] or None,
+    "dispatcher_invocation_id_before": sys.argv[20],
+    "active_timers_before": sys.argv[21].split(), "timers_started": False,
+    "requires_manual_sweep": True, "started_at": sys.argv[22]}
+data["updated_at"] = __import__("datetime").datetime.now(
+    __import__("datetime").timezone.utc).isoformat().replace("+00:00", "Z")
+fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(data, stream, sort_keys=True, separators=(",", ":")); stream.write("\n")
+        stream.flush(); os.fsync(stream.fileno())
+    os.replace(raw, path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    try:
+        os.unlink(raw)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+record_phase() {
+    current_phase=$1
+    receipt_write in_progress "$current_phase" ''
+}
+
+masked=0
 cleanup() {
     status=$?
-    if [ "$status" -ne 0 ] && [ "$switched" -eq 1 ]; then
-        # No Dispatcher sweep has been started by this tool.  It is therefore
-        # safe to restore both code/unit views, Control first to prevent a new
-        # client from reaching the candidate Runner, then Runner.
-        /usr/bin/sudo -n /usr/bin/ln -sfn "$previous_control" /opt/codex-dispatcher/current.rollback
-        /usr/bin/sudo -n /usr/bin/mv -Tf /opt/codex-dispatcher/current.rollback /opt/codex-dispatcher/current
-        /usr/bin/ssh -o BatchMode=yes codex-runner \
-            "/usr/bin/sudo -n /usr/bin/ln -sfn '$previous_runner' /srv/codex-runner/current.rollback && /usr/bin/sudo -n /usr/bin/mv -Tf /srv/codex-runner/current.rollback /srv/codex-runner/current" || true
-        for unit in $control_units; do
-            /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 \
-                "$previous_control/deploy/systemd/$unit" "/etc/systemd/system/$unit" || true
+    trap - EXIT HUP INT TERM
+    rollback_ok=1
+    if [ "$status" -ne 0 ] && [ "$committed" -eq 0 ] && [ "$commit_intent" -eq 0 ]; then
+        receipt_write rollback_in_progress rollback_intent "${current_phase}_failed" || true
+        if [ "$runner_switch_started" -eq 1 ] && [ "$activated_runner" -eq 0 ]; then
+            observed_runner=$(/usr/bin/ssh -o BatchMode=yes codex-runner \
+                /usr/bin/readlink /srv/codex-runner/current 2>/dev/null || true)
+            if [ "$observed_runner" = "releases/$commit" ] || \
+                    [ "$observed_runner" = "$runner_release" ]; then
+                activated_runner=1
+            elif [ "$observed_runner" != "$previous_runner" ]; then
+                rollback_ok=0
+            fi
+        fi
+        if [ "$control_switch_started" -eq 1 ] && [ "$activated_control" -eq 0 ]; then
+            observed_control=$(/usr/bin/readlink /opt/codex-dispatcher/current 2>/dev/null || true)
+            if [ "$observed_control" = "$control_release" ]; then
+                activated_control=1
+            elif [ "$observed_control" != "$previous_control" ]; then
+                rollback_ok=0
+            fi
+        fi
+        if [ "$config_install_started" -eq 1 ] && [ "$config_applied" -eq 0 ]; then
+            observed_config=$(/usr/bin/sudo -n /usr/bin/sha256sum \
+                /etc/codex-dispatcher/config.toml 2>/dev/null | /usr/bin/cut -d ' ' -f 1 || true)
+            if [ "$observed_config" = "$config_new_sha256" ]; then
+                config_applied=1
+            elif [ "$observed_config" != "$config_old_sha256" ]; then
+                rollback_ok=0
+            fi
+        fi
+        if [ "$config_applied" -eq 1 ]; then
+            /usr/bin/sudo -n /usr/bin/install -o "$config_previous_uid" -g "$config_previous_gid" \
+                -m "$config_previous_mode" "/opt/codex-dispatcher/config-backups/$config_old_sha256.toml" \
+                /etc/codex-dispatcher/config.toml.rollback && \
+            /usr/bin/sudo -n /usr/bin/mv -Tf /etc/codex-dispatcher/config.toml.rollback \
+                /etc/codex-dispatcher/config.toml || rollback_ok=0
+        fi
+        if [ "$activated_control" -eq 1 ]; then
+            /usr/bin/sudo -n /usr/bin/ln -sfn "$previous_control" /opt/codex-dispatcher/current.rollback && \
+            /usr/bin/sudo -n /usr/bin/mv -Tf /opt/codex-dispatcher/current.rollback \
+                /opt/codex-dispatcher/current || rollback_ok=0
+        fi
+        if [ "$activated_runner" -eq 1 ]; then
+            /usr/bin/ssh -o BatchMode=yes codex-runner \
+                "/usr/bin/sudo -n /usr/bin/ln -sfn '$previous_runner' /srv/codex-runner/current.rollback && /usr/bin/sudo -n /usr/bin/mv -Tf /srv/codex-runner/current.rollback /srv/codex-runner/current" || rollback_ok=0
+        fi
+        restore_units "$previous_control" "$previous_runner" || rollback_ok=0
+    fi
+    if [ "$masked" -eq 1 ]; then
+        for service in $control_services; do
+            /usr/bin/sudo -n /usr/bin/systemctl unmask --runtime "$service" \
+                >/dev/null 2>&1 || rollback_ok=0
         done
-        /usr/bin/ssh -o BatchMode=yes codex-runner \
-            "/usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$previous_runner_release/scripts/codex-runner-v1' /srv/codex-runner/bin/codex-runner-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$previous_runner_release/scripts/codex-runner-capacity-v1' /srv/codex-runner/bin/codex-runner-capacity-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$previous_runner_release/deploy/runner/codex-runner-capacity.service' /etc/systemd/system/codex-runner-capacity.service && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$previous_runner_release/deploy/runner/codex-runner-capacity.timer' /etc/systemd/system/codex-runner-capacity.timer" || true
-        /usr/bin/sudo -n /usr/bin/systemctl daemon-reload || true
-        /usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n /usr/bin/systemctl daemon-reload || true
+    fi
+    if [ "$status" -ne 0 ] && [ "$rollback_ok" -eq 1 ] && \
+        [ "$committed" -eq 0 ] && [ "$commit_intent" -eq 0 ]; then
+        for timer in $active_timers_before; do
+            /usr/bin/sudo -n /usr/bin/systemctl start "$timer" || rollback_ok=0
+        done
     fi
     /usr/bin/sudo -n /usr/bin/find "$control_validation" -xdev -depth -delete 2>/dev/null || true
     /usr/bin/ssh -o BatchMode=yes codex-runner \
         "/usr/bin/sudo -n /usr/bin/find '$runner_validation' -xdev -depth -delete 2>/dev/null || true; /usr/bin/rm -f '$runner_archive'" || true
-    if [ "$status" -ne 0 ]; then
-        /usr/bin/sudo -n /usr/bin/find "$control_release" -xdev -depth -delete 2>/dev/null || true
-        /usr/bin/ssh -o BatchMode=yes codex-runner \
-            "/usr/bin/sudo -n /usr/bin/find '$runner_release' -xdev -depth -delete 2>/dev/null || true" || true
+    if [ "$status" -ne 0 ] && [ "$commit_intent" -eq 0 ]; then
+        if [ "$created_control" -eq 1 ] && \
+            [ "$(/usr/bin/readlink /opt/codex-dispatcher/current)" != "$control_release" ]; then
+            /usr/bin/sudo -n /usr/bin/find "$control_release" -xdev -depth -delete 2>/dev/null || true
+        fi
+        if [ "$created_runner" -eq 1 ]; then
+            runner_current=$(/usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/readlink /srv/codex-runner/current 2>/dev/null || true)
+            if [ "$runner_current" != "releases/$commit" ] && [ "$runner_current" != "$runner_release" ]; then
+                /usr/bin/ssh -o BatchMode=yes codex-runner \
+                    "/usr/bin/sudo -n /usr/bin/find '$runner_release' -xdev -depth -delete 2>/dev/null || true" || true
+            fi
+        fi
     fi
-    /usr/bin/rm -f "$archive"
+    if [ "$status" -ne 0 ]; then
+        if [ "$commit_intent" -eq 1 ] && [ "$receipt_committed" -eq 0 ]; then
+            receipt_write recovery_required handoff_reconciliation_required \
+                "${current_phase}_receipt_unknown" || true
+        elif [ "$commit_intent" -eq 0 ] && [ "$rollback_ok" -eq 1 ]; then
+            receipt_write rolled_back rollback_observed "${current_phase}_failed" || true
+        elif [ "$commit_intent" -eq 0 ]; then
+            receipt_write rollback_incomplete rollback_incomplete \
+                "${current_phase}_failed" || true
+        fi
+    fi
+    if [ "$seen_config" -eq 1 ]; then
+        /usr/bin/sudo -n /usr/bin/rm -f "$candidate_config" || true
+    fi
+    /usr/bin/rm -f "$archive" || true
     exit "$status"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-# A verified Online Backup precedes any timer stop or release mutation.
+receipt_write in_progress arguments ''
+record_phase backup
 /usr/bin/sudo -n /usr/bin/systemctl start codex-dispatcher-backup.service
 [ "$(/usr/bin/sudo -n /usr/bin/systemctl show codex-dispatcher-backup.service -p Result --value)" = success ]
 
-for timer in \
-    codex-dispatcher.timer \
-    codex-dispatcher-health.timer \
-    codex-dispatcher-backup.timer \
-    codex-dispatcher-restore-drill.timer
-do
-    /usr/bin/sudo -n /usr/bin/systemctl stop "$timer"
+record_phase quiesce
+for timer in $control_timers; do /usr/bin/sudo -n /usr/bin/systemctl stop "$timer"; done
+masked=1
+for service in $control_services; do
+    /usr/bin/sudo -n /usr/bin/systemctl mask --runtime "$service" >/dev/null
 done
-for service in \
-    codex-dispatcher.service \
-    codex-dispatcher-health.service \
-    codex-dispatcher-backup.service \
-    codex-dispatcher-restore-drill.service
-do
-    service_state=$(/usr/bin/systemctl show "$service" -p ActiveState --value)
-    case "$service_state" in
-        inactive|failed) ;;
-        *) printf '%s\n' "Control service is not stopped: $service" >&2; exit 1 ;;
-    esac
+deadline=$(( $(/usr/bin/date +%s) + wait_active_seconds ))
+while :; do
+    active=
+    for service in $control_services; do
+        case "$(/usr/bin/systemctl show "$service" -p ActiveState --value)" in
+            inactive|failed) ;;
+            *) active="$active $service" ;;
+        esac
+    done
+    [ -z "$active" ] && break
+    [ "$(/usr/bin/date +%s)" -lt "$deadline" ] || {
+        current_phase=active_service_timeout
+        exit 1
+    }
+    /usr/bin/sleep 1
 done
-# RuntimeDirectory is ephemeral and may disappear when the oneshot Dispatcher
-# exits. Recreate the exact systemd-owned boundary before checking the lock;
-# never let flock create a root-owned lock file.
-/usr/bin/sudo -n /usr/bin/install -d \
-    -o codex-dispatcher -g codex-dispatcher -m 0700 /run/codex-dispatcher
+/usr/bin/sudo -n /usr/bin/install -d -o codex-dispatcher -g codex-dispatcher \
+    -m 0700 /run/codex-dispatcher
 /usr/bin/sudo -n -u codex-dispatcher /bin/sh -c \
     'umask 077; exec /usr/bin/flock -n /run/codex-dispatcher/dispatcher.lock /usr/bin/true'
 /usr/bin/ssh -o BatchMode=yes codex-runner \
     "/usr/bin/sudo -n -u codex-runner /bin/sh -c 'umask 077; exec /usr/bin/flock -n /srv/codex-runner/run/active.lock /usr/bin/true'"
 
-stage_control() {
-    [ ! -e "$control_release" ] || {
-        printf '%s\n' 'candidate Control release already exists' >&2
-        return 1
-    }
-    /usr/bin/sudo -n /usr/bin/install -d -o root -g root -m 0755 "$control_release"
-    /usr/bin/sudo -n /usr/bin/tar --extract --file "$archive" --directory "$control_release" --no-same-owner
-    /usr/bin/sudo -n /usr/bin/chown -R root:root "$control_release"
-    /usr/bin/sudo -n /usr/bin/chmod -R go-w "$control_release"
-}
+record_phase stage_control_intent
+/usr/bin/sudo -n /usr/bin/install -d -o root -g root -m 0755 "$control_release"
+created_control=1
+receipt_write in_progress stage_control_observed ''
+/usr/bin/sudo -n /usr/bin/tar --extract --file "$archive" --directory "$control_release" --no-same-owner
+/usr/bin/sudo -n /usr/bin/chown -R root:root "$control_release"
+/usr/bin/sudo -n /usr/bin/chmod -R go-w "$control_release"
 
-stage_runner() {
-    /usr/bin/ssh -o BatchMode=yes codex-runner "/usr/bin/test ! -e '$runner_release'"
-    /usr/bin/ssh -o BatchMode=yes codex-runner "umask 077; /usr/bin/tee '$runner_archive' >/dev/null" < "$archive"
-    observed=$(/usr/bin/ssh -o BatchMode=yes codex-runner "/usr/bin/sha256sum '$runner_archive' | /usr/bin/cut -d ' ' -f 1")
-    [ "$observed" = "$expected_archive_sha256" ]
-    /usr/bin/ssh -o BatchMode=yes codex-runner \
-        "/usr/bin/sudo -n /usr/bin/install -d -o root -g root -m 0755 '$runner_release' && /usr/bin/sudo -n /usr/bin/tar --extract --file '$runner_archive' --directory '$runner_release' --no-same-owner && /usr/bin/sudo -n /usr/bin/chown -R root:root '$runner_release' && /usr/bin/sudo -n /usr/bin/chmod -R go-w '$runner_release'"
-}
-
-validate_control() {
-    /usr/bin/sudo -n /usr/bin/install -d -o codex-dispatcher -g codex-dispatcher -m 0700 "$control_validation"
-    /usr/bin/sudo -n /usr/bin/cp -a "$control_release"/. "$control_validation"/
-    /usr/bin/sudo -n /usr/bin/chown -R codex-dispatcher:codex-dispatcher "$control_validation"
-    /usr/bin/sudo -n -u codex-dispatcher /bin/sh -c \
-        'set -eu; umask 077; cd "$1"; PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:. /opt/codex-python/current/bin/python3 -P -s -m unittest discover -s tests -q; PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:. /opt/codex-python/current/bin/python3 -P -s -m compileall -q src tests; /bin/sh -n scripts/codex-dispatcher-v1 scripts/codex-dispatcher-health-v1 scripts/codex-dispatcher-backup-v1 scripts/codex-dispatcher-restore-drill-v1' \
-        release-validation "$control_validation"
-}
-
-validate_runner() {
-    /usr/bin/ssh -o BatchMode=yes codex-runner \
-        /usr/bin/sudo -n /usr/bin/install -d -o codex-runner -g codex-runner \
-        -m 0700 "$runner_validation"
-    /usr/bin/ssh -o BatchMode=yes codex-runner \
-        /usr/bin/sudo -n /usr/bin/cp -a \
-        "$runner_release/." "$runner_validation/"
-    /usr/bin/ssh -o BatchMode=yes codex-runner \
-        /usr/bin/sudo -n /usr/bin/chown -R codex-runner:codex-runner \
-        "$runner_validation"
-    /usr/bin/ssh -o BatchMode=yes codex-runner \
-        /usr/bin/sudo -n /usr/bin/chmod 0700 "$runner_validation"
-    /usr/bin/ssh -o BatchMode=yes codex-runner \
-        /usr/bin/sudo -n -u codex-runner /usr/bin/env -i \
-        HOME=/srv/codex-runner/home LANG=C.UTF-8 LC_ALL=C.UTF-8 \
-        PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
-        "PYTHONPATH=$runner_validation/src:$runner_validation" \
-        "$runner_validation/scripts/codex-runner-release-validate-v1" \
-        "$runner_validation"
-}
-
-stage_control
-stage_runner
-validate_control
-validate_runner
-
-# Activate Runner first.  From this point every failure triggers the trap's
-# pre-write two-host symlink rollback.
+record_phase stage_runner_intent
+/usr/bin/ssh -o BatchMode=yes codex-runner "umask 077; /usr/bin/tee '$runner_archive' >/dev/null" < "$archive"
+observed=$(/usr/bin/ssh -o BatchMode=yes codex-runner "/usr/bin/sha256sum '$runner_archive' | /usr/bin/cut -d ' ' -f 1")
+[ "$observed" = "$expected_archive_sha256" ]
 /usr/bin/ssh -o BatchMode=yes codex-runner \
-    "/usr/bin/sudo -n /usr/bin/ln -sfn 'releases/$commit' /srv/codex-runner/current.next && /usr/bin/sudo -n /usr/bin/mv -Tf /srv/codex-runner/current.next /srv/codex-runner/current"
-switched=1
+    "/usr/bin/sudo -n /usr/bin/install -d -o root -g root -m 0755 '$runner_release'"
+created_runner=1
+receipt_write in_progress stage_runner_observed ''
+/usr/bin/ssh -o BatchMode=yes codex-runner \
+    "/usr/bin/sudo -n /usr/bin/tar --extract --file '$runner_archive' --directory '$runner_release' --no-same-owner && /usr/bin/sudo -n /usr/bin/chown -R root:root '$runner_release' && /usr/bin/sudo -n /usr/bin/chmod -R go-w '$runner_release'"
+
+record_phase validate_control
+/usr/bin/sudo -n /usr/bin/install -d -o codex-dispatcher -g codex-dispatcher -m 0700 "$control_validation"
+/usr/bin/sudo -n /usr/bin/cp -a "$control_release"/. "$control_validation"/
+/usr/bin/sudo -n /usr/bin/chown -R codex-dispatcher:codex-dispatcher "$control_validation"
+/usr/bin/sudo -n -u codex-dispatcher /bin/sh -c \
+    'set -eu; umask 077; cd "$1"; PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:. /opt/codex-python/current/bin/python3 -P -s -m unittest discover -s tests -q; PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:. /opt/codex-python/current/bin/python3 -P -s -m compileall -q src tests; /bin/sh -n scripts/codex-dispatcher-v1 scripts/codex-dispatcher-health-v1 scripts/codex-dispatcher-backup-v1 scripts/codex-dispatcher-restore-drill-v1 scripts/codex-dispatcher-release-v1' \
+    release-validation "$control_validation"
+
+record_phase validate_runner
+/usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n /usr/bin/install -d \
+    -o codex-runner -g codex-runner -m 0700 "$runner_validation"
+/usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n /usr/bin/cp -a \
+    "$runner_release/." "$runner_validation/"
+/usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n /usr/bin/chown -R \
+    codex-runner:codex-runner "$runner_validation"
+/usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n /usr/bin/chmod 0700 "$runner_validation"
+/usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n -u codex-runner \
+    /usr/bin/env -i HOME=/srv/codex-runner/home LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+    PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+    "PYTHONPATH=$runner_validation/src:$runner_validation" \
+    "$runner_validation/scripts/codex-runner-release-validate-v1" "$runner_validation"
+
+if [ "$seen_config" -eq 1 ]; then
+    record_phase config_validate
+    /usr/bin/sudo -n /usr/bin/env -i HOME=/var/lib/codex-dispatcher \
+        LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/bin:/bin \
+        PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+        "PYTHONPATH=$control_release/src:$control_release" \
+        /opt/codex-python/current/bin/python3 -P -s -c \
+        'from pathlib import Path; import sys; from codex_dispatcher.config import load_config; load_config(Path(sys.argv[1]))' \
+        "$candidate_config"
+    config_old_sha256=$(/usr/bin/sudo -n /usr/bin/sha256sum /etc/codex-dispatcher/config.toml | /usr/bin/cut -d ' ' -f 1)
+    config_new_sha256=$expected_config_sha256
+    config_previous_uid=$(/usr/bin/sudo -n /usr/bin/stat -c %u /etc/codex-dispatcher/config.toml)
+    config_previous_gid=$(/usr/bin/sudo -n /usr/bin/stat -c %g /etc/codex-dispatcher/config.toml)
+    config_previous_mode=$(/usr/bin/sudo -n /usr/bin/stat -c %a /etc/codex-dispatcher/config.toml)
+    /usr/bin/sudo -n /usr/bin/install -d -o root -g root -m 0700 /opt/codex-dispatcher/config-backups
+    if /usr/bin/sudo -n /usr/bin/test -e "/opt/codex-dispatcher/config-backups/$config_old_sha256.toml"; then
+        [ "$(/usr/bin/sudo -n /usr/bin/sha256sum "/opt/codex-dispatcher/config-backups/$config_old_sha256.toml" | /usr/bin/cut -d ' ' -f 1)" = "$config_old_sha256" ]
+    else
+        /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0600 \
+            /etc/codex-dispatcher/config.toml "/opt/codex-dispatcher/config-backups/$config_old_sha256.toml"
+    fi
+fi
+
+record_phase runner_switch_intent
+runner_switch_started=1
+if /usr/bin/ssh -o BatchMode=yes codex-runner \
+    "/usr/bin/sudo -n /usr/bin/ln -sfn 'releases/$commit' /srv/codex-runner/current.next && /usr/bin/sudo -n /usr/bin/mv -Tf /srv/codex-runner/current.next /srv/codex-runner/current"; then
+    activated_runner=1
+else
+    observed_runner=$(/usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/readlink /srv/codex-runner/current 2>/dev/null || true)
+    [ "$observed_runner" = "releases/$commit" ] || exit 1
+    activated_runner=1
+fi
+receipt_write in_progress runner_switch_observed ''
+
+record_phase control_switch_intent
+control_switch_started=1
 /usr/bin/sudo -n /usr/bin/ln -sfn "$control_release" /opt/codex-dispatcher/current.next
 /usr/bin/sudo -n /usr/bin/mv -Tf /opt/codex-dispatcher/current.next /opt/codex-dispatcher/current
+activated_control=1
+receipt_write in_progress control_switch_observed ''
 
+record_phase units_install
 for unit in $control_units; do
     /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 \
         "$control_release/deploy/systemd/$unit" "/etc/systemd/system/$unit"
 done
 /usr/bin/ssh -o BatchMode=yes codex-runner \
     "/usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$runner_release/scripts/codex-runner-v1' /srv/codex-runner/bin/codex-runner-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$runner_release/scripts/codex-runner-capacity-v1' /srv/codex-runner/bin/codex-runner-capacity-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$runner_release/deploy/runner/codex-runner-capacity.service' /etc/systemd/system/codex-runner-capacity.service && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$runner_release/deploy/runner/codex-runner-capacity.timer' /etc/systemd/system/codex-runner-capacity.timer"
-
 /usr/bin/sudo -n /usr/bin/systemctl daemon-reload
 /usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n /usr/bin/systemctl daemon-reload
 /usr/bin/sudo -n /usr/bin/systemd-analyze verify \
@@ -240,12 +760,34 @@ done
     /etc/systemd/system/codex-dispatcher-health.timer \
     /etc/systemd/system/codex-dispatcher-restore-drill.service \
     /etc/systemd/system/codex-dispatcher-restore-drill.timer
-/usr/bin/ssh -o BatchMode=yes codex-runner \
-    /usr/bin/sudo -n /usr/bin/systemd-analyze verify \
+/usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n /usr/bin/systemd-analyze verify \
     /etc/systemd/system/codex-runner-capacity.service \
     /etc/systemd/system/codex-runner-capacity.timer
-/usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n /usr/bin/systemctl start codex-runner-capacity.service
 
-switched=0
-/usr/bin/printf '{"ok":true,"release_commit":"%s","archive_sha256":"%s","previous_control":"%s","previous_runner":"%s","runner_first":true,"timers_started":false,"requires_manual_sweep":true}\n' \
-    "$commit" "$expected_archive_sha256" "$previous_control" "$previous_runner"
+if [ "$seen_config" -eq 1 ]; then
+    record_phase config_install_intent
+    config_install_started=1
+    /usr/bin/sudo -n /usr/bin/install -o root -g codex-dispatcher -m 0640 \
+        "$candidate_config" /etc/codex-dispatcher/config.toml.next
+    /usr/bin/sudo -n /usr/bin/mv -Tf /etc/codex-dispatcher/config.toml.next \
+        /etc/codex-dispatcher/config.toml
+    config_applied=1
+    [ "$(/usr/bin/sudo -n /usr/bin/sha256sum /etc/codex-dispatcher/config.toml | /usr/bin/cut -d ' ' -f 1)" = "$config_new_sha256" ]
+    receipt_write in_progress config_install_observed ''
+fi
+
+record_phase runner_capacity
+/usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n /usr/bin/systemctl start \
+    codex-runner-capacity.service
+
+record_phase prepared
+for service in $control_services; do
+    /usr/bin/sudo -n /usr/bin/systemctl unmask --runtime "$service" >/dev/null
+done
+masked=0
+commit_intent=1
+committed=1
+receipt_write committed handoff_required ''
+receipt_committed=1
+/usr/bin/printf '{"ok":true,"release_commit":"%s","archive_sha256":"%s","receipt":"%s","previous_control":"%s","previous_runner":"%s","runner_first":true,"timers_started":false,"requires_manual_sweep":true}\n' \
+    "$commit" "$expected_archive_sha256" "$receipt" "$previous_control" "$previous_runner"
