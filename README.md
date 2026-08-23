@@ -70,6 +70,8 @@ Fixture target is the remote Linux Codex CLI executor, and the implementation no
   rate-limit evidence, so ordinary sweeps skip already-proved terminal WorkItems;
 - permanent open terminal Issues and exact-evidence task-branch reclamation after an explicitly
   configured retention interval, with prepared/delete/absence receipts and health projection.
+- a dedicated exact-target Fixture canary for terminal-branch delete receipt loss and absence
+  reconciliation without lowering the runtime retention policy.
 
 The Runner path has now been exercised against the private Fixture through the real pinned SSH
 transport and Codex CLI 0.147.0 using ChatGPT login. A migrated Issue binding completed PREPARE,

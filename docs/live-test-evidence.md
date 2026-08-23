@@ -16,8 +16,22 @@ The first schema-16 sweep completed the daily terminal GitHub audit with 77 read
 zero writes, and 55,366 milliseconds elapsed. It persisted the `terminal_github_audit` cursor; an
 ordinary follow-up used four read-only commands and approximately three to four seconds. Terminal
 Issues remain open. The configured branch retention is 2,592,000 seconds, and no branch was old
-enough for deletion, so the exact delete/lost-receipt path still requires a dedicated Fixture
-canary rather than a global retention reduction.
+enough for ordinary deletion.
+
+Commit `9d8850799bd143f810dc79b60e7280af931b7d0f` added a two-stage, exact-target Fixture canary without
+changing that global retention. Both hosts passed 562 tests before activation. The first stage bound
+Issue #38, WorkItem `wi_b1badef21a8c1d5b8c029c7c`, branch
+`codex/issue-38-b1badef21a8c`, and expected HEAD
+`56f0fc2f7a0a5030e32e9fb1c2f8613b91a41809`; it required ordinary recovery to be idle, persisted one
+PREPARED request with SHA-256 `48e06a578f0fd4857d05567c9db3ec033cec30f6ce21219ae30634d10c5075d6`,
+deleted only that exact ref, independently proved absence, and discarded the local receipt. Issue
+#38 remained open and completed, while PR #39 remained merged at the same head. The second guarded
+stage rejected any DELETE operation, observed the absent ref, and completed the same record as
+`reconciled_absent`. SQLite contains exactly one prepared and one completed cleanup event. Both
+mode-`0600` online backups passed integrity checks. Two subsequent ordinary sweeps returned `idle`
+with four GitHub reads and zero writes each. Final health reported one cleaned branch, zero pending
+or blocked cleanups, zero alerts, all four Control timers active, both Runner capacity admissions
+true, and approximately 74.1 GB available.
 
 The Runner capacity canary stopped the Dispatcher timer and raised only the protected
 `work_item_disk.host_reserve_bytes` above observed availability. Runner reported both Turn and

@@ -388,6 +388,38 @@ selected `sync_tracker_state`. The label stage read back `agent:completed` befor
 response. The comment timestamp preceded the completed-label event, Runner STATUS retained the
 same finished Turn/session, and final preflight plus two ordinary sweeps were idle.
 
+### 5.8 Exact terminal-branch delete receipt fixture
+
+Use only a completed, open Fixture Issue whose exact merged PR and immutable Runner archive or
+absence evidence have already been independently verified. Stop the Dispatcher timer and require
+the service to be inactive. Do not lower the configured retention or edit SQLite. Supply all three
+identities explicitly to both stages:
+
+```bash
+CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS=longwdl/codex-dispatcher-fixture \
+PYTHONPATH=src python3 -m codex_dispatcher.fixture_fault_cli \
+  --config /absolute/path/dispatcher.toml --issue ISSUE_NUMBER \
+  --work-item-id WORK_ITEM_ID --expected-head-sha FULL_SHA \
+  --fault terminal-branch-delete-receipt --apply --json
+
+CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 \
+CODEX_DISPATCHER_ENABLE_FIXTURE_FAULTS=longwdl/codex-dispatcher-fixture \
+PYTHONPATH=src python3 -m codex_dispatcher.fixture_fault_cli \
+  --config /absolute/path/dispatcher.toml --issue ISSUE_NUMBER \
+  --work-item-id WORK_ITEM_ID --expected-head-sha FULL_SHA \
+  --fault terminal-branch-delete-recovery --apply --json
+```
+
+When Slack is configured, keep its normal write gate and bot token available even though this path
+installs a fail-before-publish Slack guard. The first stage must report `receipt_lost`, branch
+absence, and cleanup `prepared`. Independently re-read the open completed Issue, merged PR head,
+absent ref, exact PREPARED SQLite record, and backup integrity before continuing. The recovery stage
+must report `branch_cleaned`, `reconciled_absent`, `fault_triggered=false`, and cleanup `completed`;
+its tracker wrapper rejects any second DELETE. Run one ordinary sweep and require `idle` before
+restoring timers. Never recreate the deleted ref after completion: doing so would conflict with the
+durable terminal cleanup record.
+
 ### 6. Slack outbound app
 
 The existing official Codex Slack binding is not the Dispatcher integration. A custom outbound-only
