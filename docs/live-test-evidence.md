@@ -3,6 +3,72 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Safe inactive-Turn abandonment and schema-18 release — 2026-08-23
+
+Commit `cc9ccab4f6679947b3d15957924bd0f25a95ee14`, archive SHA-256
+`fdeebc2e0fb95f2c856c2bb2c179b4f85b8c882260ea532176a3622ae7e1b331`, adds the protocol-v2
+inactive-Turn abandonment boundary. Both real Linux service accounts passed all 575 tests,
+compilation, shell checks, and unit verification before the Runner-first two-host handoff. The
+read-only release plan authorized no apply, performed zero state writes, and found no active
+service. The committed schema-v2 receipt retained the exact prior `c2e27b0` Control and Runner
+links, switched both links to `cc9ccab`, and stopped at `handoff_required` without starting a timer.
+
+Runner `STOP` is now abandonment-only: it is accepted only under the global Turn lock, only for
+protocol v2, and only after an exact final Docker inspection proves the bound generation container
+`stopped` or `absent`. Running, unavailable, malformed, legacy, or identity-drifted observations
+fail closed. The operation never calls Docker stop, kill, or remove. Control exposes a read-only
+plan and a separately double-gated apply; the schema-18 receipt, failed generation, blocked Turn,
+and blocked WorkItem commit atomically and replay idempotently. A lost STOP reply is recovered from
+the durable STATUS receipt without restarting Codex. Target-host tests exercised stopped/absent,
+observation failure, global-lock conflict, process-loss simulation, lost-response recovery, and
+repeated apply. No live Codex process was destroyed to manufacture acceptance evidence.
+
+The first post-release sweep migrated SQLite through migration 18 and returned `idle` with four
+GitHub reads, zero writes, zero failures, and 3,534 milliseconds elapsed. Direct and systemd health
+reported zero alerts, zero active or abandoned Turns, both Runner capacity admissions true, and
+approximately 74.1 GB available. The pre-activation backup and restore drill passed integrity,
+foreign-key, migration-1-through-18, and temporary-file cleanup checks. All four Control timers and
+the system-level Runner capacity timer were restored after the observed handoff.
+
+## Final Runner restart, remount, egress, and auth-status acceptance — 2026-08-23
+
+The final `cc9ccab` runtime was tested with the write Dispatcher and health timers stopped, zero
+active Turns, an acquirable Runner global lock, zero Docker containers, and Control backup
+`state-20260823T093213.279540Z.db` verified `integrity=ok`. All 19 retained WorkItems were already
+terminal and reclaimed, so no real WorkItem mount or auth copy was mutated for this acceptance.
+
+Restarting the rootless Docker user service preserved the exact `codex-egress` bridge and returned
+with zero containers. Credential-free host probes allowed `api.openai.com` only through the audited
+loopback proxy and denied direct public TCP/443, private, metadata, non-proxy loopback, a disallowed
+public hostname, and another local UID. The disallowed CONNECT added exactly one metadata-only
+audit record. Credential-free containers repeated proxy-only allow plus direct public, private,
+metadata, gateway, disallowed-proxy, and second-container denial. Stopping Squid denied both host
+and container proxy paths; after service restart, one immediate request encountered the readiness
+window, then listener read-back and bounded retry succeeded for both paths. Every probe container
+was removed and Docker returned to zero containers.
+
+An isolated temporary WorkItem-shaped Codex home ran the deployed fixed Docker login-status plan.
+Before and after the Runner host reboot it returned the exact ChatGPT-login success condition; the
+Runner-wide seed remained byte-identical, the status command did not change the isolated auth copy,
+and each temporary home was removed. This proves current authentication and writable isolation,
+not expiry-driven refresh. No token was expired, edited, printed, or logged, so natural token
+refresh deliberately remains an admission gate.
+
+The non-production Runner host then rebooted after a second zero-container and clean-unmount
+preflight. SSH disconnect and reconnect were both observed. Firewall, proxy, and rootless Docker
+started automatically; the rootless daemon again had zero containers. A dense 64 MiB ext4 fixture
+survived the reboot, remounted as `fuse.ext4` with `rw,nosuid,nodev,user_id=1002,group_id=1002`, and
+retained its marker. Clean unmount and read-only `e2fsck` passed before the exact fixture image and
+mount directory were deleted.
+
+After all five timers were restored, two ordinary sweeps were `idle`, each with four GitHub reads
+and zero writes. The fixed Runner capacity reply was protocol v2 with both admissions true and
+approximately 74.06 GB available. The intentionally stopped timers first produced the expected
+two-alert Slack episode; the final health run reported zero alerts and projected its recovery. The
+final Online Backup `state-20260823T095044.203108Z.db` is 585,728 bytes with integrity `ok`; its
+restore drill verified zero foreign-key violations, migrations 1 through 18, and exact temporary
+restore cleanup.
+
 ## Durable GitHub API metrics and cursor-age health — 2026-08-23
 
 Commit `c2e27b0a5b81b523c6ad4d72964505aa6605ff06`, archive SHA-256

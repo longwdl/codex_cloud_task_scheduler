@@ -200,14 +200,16 @@ successful Fixture admission does not authorize unattended use for another repos
 | Rootless daemon, image, mounts, cgroups, proxy and per-WorkItem disk | Live-proved; repeat after any relevant asset change | Requires the same exact target read-back |
 | Per-WorkItem writable auth plus host-only binding | Live-proved by Issue `#26`; seed and bindings stayed protected and stable across START/RESUME | Requires the same exact target read-back |
 | Natural token refresh | The layout permits isolated atomic replacement; never force expiry by editing a credential | Blocked until a version-specific refresh/rotation procedure preserves the seed and other WorkItems |
-| Runner/client timeout or process loss | Durable `executing` becomes unknown and blind replay is forbidden | Blocked until operator recovery/abandonment semantics are explicitly accepted for the repository |
-| Docker/host restart with no active Turn | Credential-free restart/remount probes passed before the latest auth/runtime release; repeat pending | Must be repeated after the final auth/runtime release |
-| Backup publication | Integrity and atomic publication passed; temporary SQLite sidecars must also be absent | Same requirement plus a restore drill |
+| Runner/client timeout or process loss | Protocol-v2 exact inactivity proof plus double-gated, idempotent operator abandonment is live-deployed; blind replay remains forbidden | Requires explicit repository-class approval for the same operator workflow; abandonment is never automatic |
+| Docker/host restart with no active Turn | Credential-free daemon/host restart, remount, egress, and isolated login-status probes passed after the final schema-18 runtime release | Requires the same exact release-bound read-back |
+| Backup publication | Final schema-18 backup and restore drill passed integrity, migration-ledger, foreign-key, and temporary-cleanup checks | Same exact backup and restore-drill requirement |
 
 Fixture-only timer activation completed only after the auth candidate was independently deployed,
 Issue `#26` proved the WorkItem auth binding without exposing its contents, the backup sidecar fix
-was live-verified, temporary administrative access was removed, and preflight plus repeated sweeps
-were idle. It does not satisfy the higher-value column.
+was live-verified, protocol-v2 inactivity abandonment was deployed, final restart/remount/egress
+probes passed, temporary administrative access was removed, and preflight plus repeated sweeps were
+idle. Natural expiry-driven token refresh remains unproved, and none of this automatically satisfies
+the higher-value column.
 
 Rollback keeps the Dispatcher timer disabled, stops the rootless user daemon, restores the previous
 Runner release/config/account binding, and uses read-only STATUS reconciliation. Preserve every

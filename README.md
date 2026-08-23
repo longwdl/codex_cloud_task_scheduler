@@ -90,8 +90,12 @@ The same host account is now forced through a loopback-only Squid CONNECT proxy 
 nftables OUTPUT table. Live probes proved exact OpenAI-domain allow, public-domain deny, direct
 TCP/DNS/UDP and private/metadata denial, metadata-only audit, fail-closed restart, and safe log
 rotation. Container-visible routing, cross-container denial, per-WorkItem ENOSPC/remount behavior,
-and the fixed 8 GiB disk admission boundary have also been exercised. Higher-value repositories
-remain prohibited pending the explicit auth/recovery matrix in `deploy/runner/DOCKER.md`.
+and the fixed 8 GiB disk admission boundary have also been exercised. After the final schema-18
+runtime release, credential-free Docker-daemon and host restart, remount, proxy fail-closed, direct
+network denial, and isolated login-status probes were repeated successfully. The auth seed stayed
+unchanged; natural expiry-driven token refresh was not forced and remains unproved. Higher-value
+repositories remain prohibited pending the explicit auth/recovery matrix in
+`deploy/runner/DOCKER.md`.
 The Fixture-only Dispatcher, backup, restore-drill, health, and Runner-capacity timers are enabled
 on the dedicated hosts. This activation does not admit another repository class.
 
