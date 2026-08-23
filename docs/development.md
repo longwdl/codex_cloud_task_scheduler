@@ -147,13 +147,15 @@ to the audited loopback proxy, the unprivileged proxy worker is restricted to re
 destinations, and private/metadata/direct paths fail closed. Configured Fixture Turns now use the
 reviewed rootless per-WorkItem container, container-visible proxy path, and bounded disk image.
 Every START and RESUME must pass the exact WorkItem ChatGPT login-status gate first; invalid auth
-blocks before Codex starts and requires explicit operator recovery. Higher-value repositories remain
-blocked by the repository-class recovery and exact target-readback admission matrix.
+blocks before Codex starts and requires explicit operator recovery. New claims now pass the explicit
+repository-class/runtime-profile matrix: only the Fixture recovery and exact-readback row is admitted
+by this release. `unclassified`, mismatched, and higher-value rows fail closed with bounded planner
+codes; configuration alone cannot admit the higher-value row, while existing recovery remains live.
 
 Explicitly deferred:
 
-- admission of higher-value repositories before the remaining repository-class recovery and
-  target-readback gates;
+- changing the hard-false higher-value matrix row before repository-class recovery and exact
+  target-readback acceptance is independently completed;
 - any dispatcher-initiated merge, deployment, release, or production access.
 
 The repository now includes the fixed Control Host wrapper, hardened `Type=oneshot` service,

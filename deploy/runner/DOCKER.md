@@ -205,6 +205,7 @@ successful Fixture admission does not authorize unattended use for another repos
 
 | Gate | Fixture-only unattended status | Higher-value repository status |
 |---|---|---|
+| Code admission | Requires repository class `fixture` plus runtime profiles `fixture-live-v1` and `fixture-exact-v1` | The `higher-value` matrix row is hard false in this release; configuration alone cannot enable it |
 | Rootless daemon, image, mounts, cgroups, proxy and per-WorkItem disk | Live-proved; repeat after any relevant asset change | Requires the same exact target read-back |
 | Per-WorkItem writable auth plus host-only binding | Live-proved by Issue `#26`; seed and bindings stayed protected and stable across START/RESUME | Requires the same exact target read-back |
 | Per-Turn ChatGPT authentication readiness | Exact WorkItem `codex login status` is mandatory immediately before every START and RESUME; invalid status blocks without starting Codex | Requires the same exact check and explicit operator re-login recovery; never blind retry |
@@ -219,6 +220,13 @@ probes passed, temporary administrative access was removed, and preflight plus r
 idle. Codex-managed token refresh is not a separate Dispatcher admission claim: every Turn must pass
 the exact WorkItem login-status gate, and none of this automatically satisfies the higher-value
 column.
+
+The protected Dispatcher TOML carries `repository_class` per repository and plural runtime
+`recovery_profiles`/`target_readback_profiles`. Missing legacy fields load as `unclassified` plus
+empty profile sets and reject every new claim with a bounded admission code. Profile mismatch is
+also a planner rejection. Recovery of an already persisted WorkItem is intentionally outside this
+gate: downgrading admission must stop new work without stranding an ambiguous Turn, archive, or
+external-write receipt.
 
 Rollback keeps the Dispatcher timer disabled, stops the rootless user daemon, restores the previous
 Runner release/config/account binding, and uses read-only STATUS reconciliation. Preserve every

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
+from codex_dispatcher.repository_admission import RepositoryClass
 from codex_dispatcher.ssh_preflight import (
     SshPreflightStatus,
     build_ssh_preflight_plan,
@@ -67,7 +69,17 @@ class SshPreflightPlanTests(unittest.TestCase):
         )
         self.store.create_work_item(item)
 
-        plan = build_ssh_preflight_plan(self.config, self.store, tracker)
+        admission_disabled = replace(
+            self.config,
+            repositories=(
+                replace(
+                    self.config.repositories[0],
+                    repository_class=RepositoryClass.UNCLASSIFIED,
+                ),
+            ),
+            repository_admission=None,
+        )
+        plan = build_ssh_preflight_plan(admission_disabled, self.store, tracker)
 
         self.assertIs(SshPreflightStatus.READY_RECOVERY, plan.status)
         self.assertIs(SshRecoveryAction.RESUME_PREPARATION, plan.recovery_action)

@@ -4,8 +4,19 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from codex_dispatcher.config import Config, RepositoryConfig, SchedulerConfig, ToolPins
+from codex_dispatcher.config import (
+    Config,
+    RepositoryAdmissionConfig,
+    RepositoryConfig,
+    SchedulerConfig,
+    ToolPins,
+)
 from codex_dispatcher.domain import Run
+from codex_dispatcher.repository_admission import (
+    RepositoryClass,
+    RepositoryRecoveryProfile,
+    RepositoryTargetReadbackProfile,
+)
 from codex_dispatcher.scheduler import build_dry_run_plan, build_ssh_dry_run_plan
 from codex_dispatcher.testing.fakes import Call, FakeTracker
 from codex_dispatcher.trackers.base import TaskState, TrackerTask
@@ -26,7 +37,12 @@ def make_config(*, global_max_active: int = 2, repository_max_active: int = 1) -
                 (),
                 ("alice",),
                 ("tests",),
+                RepositoryClass.FIXTURE,
             ),
+        ),
+        repository_admission=RepositoryAdmissionConfig(
+            frozenset({RepositoryRecoveryProfile.FIXTURE_LIVE_V1}),
+            frozenset({RepositoryTargetReadbackProfile.FIXTURE_EXACT_V1}),
         ),
     )
 
@@ -60,6 +76,56 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual((), plan.selected)
         self.assertEqual((), plan.rejected)
         self.assertEqual([Call("list_ready_tasks", ("owner/repo",))], tracker.calls)
+
+    def test_repository_admission_is_explicit_and_fail_closed(self) -> None:
+        tracker = FakeTracker()
+        tracker.ready_tasks = (make_task(1, executor_label="exec:ssh-cli"),)
+        base = make_config()
+
+        unclassified = replace(
+            base,
+            repositories=(
+                replace(
+                    base.repositories[0],
+                    repository_class=RepositoryClass.UNCLASSIFIED,
+                ),
+            ),
+        )
+        mismatched = replace(
+            base,
+            repository_admission=RepositoryAdmissionConfig(
+                frozenset({RepositoryRecoveryProfile.HIGHER_VALUE_LIVE_V1}),
+                frozenset({RepositoryTargetReadbackProfile.FIXTURE_EXACT_V1}),
+            ),
+        )
+        higher_value = replace(
+            base,
+            repositories=(
+                replace(
+                    base.repositories[0],
+                    repository_class=RepositoryClass.HIGHER_VALUE,
+                ),
+            ),
+            repository_admission=RepositoryAdmissionConfig(
+                frozenset({RepositoryRecoveryProfile.HIGHER_VALUE_LIVE_V1}),
+                frozenset({RepositoryTargetReadbackProfile.HIGHER_VALUE_EXACT_V1}),
+            ),
+        )
+
+        decisions = (
+            build_ssh_dry_run_plan(unclassified, tracker),
+            build_ssh_dry_run_plan(mismatched, tracker),
+            build_ssh_dry_run_plan(higher_value, tracker),
+        )
+
+        self.assertEqual(
+            [
+                "repository_class_unclassified",
+                "repository_recovery_profile_mismatch",
+                "repository_class_not_admitted",
+            ],
+            [decision.rejected[0].code for decision in decisions],
+        )
 
     def test_priority_is_stable_and_one_task_per_repository_is_selected(self) -> None:
         tracker = FakeTracker()

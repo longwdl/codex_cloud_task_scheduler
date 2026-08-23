@@ -808,8 +808,9 @@ Fixture Runner 已迁移到锁定、无 sudo、无附加组的 `codex-runner` �
 Codex tools、wrapper、Schema、配置和 SSH 授权由 root 管理。Codex 不再直接在 host 上执行：
 每个 WorkItem 使用 rootless Docker 容器、独立 ext4 image、repository/session home/auth copy、
 固定资源限制和 proxy-only egress；Docker socket、Runner-wide auth seed 和其他 WorkItem 均不挂载。
-该边界已完成 Fixture live 验收，但仍不等同于高价值仓库准入；剩余 attack/recovery gate 和
-repository-class admission matrix 未满足前，高价值仓库继续 fail closed。
+该边界已完成 Fixture live 验收，但仍不等同于高价值仓库准入；代码矩阵只放行显式 Fixture
+class/profile，higher-value 行保持 hard false。剩余 attack/recovery gate 未独立验收并通过新
+release 修改矩阵前，高价值仓库继续 fail closed，单独改 TOML 不能放行。
 
 ### 11.4 资源和保留
 

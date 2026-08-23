@@ -9,6 +9,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from codex_dispatcher.repository_admission import (
+    RepositoryClass,
+    RepositoryRecoveryProfile,
+    RepositoryTargetReadbackProfile,
+)
 from codex_dispatcher.slack_reporting import validate_slack_channel_id
 from codex_dispatcher.task_spec import TaskSpecError, is_hard_denied_path, normalize_repo_path
 
@@ -43,6 +48,13 @@ class RepositoryConfig:
     denied_paths: tuple[str, ...]
     maintainers: tuple[str, ...]
     required_checks: tuple[str, ...]
+    repository_class: RepositoryClass = RepositoryClass.UNCLASSIFIED
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryAdmissionConfig:
+    recovery_profiles: frozenset[RepositoryRecoveryProfile]
+    target_readback_profiles: frozenset[RepositoryTargetReadbackProfile]
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +117,7 @@ class Config:
     ssh_runtime: SshRuntimeConfig | None = None
     slack_runtime: SlackRuntimeConfig | None = None
     session_runtime: SessionRuntimeConfig | None = None
+    repository_admission: RepositoryAdmissionConfig | None = None
 
 
 def _expect_table(value: Any, path: str) -> dict[str, Any]:
@@ -225,6 +238,7 @@ def load_config(path: Path) -> Config:
         "ssh_runtime",
         "slack_runtime",
         "session_runtime",
+        "repository_admission",
     }
     missing_root = required_root - set(raw)
     if unknown_root:
@@ -260,16 +274,30 @@ def load_config(path: Path) -> Config:
         raise ValueError("repositories must be a non-empty array of tables")
 
     parsed_repositories: list[RepositoryConfig] = []
-    repository_keys = frozenset(
+    required_repository_keys = frozenset(
         {
             "slug", "base_branch", "cloud_environment_id", "max_active", "allowed_paths",
             "denied_paths", "maintainers", "required_checks",
         }
     )
+    optional_repository_keys = frozenset({"repository_class"})
     for index, raw_repository in enumerate(repositories):
         item_path = f"repositories[{index}]"
         repository = _expect_table(raw_repository, item_path)
-        _check_keys(repository, repository_keys, item_path)
+        unknown_repository_keys = (
+            set(repository) - required_repository_keys - optional_repository_keys
+        )
+        missing_repository_keys = required_repository_keys - set(repository)
+        if unknown_repository_keys:
+            raise ValueError(
+                f"{item_path} has unknown field(s): "
+                + ", ".join(sorted(unknown_repository_keys))
+            )
+        if missing_repository_keys:
+            raise ValueError(
+                f"{item_path} is missing required field(s): "
+                + ", ".join(sorted(missing_repository_keys))
+            )
         slug = _string(repository["slug"], f"{item_path}.slug")
         if slug.count("/") != 1 or any(
             not component or component.strip() != component or any(c.isspace() for c in component)
@@ -300,6 +328,14 @@ def load_config(path: Path) -> Config:
                 required_checks=_string_list(
                     repository["required_checks"], f"{item_path}.required_checks"
                 ),
+                repository_class=(
+                    _repository_class(
+                        repository["repository_class"],
+                        f"{item_path}.repository_class",
+                    )
+                    if "repository_class" in repository
+                    else RepositoryClass.UNCLASSIFIED
+                ),
             )
         )
 
@@ -320,6 +356,11 @@ def load_config(path: Path) -> Config:
         None
         if "session_runtime" not in raw
         else _parse_session_runtime(raw["session_runtime"])
+    )
+    repository_admission = (
+        None
+        if "repository_admission" not in raw
+        else _parse_repository_admission(raw["repository_admission"])
     )
     if ssh_runtime is not None and "ssh_version" not in tools:
         raise ValueError("tools.ssh_version is required when ssh_runtime is configured")
@@ -364,6 +405,54 @@ def load_config(path: Path) -> Config:
         ssh_runtime=ssh_runtime,
         slack_runtime=slack_runtime,
         session_runtime=session_runtime,
+        repository_admission=repository_admission,
+    )
+
+
+def _repository_class(value: Any, path: str) -> RepositoryClass:
+    raw = _string(value, path)
+    try:
+        return RepositoryClass(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{path} must be one of: "
+            + ", ".join(item.value for item in RepositoryClass)
+        ) from exc
+
+
+def _parse_repository_admission(value: Any) -> RepositoryAdmissionConfig:
+    table = _expect_table(value, "repository_admission")
+    _check_keys(
+        table,
+        frozenset({"recovery_profiles", "target_readback_profiles"}),
+        "repository_admission",
+    )
+    recovery_raw = _string_list(
+        table["recovery_profiles"], "repository_admission.recovery_profiles"
+    )
+    readback_raw = _string_list(
+        table["target_readback_profiles"],
+        "repository_admission.target_readback_profiles",
+    )
+    try:
+        recovery_profiles = frozenset(
+            RepositoryRecoveryProfile(item) for item in recovery_raw
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "repository_admission.recovery_profiles contains an unsupported profile"
+        ) from exc
+    try:
+        target_readback_profiles = frozenset(
+            RepositoryTargetReadbackProfile(item) for item in readback_raw
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "repository_admission.target_readback_profiles contains an unsupported profile"
+        ) from exc
+    return RepositoryAdmissionConfig(
+        recovery_profiles=recovery_profiles,
+        target_readback_profiles=target_readback_profiles,
     )
 
 

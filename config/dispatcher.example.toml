@@ -69,8 +69,15 @@ terminal_branch_retention_seconds = 2592000
 # request_timeout_seconds = 10
 # idempotency_contract = "client_msg_id-live-fixture-verified-v1"
 
+[repository_admission]
+# This release admits only the dedicated Fixture profile. Higher-value profile
+# strings remain fail-closed in the code matrix even if placed in this file.
+recovery_profiles = ["fixture-live-v1"]
+target_readback_profiles = ["fixture-exact-v1"]
+
 [[repositories]]
 slug = "longwdl/codex-dispatcher-fixture"
+repository_class = "fixture"
 base_branch = "main"
 cloud_environment_id = "6a7d9f7b8784819183c5c2e3691466e7"
 max_active = 1

@@ -498,11 +498,22 @@ Each WorkItem home contains its own writable auth copy so Codex can use atomic r
 host-only binding beside that home records the WorkItem and seed digest; the shared Runner auth seed,
 session/tool bindings, other WorkItems, and Control Host state remain outside the container mount.
 
+New claims also cross an explicit repository-class matrix before any claim write. Each repository is
+`unclassified`, `fixture`, or `higher-value`; omitted classification remains loadable for rollback
+compatibility but is not admissible. The protected runtime configuration supplies sets of reviewed
+recovery and exact-target-readback profiles, so mixed repository classes can eventually coexist
+without treating one profile as an implicit superset of another. This release admits only the exact
+`fixture + fixture-live-v1 + fixture-exact-v1` row. The higher-value profile names are parseable for
+configuration staging, but the immutable code matrix keeps that row false until a later reviewed
+release changes it. Existing WorkItem recovery runs before candidate selection and is never blocked
+by loss or downgrade of new-work admission.
+
 The runner still contains no production secrets, personal data, deployment credentials, inbound
 SSH key to the Control Host, or mounted Control Host filesystem. Published commits, GitHub state,
 Control Host SQLite, and Slack metadata remain outside its failure domain. Higher-value repositories
 remain prohibited until the outstanding attack and recovery acceptance in
-`deploy/runner/DOCKER.md` is complete; a successful private Fixture Turn is not a general admission.
+`deploy/runner/DOCKER.md` is complete and the code matrix is deliberately changed; a successful
+private Fixture Turn or a configuration-only profile change is not a general admission.
 
 ## Dependency policy
 

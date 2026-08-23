@@ -20,8 +20,13 @@ git_version = "2.45.0"
 gh_version = "2.60.0"
 codex_version = "0.1.0"
 
+[repository_admission]
+recovery_profiles = ["fixture-live-v1"]
+target_readback_profiles = ["fixture-exact-v1"]
+
 [[repositories]]
 slug = "owner/repo"
+repository_class = "fixture"
 base_branch = "main"
 cloud_environment_id = "env-1"
 max_active = 1
@@ -97,8 +102,33 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(2, config.scheduler.global_max_active)
         self.assertEqual(86400, config.scheduler.terminal_full_scan_interval_seconds)
         self.assertEqual("owner/repo", config.repositories[0].slug)
+        self.assertEqual("fixture", config.repositories[0].repository_class.value)
         self.assertEqual((), config.repositories[0].denied_paths)
+        assert config.repository_admission is not None
+        self.assertEqual(
+            {"fixture-live-v1"},
+            {item.value for item in config.repository_admission.recovery_profiles},
+        )
+        self.assertEqual(
+            {"fixture-exact-v1"},
+            {
+                item.value
+                for item in config.repository_admission.target_readback_profiles
+            },
+        )
         self.assertIsNone(config.session_runtime)
+
+        unclassified = self._load(
+            VALID.replace(
+                '[repository_admission]\nrecovery_profiles = ["fixture-live-v1"]\n'
+                'target_readback_profiles = ["fixture-exact-v1"]\n\n',
+                "",
+            ).replace('repository_class = "fixture"\n', "")
+        )
+        self.assertIsNone(unclassified.repository_admission)
+        self.assertEqual(
+            "unclassified", unclassified.repositories[0].repository_class.value
+        )
 
         configured = self._load(
             VALID.replace(
@@ -122,6 +152,16 @@ class ConfigTests(unittest.TestCase):
                 VALID.replace(
                     'codex_version = "0.1.0"',
                     'codex_version = "0.1.0"\ntoken = "secret"',
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "unsupported profile"):
+            self._load(
+                VALID.replace("fixture-live-v1", "self-attested-production-v1")
+            )
+        with self.assertRaisesRegex(ValueError, "repository_class must be one of"):
+            self._load(
+                VALID.replace(
+                    'repository_class = "fixture"', 'repository_class = "prod"'
                 )
             )
 

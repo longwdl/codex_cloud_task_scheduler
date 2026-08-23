@@ -9,6 +9,11 @@ from typing import Iterable
 
 from codex_dispatcher.config import Config, RepositoryConfig
 from codex_dispatcher.domain import Run
+from codex_dispatcher.repository_admission import (
+    RepositoryRecoveryProfile,
+    RepositoryTargetReadbackProfile,
+    evaluate_repository_admission,
+)
 from codex_dispatcher.task_spec import TaskSpecError, is_path_allowed, parse_task_spec
 from codex_dispatcher.trackers.base import TaskState, Tracker, TrackerTask
 
@@ -86,7 +91,19 @@ def _build_dry_run_plan(
     for repository in config.repositories:
         for task in tracker.list_ready_tasks(repository.slug):
             candidate, error = _validate_candidate(
-                task, repository, executor_label=executor_label
+                task,
+                repository,
+                executor_label=executor_label,
+                recovery_profiles=(
+                    frozenset()
+                    if config.repository_admission is None
+                    else config.repository_admission.recovery_profiles
+                ),
+                target_readback_profiles=(
+                    frozenset()
+                    if config.repository_admission is None
+                    else config.repository_admission.target_readback_profiles
+                ),
             )
             if error is not None:
                 rejected.append(Rejection(task.repository, task.issue_number, error))
@@ -130,9 +147,18 @@ def _validate_candidate(
     repository: RepositoryConfig,
     *,
     executor_label: str,
+    recovery_profiles: frozenset[RepositoryRecoveryProfile],
+    target_readback_profiles: frozenset[RepositoryTargetReadbackProfile],
 ) -> tuple[_Candidate | None, str | None]:
     if task.repository != repository.slug:
         return None, "repository_mismatch"
+    admission = evaluate_repository_admission(
+        repository.repository_class,
+        recovery_profiles,
+        target_readback_profiles,
+    )
+    if not admission.admitted:
+        return None, admission.code
     if task.state is not TaskState.READY or not task.is_open:
         return None, "not_open_ready"
     status_labels = [label for label in task.labels if label.startswith("agent:")]
