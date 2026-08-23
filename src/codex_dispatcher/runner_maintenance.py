@@ -158,8 +158,8 @@ class _DockerInspector:
         self._docker_path = docker_path
         self._docker_config = docker_config
         _protected_executable(Path(docker_path))
-        _protected_directory(Path(docker_config))
-        _protected_docker_socket(docker_host_path)
+        docker_uid = _protected_docker_socket(docker_host_path)
+        _protected_runtime_directory(Path(docker_config), docker_uid)
         self._environment = {
             "HOME": "/var/lib/codex-runner/home",
             "XDG_RUNTIME_DIR": str(Path(self._docker_host.removeprefix("unix://")).parent),
@@ -334,7 +334,7 @@ def _protected_executable(path: Path) -> None:
         raise RunnerAssetReclamationError("Docker executable is unsafe")
 
 
-def _protected_docker_socket(path: Path) -> None:
+def _protected_docker_socket(path: Path) -> int:
     metadata = path.stat(follow_symlinks=False)
     if (
         path.is_symlink()
@@ -342,6 +342,18 @@ def _protected_docker_socket(path: Path) -> None:
         or metadata.st_mode & 0o007
     ):
         raise RunnerAssetReclamationError("Docker socket is unsafe")
+    return metadata.st_uid
+
+
+def _protected_runtime_directory(path: Path, expected_uid: int) -> None:
+    metadata = path.stat(follow_symlinks=False)
+    if (
+        path.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != expected_uid
+        or metadata.st_mode & 0o077
+    ):
+        raise RunnerAssetReclamationError("Docker CLI directory is unsafe")
 
 
 @contextmanager
