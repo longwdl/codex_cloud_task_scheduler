@@ -3,6 +3,100 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Trusted absence, Sol routing, retention, and monitoring — 2026-08-23
+
+The owner authorized the remaining historical cleanup and all Fixture-only review/merge actions.
+Issue #1 was migrated from its stale `exec:cloud` label to `exec:ssh-cli` after the trusted
+`agent:discard` event `29861482832`. WorkItem `wi_3a97e3d99c30bdcbb50501dd` was durably classified
+`abandoned` at HEAD `b992e1e52c8f11ed2e6776f78ec20bb1667a8fb5`, archived, and reclaimed 131,688 bytes. The six
+superseded Draft PRs #3, #5, #7, #9, #11, and #17 were then closed without deleting or rewriting
+their remote branches; their original head SHAs remain available for audit and rollback.
+
+Commit `4e27117f654af027ea5884fbb4c1c1d933f0b4ec` added protocol-v2 trusted Runner absence receipts and
+schema-13 Control evidence. `PROVE_ABSENCE` runs under the Runner global lock, requires registry,
+workspace, archive/absence staging, image, and mount state all to be absent, writes a permanent
+mode-`0600` receipt, and blocks later recreation. Issue #24 / WorkItem
+`wi_59089b353ecda298b262a063` is bound to expected HEAD
+`acb03e63f045ec5642d9e19fe44b659b53834284` and evidence SHA-256
+`7e6971d83f3bf4318f631ea11d7b93b8727bc5bf9dfc14800b7b80e0ae32ac83`. Issue #26 / WorkItem
+`wi_6bee727d623ec61a2d31cf11` is bound to HEAD
+`2d7a71747d2ca11291fae8f4dd64145b8818948d` and evidence SHA-256
+`4ef0efd7235f1245d15f840e64efd276d56e6a9d66d125e0e495746c074e2025`. Control and Runner hashes
+matched exactly; the deliberately `prepared` archive rows plus absence rows are terminal and cannot
+be selected again.
+
+The autonomous routing canary used Fixture Issue
+[`#38`](https://github.com/longwdl/codex-dispatcher-fixture/issues/38), WorkItem
+`wi_b1badef21a8c1d5b8c029c7c`, and branch `codex/issue-38-b1badef21a8c`. The Issue specified neither
+an agent nor a model. The policy-pinned root session `01a02c79-2d93-7351-9463-45244d672e60` ran
+`gpt-5.6-sol` at `xhigh` and autonomously delegated two independent read-only checks to
+`spark_worker` / `gpt-5.3-codex-spark` at `medium`: child sessions
+`01a02c79-a396-73e0-ab4a-c202e3bc85f8` and `01a02c79-b61e-7de3-922d-a3eec90650ad` used 21,999 and
+38,449 tokens. The canonical delegation receipt SHA-256 is
+`ab7f87077813cd02faa6e2b30b2e08fcd4abf7efff1e48559c8ba5691bbae3f6`. The Implementation Turn
+published HEAD `56f0fc2f7a0a5030e32e9fb1c2f8613b91a41809`; mandatory fresh Audit generation 2 used distinct
+session `01a02c90-0d10-74d2-af57-0e57cc8cf7ac`, started and finished at that same head, and has
+delegation receipt SHA-256 `4623f7a6a8abe62d7ed134563475aa296532dc8274bbf719bf2ac09ee9dc74fa`.
+
+The first complete canary exposed three fail-closed integration gaps before any merge. Commit
+`cbfe210f079f78dfe4a731d2327b500772b2b6e7` creates or recovers the single Draft PR before the
+completion gate so a pull-request-triggered Actions workflow can exist. Commit
+`fd2f43bdab8ae8d4c6a7fee2c53eda19228a86e8` permits only fresh Audit planning/handoff to validate
+the intentionally still-running Issue state. Commit `f98a5128466991b140223866c140eda494948766`
+routes an operator-reactivated, already-passed implementation gate directly to its pending fresh
+Audit instead of replaying Implementation. No failed attempt started a second Implementation Turn.
+
+Draft PR [`#39`](https://github.com/longwdl/codex-dispatcher-fixture/pull/39) changed exactly one
+README marker line. Actions run
+[`32613681474`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32613681474) completed
+successfully at the exact head above. After independent read-back it was marked Ready and merged by
+the explicitly authorized operator action; merge commit was
+`61923129f4321680f602116c621539851fe6edbb`. The next recovery-first sweep projected Issue #38 to
+`agent:completed` without another Turn.
+
+With a fresh protected SQLite Online Backup and no active Turn, Control temporarily set
+`completed_retention_seconds=1`. The only eligible completed WorkItem was #38. One normal sweep
+returned `archived`; Control receipt SHA-256 is
+`ed39a4d9edc788d55818976ae46258a871fa968ea8e35a623a87a971a62a039a`, Runner archived at
+`2026-08-23T03:09:03.814453+00:00`, and exactly 8,589,934,592 bytes were reclaimed. The mode-`0600`
+v2 `bounded_image` tombstone and permanent registry remain; image, workspace, mount, staging, and
+container state are absent. Available Runner space rose from 65,456,357,376 to 74,046,369,792 bytes
+and filesystem use fell from 19% to 9%. Live retention was then atomically set to the reviewed
+normal value `604800` seconds (seven days), configuration SHA-256
+`7b928c853bf6fd81c8d5473168715a5874bd1cef172c67a055873f57fcb93694`.
+
+Commit `f38959a820be99296e723d8c8dd6202c9d690d02` added credential-free, network-isolated, read-only
+15-minute monitoring. Control checks SQLite integrity/foreign keys, active-Turn age, 24-hour blocked
+WorkItems, 15-minute archive pending, ambiguous/blocked archives, overdue disposition/retention,
+and a fixed systemd unit allowlist. Runner exits nonzero unless its reserve and one additional
+8-GiB image remain admissible. Its exact Git archive SHA-256 was
+`f728796f6fb65e42eecf47921e588b58edf690d979f72d9c5d35cc8cafbe2870`. All 534 local tests,
+`compileall`, wrapper syntax, and diff checks passed. Exact archive copies passed the same 534 tests,
+compilation, and wrapper checks under both real service accounts after using their protected,
+service-owned validation roots and the unit-equivalent `umask 077`; earlier attempts failed only
+because administrator cwd/TMPDIR ownership or `umask 0002` intentionally violated existing test
+preconditions.
+
+Runner switched first, then Control. The first real Runner capacity service reported
+74,033,803,264 available bytes, both admissions true, and zero shortfall. The first Control health
+service reported 19 WorkItems, 17 archived records, two absence reconciliations, zero active Turns,
+zero blocked/pending/ambiguous archives, zero alerts, `integrity=ok`, zero foreign-key violations,
+and all dispatcher, backup, and health timers loaded/enabled/active. The concurrently activating
+normal dispatcher oneshot was permitted and later returned strict `idle`. Both hosts run the same
+runtime release `f38959a`; systemd verification emitted only unrelated pre-existing vendor-unit
+warnings.
+
+Final hygiene removed 20 old Control releases and 29 old Runner releases, leaving the current
+release plus `f98a512` and `fd2f43b` rollback anchors on each host. The initial backup cleanup
+removed 161 old SQLite backup/sidecar files (14,512,128 bytes; deletion-manifest SHA-256
+`d8ce4a3bd7feca32c6e72c38e34ce65d60772ec1dc0d7e7c60004b3391dcd18e`) only after validating all
+retained databases. A final successful Online Backup then rotated out the oldest post-migration
+copy and removed the two transient read-only-validation sidecars. Eight mode-`0600` backups remain:
+the schema-13 pre-migration boundary `state-20260822T185953.695987Z.db` and the seven newest complete
+backups through `state-20260823T034617.871533Z.db`. Release directories are recoverable from Git;
+deleted database copies and the reclaimed #38 image are not, so rollback uses one of the retained
+validated backups and never only an old binary symlink.
+
 ## Completed WorkItem live reclamation canary — 2026-08-23
 
 The first real reclamation canary used completed Fixture Issue
