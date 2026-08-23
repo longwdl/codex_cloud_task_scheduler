@@ -134,6 +134,7 @@ control_validation=/var/lib/codex-dispatcher/release-validation-$short_commit
 runner_validation=/srv/codex-runner/run/release-validation-$short_commit
 runner_archive=/var/tmp/codex-dispatcher-release-$commit.tar
 runner_output_schema=/srv/codex-runner/etc/agent-result.schema.json
+runner_audit_output_schema=/srv/codex-runner/etc/agent-result-audit.schema.json
 runner_schema_backup_root=/srv/codex-runner/schema-backups
 control_units='codex-dispatcher.service codex-dispatcher.timer codex-dispatcher-backup.service codex-dispatcher-backup.timer codex-dispatcher-health.service codex-dispatcher-health.timer codex-dispatcher-restore-drill.service codex-dispatcher-restore-drill.timer'
 control_services='codex-dispatcher.service codex-dispatcher-health.service codex-dispatcher-backup.service codex-dispatcher-restore-drill.service'
@@ -321,6 +322,15 @@ if [ "$mode" = rollback ]; then
             exit 1
         }
     fi
+    runner_audit_schema_applied=$(receipt_field runner_audit_schema_applied)
+    if [ "$runner_audit_schema_applied" = 1 ]; then
+        current_runner_audit_schema_sha=$(/usr/bin/ssh -o BatchMode=yes codex-runner \
+            "/usr/bin/sudo -n /usr/bin/sha256sum '$runner_audit_output_schema' | /usr/bin/cut -d ' ' -f 1")
+        [ "$current_runner_audit_schema_sha" = "$(receipt_field runner_audit_schema_new_sha256)" ] || {
+            printf '%s\n' 'Runner Audit output schema changed after activation; automatic rollback is forbidden' >&2
+            exit 1
+        }
+    fi
     receipt_update_existing rollback_in_progress rollback_intent '' rollback
     /usr/bin/sudo -n /usr/bin/ln -sfn "$previous_control" /opt/codex-dispatcher/current.rollback
     /usr/bin/sudo -n /usr/bin/mv -Tf /opt/codex-dispatcher/current.rollback /opt/codex-dispatcher/current
@@ -338,6 +348,22 @@ if [ "$mode" = rollback ]; then
         /usr/bin/sudo -n /usr/bin/mv -Tf /etc/codex-dispatcher/config.toml.rollback \
             /etc/codex-dispatcher/config.toml
         [ "$(/usr/bin/sudo -n /usr/bin/sha256sum /etc/codex-dispatcher/config.toml | /usr/bin/cut -d ' ' -f 1)" = "$old_config_sha" ]
+    fi
+    if [ "$runner_audit_schema_applied" = 1 ]; then
+        runner_audit_schema_existed=$(receipt_field runner_audit_schema_existed)
+        if [ "$runner_audit_schema_existed" = 1 ]; then
+            old_runner_audit_schema_sha=$(receipt_field runner_audit_schema_old_sha256)
+            validate_hex "$old_runner_audit_schema_sha" 64 || exit 1
+            runner_audit_schema_uid=$(receipt_field runner_audit_schema_previous_uid)
+            runner_audit_schema_gid=$(receipt_field runner_audit_schema_previous_gid)
+            runner_audit_schema_mode=$(receipt_field runner_audit_schema_previous_mode)
+            /usr/bin/ssh -o BatchMode=yes codex-runner \
+                "/usr/bin/sudo -n /usr/bin/install -o '$runner_audit_schema_uid' -g '$runner_audit_schema_gid' -m '$runner_audit_schema_mode' '$runner_schema_backup_root/$old_runner_audit_schema_sha.json' '$runner_audit_output_schema.rollback' && /usr/bin/sudo -n /usr/bin/mv -Tf '$runner_audit_output_schema.rollback' '$runner_audit_output_schema' && [ \"\$(/usr/bin/sudo -n /usr/bin/sha256sum '$runner_audit_output_schema' | /usr/bin/cut -d ' ' -f 1)\" = '$old_runner_audit_schema_sha' ]"
+        else
+            [ "$runner_audit_schema_existed" = 0 ] || exit 1
+            /usr/bin/ssh -o BatchMode=yes codex-runner \
+                "/usr/bin/sudo -n /usr/bin/rm -f '$runner_audit_output_schema' && ! /usr/bin/sudo -n /usr/bin/test -e '$runner_audit_output_schema' && ! /usr/bin/sudo -n /usr/bin/test -L '$runner_audit_output_schema'"
+        fi
     fi
     if [ "$runner_schema_applied" = 1 ]; then
         old_runner_schema_sha=$(receipt_field runner_schema_old_sha256)
@@ -470,6 +496,8 @@ config_applied=0
 config_install_started=0
 runner_schema_applied=0
 runner_schema_install_started=0
+runner_audit_schema_applied=0
+runner_audit_schema_install_started=0
 runner_switch_started=0
 control_switch_started=0
 config_old_sha256=
@@ -482,6 +510,12 @@ runner_schema_new_sha256=
 runner_schema_previous_uid=
 runner_schema_previous_gid=
 runner_schema_previous_mode=
+runner_audit_schema_existed=0
+runner_audit_schema_old_sha256=
+runner_audit_schema_new_sha256=
+runner_audit_schema_previous_uid=
+runner_audit_schema_previous_gid=
+runner_audit_schema_previous_mode=
 current_phase=arguments
 active_timers_before=
 dispatcher_invocation_id_before=
@@ -509,7 +543,11 @@ receipt_write() {
         "$runner_schema_applied" "$runner_schema_old_sha256" \
         "$runner_schema_new_sha256" "$runner_schema_previous_uid" \
         "$runner_schema_previous_gid" "$runner_schema_previous_mode" \
-        "$dispatcher_invocation_id_before" "$active_timers_before" "$started_at" <<'PY'
+        "$runner_audit_schema_applied" "$runner_audit_schema_existed" \
+        "$runner_audit_schema_old_sha256" "$runner_audit_schema_new_sha256" \
+        "$runner_audit_schema_previous_uid" "$runner_audit_schema_previous_gid" \
+        "$runner_audit_schema_previous_mode" "$dispatcher_invocation_id_before" \
+        "$active_timers_before" "$started_at" <<'PY'
 import json, os, pathlib, sys, tempfile
 path = pathlib.Path(sys.argv[1])
 data = {"schema_version": 2, "kind": "codex_dispatcher_release",
@@ -528,9 +566,16 @@ data = {"schema_version": 2, "kind": "codex_dispatcher_release",
     "runner_schema_previous_uid": sys.argv[23] or None,
     "runner_schema_previous_gid": sys.argv[24] or None,
     "runner_schema_previous_mode": sys.argv[25] or None,
-    "dispatcher_invocation_id_before": sys.argv[26],
-    "active_timers_before": sys.argv[27].split(), "timers_started": False,
-    "requires_manual_sweep": True, "started_at": sys.argv[28]}
+    "runner_audit_schema_applied": sys.argv[26] == "1",
+    "runner_audit_schema_existed": sys.argv[27] == "1",
+    "runner_audit_schema_old_sha256": sys.argv[28] or None,
+    "runner_audit_schema_new_sha256": sys.argv[29] or None,
+    "runner_audit_schema_previous_uid": sys.argv[30] or None,
+    "runner_audit_schema_previous_gid": sys.argv[31] or None,
+    "runner_audit_schema_previous_mode": sys.argv[32] or None,
+    "dispatcher_invocation_id_before": sys.argv[33],
+    "active_timers_before": sys.argv[34].split(), "timers_started": False,
+    "requires_manual_sweep": True, "started_at": sys.argv[35]}
 data["updated_at"] = __import__("datetime").datetime.now(
     __import__("datetime").timezone.utc).isoformat().replace("+00:00", "Z")
 fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -602,12 +647,33 @@ cleanup() {
                 rollback_ok=0
             fi
         fi
+        if [ "$runner_audit_schema_install_started" -eq 1 ] && \
+                [ "$runner_audit_schema_applied" -eq 0 ]; then
+            observed_runner_audit_schema=$(/usr/bin/ssh -o BatchMode=yes codex-runner \
+                "/usr/bin/sudo -n /usr/bin/sha256sum '$runner_audit_output_schema' 2>/dev/null | /usr/bin/cut -d ' ' -f 1" || true)
+            if [ "$observed_runner_audit_schema" = "$runner_audit_schema_new_sha256" ]; then
+                runner_audit_schema_applied=1
+            elif [ "$runner_audit_schema_existed" -eq 1 ]; then
+                [ "$observed_runner_audit_schema" = "$runner_audit_schema_old_sha256" ] || rollback_ok=0
+            elif [ -n "$observed_runner_audit_schema" ]; then
+                rollback_ok=0
+            fi
+        fi
         if [ "$config_applied" -eq 1 ]; then
             /usr/bin/sudo -n /usr/bin/install -o "$config_previous_uid" -g "$config_previous_gid" \
                 -m "$config_previous_mode" "/opt/codex-dispatcher/config-backups/$config_old_sha256.toml" \
                 /etc/codex-dispatcher/config.toml.rollback && \
             /usr/bin/sudo -n /usr/bin/mv -Tf /etc/codex-dispatcher/config.toml.rollback \
                 /etc/codex-dispatcher/config.toml || rollback_ok=0
+        fi
+        if [ "$runner_audit_schema_applied" -eq 1 ]; then
+            if [ "$runner_audit_schema_existed" -eq 1 ]; then
+                /usr/bin/ssh -o BatchMode=yes codex-runner \
+                    "/usr/bin/sudo -n /usr/bin/install -o '$runner_audit_schema_previous_uid' -g '$runner_audit_schema_previous_gid' -m '$runner_audit_schema_previous_mode' '$runner_schema_backup_root/$runner_audit_schema_old_sha256.json' '$runner_audit_output_schema.rollback' && /usr/bin/sudo -n /usr/bin/mv -Tf '$runner_audit_output_schema.rollback' '$runner_audit_output_schema'" || rollback_ok=0
+            else
+                /usr/bin/ssh -o BatchMode=yes codex-runner \
+                    "/usr/bin/sudo -n /usr/bin/rm -f '$runner_audit_output_schema' && ! /usr/bin/sudo -n /usr/bin/test -e '$runner_audit_output_schema' && ! /usr/bin/sudo -n /usr/bin/test -L '$runner_audit_output_schema'" || rollback_ok=0
+            fi
         fi
         if [ "$runner_schema_applied" -eq 1 ]; then
             /usr/bin/ssh -o BatchMode=yes codex-runner \
@@ -770,6 +836,30 @@ runner_schema_previous_mode=$(/usr/bin/ssh -o BatchMode=yes codex-runner \
 /usr/bin/ssh -o BatchMode=yes codex-runner \
     "/usr/bin/sudo -n /usr/bin/install -d -o root -g root -m 0700 '$runner_schema_backup_root' && if /usr/bin/sudo -n /usr/bin/test -e '$runner_schema_backup_root/$runner_schema_old_sha256.json'; then [ \"\$(/usr/bin/sudo -n /usr/bin/sha256sum '$runner_schema_backup_root/$runner_schema_old_sha256.json' | /usr/bin/cut -d ' ' -f 1)\" = '$runner_schema_old_sha256' ]; else /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0600 '$runner_output_schema' '$runner_schema_backup_root/$runner_schema_old_sha256.json'; fi"
 
+record_phase runner_audit_schema_validate
+runner_audit_schema_new_sha256=$(/usr/bin/ssh -o BatchMode=yes codex-runner \
+    "/usr/bin/sudo -n /usr/bin/sha256sum '$runner_release/config/agent-result-audit.schema.json' | /usr/bin/cut -d ' ' -f 1")
+validate_hex "$runner_audit_schema_new_sha256" 64
+if /usr/bin/ssh -o BatchMode=yes codex-runner \
+        "/usr/bin/sudo -n /usr/bin/test -e '$runner_audit_output_schema' || /usr/bin/sudo -n /usr/bin/test -L '$runner_audit_output_schema'"; then
+    runner_audit_schema_existed=1
+    /usr/bin/ssh -o BatchMode=yes codex-runner \
+        "/usr/bin/sudo -n /usr/bin/test -f '$runner_audit_output_schema' && ! /usr/bin/sudo -n /usr/bin/test -L '$runner_audit_output_schema'"
+    runner_audit_schema_old_sha256=$(/usr/bin/ssh -o BatchMode=yes codex-runner \
+        "/usr/bin/sudo -n /usr/bin/sha256sum '$runner_audit_output_schema' | /usr/bin/cut -d ' ' -f 1")
+    validate_hex "$runner_audit_schema_old_sha256" 64
+    runner_audit_schema_previous_uid=$(/usr/bin/ssh -o BatchMode=yes codex-runner \
+        /usr/bin/sudo -n /usr/bin/stat -c %u "$runner_audit_output_schema")
+    runner_audit_schema_previous_gid=$(/usr/bin/ssh -o BatchMode=yes codex-runner \
+        /usr/bin/sudo -n /usr/bin/stat -c %g "$runner_audit_output_schema")
+    runner_audit_schema_previous_mode=$(/usr/bin/ssh -o BatchMode=yes codex-runner \
+        /usr/bin/sudo -n /usr/bin/stat -c %a "$runner_audit_output_schema")
+    /usr/bin/ssh -o BatchMode=yes codex-runner \
+        "/usr/bin/sudo -n /usr/bin/install -d -o root -g root -m 0700 '$runner_schema_backup_root' && if /usr/bin/sudo -n /usr/bin/test -e '$runner_schema_backup_root/$runner_audit_schema_old_sha256.json'; then [ \"\$(/usr/bin/sudo -n /usr/bin/sha256sum '$runner_schema_backup_root/$runner_audit_schema_old_sha256.json' | /usr/bin/cut -d ' ' -f 1)\" = '$runner_audit_schema_old_sha256' ]; else /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0600 '$runner_audit_output_schema' '$runner_schema_backup_root/$runner_audit_schema_old_sha256.json'; fi"
+else
+    runner_audit_schema_existed=0
+fi
+
 if [ "$seen_config" -eq 1 ]; then
     record_phase config_validate
     /usr/bin/sudo -n /usr/bin/env -i HOME=/var/lib/codex-dispatcher \
@@ -825,6 +915,12 @@ runner_schema_install_started=1
     "/usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$runner_release/config/agent-result.schema.json' '$runner_output_schema.next' && /usr/bin/sudo -n /usr/bin/mv -Tf '$runner_output_schema.next' '$runner_output_schema' && [ \"\$(/usr/bin/sudo -n /usr/bin/sha256sum '$runner_output_schema' | /usr/bin/cut -d ' ' -f 1)\" = '$runner_schema_new_sha256' ]"
 runner_schema_applied=1
 receipt_write in_progress runner_schema_install_observed ''
+record_phase runner_audit_schema_install_intent
+runner_audit_schema_install_started=1
+/usr/bin/ssh -o BatchMode=yes codex-runner \
+    "/usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$runner_release/config/agent-result-audit.schema.json' '$runner_audit_output_schema.next' && /usr/bin/sudo -n /usr/bin/mv -Tf '$runner_audit_output_schema.next' '$runner_audit_output_schema' && [ \"\$(/usr/bin/sudo -n /usr/bin/sha256sum '$runner_audit_output_schema' | /usr/bin/cut -d ' ' -f 1)\" = '$runner_audit_schema_new_sha256' ]"
+runner_audit_schema_applied=1
+receipt_write in_progress runner_audit_schema_install_observed ''
 /usr/bin/sudo -n /usr/bin/systemctl daemon-reload
 /usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n /usr/bin/systemctl daemon-reload
 /usr/bin/sudo -n /usr/bin/systemd-analyze verify \

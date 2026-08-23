@@ -21,6 +21,7 @@ from codex_dispatcher.executors.codex_docker import (
     DOCKER_NETWORK_SUBNET,
     ROOTLESS_HOST_PROXY_URL,
     DockerCodexRuntime,
+    build_docker_codex_plan as plan_docker_turn,
 )
 from codex_dispatcher.command_runner import BinaryCommandResult, CommandResult
 from codex_dispatcher.codex_jsonl import CodexJsonlError
@@ -256,6 +257,7 @@ def _v2_request(
     generation_id: str = GENERATION_ONE_ID,
     generation: int = 1,
     session_id: str | None = None,
+    session_role: str | None = None,
 ) -> RunnerRequest:
     return RunnerRequest(
         operation,
@@ -268,6 +270,7 @@ def _v2_request(
         session_generation=generation,
         agent_policy_digest=policy_digest,
         version=NEXT_PROTOCOL_VERSION,
+        session_role=session_role,
     )
 
 
@@ -326,11 +329,15 @@ class RunnerDockerExecutionTests(unittest.TestCase):
         schema = root / "agent-result.schema.json"
         schema.write_text("{}\n", encoding="utf-8")
         schema.chmod(0o600)
+        audit_schema = root / "agent-result-audit.schema.json"
+        audit_schema.write_text("{}\n", encoding="utf-8")
+        audit_schema.chmod(0o600)
         turns = RunnerTurnExecutor(
             workspace=workspace,
             codex_path=codex,
             codex_home=shared_home,
             output_schema=schema,
+            audit_output_schema=audit_schema,
             timeout_seconds=10,
             egress_proxy_url="http://127.0.0.1:3128",
             docker_runtime=runtime,
@@ -993,6 +1000,47 @@ class RunnerDockerExecutionTests(unittest.TestCase):
                 ["auth", "turn", "auth", "turn"],
                 call_log.read_text().splitlines(),
             )
+
+    def test_v2_audit_uses_audit_schema_and_readonly_repository(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
+            root = Path(temp_dir)
+            policy = _fixture_policy(root)
+            _, turns, base_sha, _, socket_path, listener = self._setup(
+                root, policy_bundle=policy
+            )
+            assert listener is not None
+            prompt = b"audit readonly"
+            try:
+                with (
+                    patch(
+                        "codex_dispatcher.runner_docker._expected_rootless_socket",
+                        return_value=socket_path,
+                    ),
+                    patch(
+                        "codex_dispatcher.runner_turns.build_docker_codex_plan",
+                        wraps=plan_docker_turn,
+                    ) as planned,
+                ):
+                    reply = turns.execute(
+                        _v2_request(
+                            RunnerOperation.START,
+                            TURN_ONE,
+                            prompt,
+                            base_sha,
+                            policy_digest=policy.policy_digest,
+                            session_role="audit",
+                        ),
+                        prompt,
+                    )
+            finally:
+                listener.close()
+
+            self.assertEqual(RunnerTurnRemoteState.FINISHED, reply.state)
+            self.assertEqual(
+                root / "agent-result-audit.schema.json",
+                planned.call_args.kwargs["output_schema"],
+            )
+            self.assertTrue(planned.call_args.kwargs["repository_readonly"])
 
     def test_v2_returns_policy_verified_delegation_metadata(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:

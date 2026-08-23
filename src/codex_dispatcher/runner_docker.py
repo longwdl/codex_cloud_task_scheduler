@@ -25,6 +25,7 @@ from codex_dispatcher.executors.codex_docker import (
     DOCKER_NETWORK_SUBNET,
     ROOTLESS_HOST_PROXY_URL,
     DockerCodexRuntime,
+    HOST_OUTPUT_SCHEMA_NAMES,
 )
 from codex_dispatcher.runner_protocol import (
     NEXT_PROTOCOL_VERSION,
@@ -103,7 +104,7 @@ def prepare_docker_work_item(
     if auth_file.name != "auth.json":
         raise RunnerDockerError("Codex auth file name is invalid")
     _trusted_regular_file(output_schema, "output schema", secret=False)
-    if output_schema.name != "agent-result.schema.json":
+    if output_schema.name not in HOST_OUTPUT_SCHEMA_NAMES:
         raise RunnerDockerError("output schema name is invalid")
 
     if request.version == NEXT_PROTOCOL_VERSION:

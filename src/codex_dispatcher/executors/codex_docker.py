@@ -29,6 +29,9 @@ CONTAINER_CODE_MODE_HOST_PATH = Path("/usr/local/bin/codex-code-mode-host")
 CONTAINER_TIMEOUT_PATH = Path("/usr/bin/timeout")
 CONTAINER_REPOSITORY = Path("/workspace")
 CONTAINER_SCHEMA = Path("/runner-contract/agent-result.schema.json")
+HOST_OUTPUT_SCHEMA_NAMES = frozenset(
+    {"agent-result.schema.json", "agent-result-audit.schema.json"}
+)
 CONTAINER_REQUIREMENTS = Path("/etc/codex/requirements.toml")
 DOCKER_NETWORK = "codex-egress"
 DOCKER_NETWORK_SUBNET = "172.30.0.0/24"
@@ -210,8 +213,8 @@ def build_docker_codex_plan(
         or agent_policy_digest != policy_bundle.policy_digest
     ):
         raise ValueError("Docker generation requires its exact policy bundle")
-    if output_schema.name != "agent-result.schema.json":
-        raise ValueError("output_schema must name agent-result.schema.json")
+    if output_schema.name not in HOST_OUTPUT_SCHEMA_NAMES:
+        raise ValueError("output_schema has an unsupported file name")
     if policy_bundle is not None:
         if not isinstance(policy_bundle, PolicyBundle):
             raise TypeError("policy_bundle must be a PolicyBundle or None")

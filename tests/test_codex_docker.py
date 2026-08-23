@@ -212,6 +212,27 @@ class DockerCodexPlanTests(unittest.TestCase):
             audit_mounts[2],
         )
 
+        audit_schema = Path(
+            "/srv/codex-runner/etc/agent-result-audit.schema.json"
+        )
+        audit_schema_plan = build_docker_codex_plan(
+            runtime=runtime(),
+            work_item_id=WORK_ITEM,
+            turn_id=TURN,
+            codex_path=CODEX_PATH,
+            repository=repository,
+            codex_home=codex_home,
+            auth_file=auth_file,
+            output_schema=audit_schema,
+            session_id=None,
+            repository_readonly=True,
+        )
+        self.assertIn(
+            f"--mount=type=bind,source={audit_schema},"
+            "target=/runner-contract/agent-result.schema.json,readonly",
+            audit_schema_plan.argv,
+        )
+
     def test_policy_bundle_mounts_exact_three_readonly_targets(self) -> None:
         policy_root = ROOT / "config" / "runner-codex-policy"
         manifest = json.loads((policy_root / "manifest.json").read_text(encoding="utf-8"))

@@ -107,7 +107,8 @@ The current `s3` fixture is already reachable as `ecs-user`, has Python 3.12, Gi
 recommendation but sufficient for the bounded fixture. The implementation fixes these Runner paths:
 
 - protected `/srv/codex-runner/etc/config.json`, based on `config/runner.example.json`;
-- protected `/srv/codex-runner/etc/agent-result.schema.json`;
+- protected `/srv/codex-runner/etc/agent-result.schema.json` and
+  `/srv/codex-runner/etc/agent-result-audit.schema.json`;
 - `/srv/codex-runner/run/active.lock` writable only by `codex-runner`;
 - `/srv/codex-runner/work-items` for per-Issue repositories and Runner state;
 - absolute resolved Git and Codex executable paths;

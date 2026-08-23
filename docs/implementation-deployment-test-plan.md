@@ -792,6 +792,7 @@ Dispatcher 运行时也可创建一致快照。它先检查源库，再检查完
 /srv/codex-runner/bin/codex-runner-v1
 /srv/codex-runner/etc/config.json
 /srv/codex-runner/etc/agent-result.schema.json
+/srv/codex-runner/etc/agent-result-audit.schema.json
 /srv/codex-runner/app/                # protected shared CODEX_HOME
 /srv/codex-runner/work-items/
 /srv/codex-runner/run/active.lock

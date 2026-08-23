@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "status", "summary", "acceptance", "remaining_work",
+    "needs_input", "tests", "changed_paths", "blocker_code", "next_step"
+  ],
+  "properties": {
+    "schema_version": {"type": "integer", "enum": [2]},
+    "status": {
+      "type": "string",
+      "enum": ["checkpoint", "completed", "needs_input", "blocked"],
+      "description": "Use checkpoint when bounded work remains without human input. completed is only a completion candidate."
+    },
+    "summary": {"type": "string", "minLength": 1, "maxLength": 8000},
+    "acceptance": {
+      "type": "array", "maxItems": 100,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "status", "evidence"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1, "maxLength": 128},
+          "status": {"type": "string", "enum": ["passed", "failed", "not_verified"]},
+          "evidence": {"type": "string", "minLength": 1, "maxLength": 4096}
+        }
+      }
+    },
+    "remaining_work": {
+      "type": "array", "maxItems": 100,
+      "items": {"type": "string", "minLength": 1, "maxLength": 2000}
+    },
+    "needs_input": {
+      "type": "array", "maxItems": 20,
+      "items": {"type": "string", "minLength": 1, "maxLength": 1000}
+    },
+    "tests": {
+      "type": "array", "maxItems": 100,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["name", "status"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1, "maxLength": 500},
+          "status": {"type": "string", "enum": ["passed", "failed", "not_run"]}
+        }
+      }
+    },
+    "changed_paths": {
+      "type": "array", "maxItems": 0,
+      "items": {"type": "string", "minLength": 1, "maxLength": 1024}
+    },
+    "blocker_code": {
+      "type": ["string", "null"],
+      "pattern": "^[a-z][a-z0-9_]{0,127}$"
+    },
+    "next_step": {"type": "string", "minLength": 1, "maxLength": 2000}
+  }
+}

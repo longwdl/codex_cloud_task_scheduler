@@ -3,6 +3,42 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Live checkpoint, resume, and fresh-Audit Fixture — 2026-08-24
+
+The canary series used the dedicated private Fixture only. Runtime releases `28b19ca` and
+`97bfc8a` corrected the Structured Outputs subset and aligned the read-only Audit field contract;
+neither release weakened the Runner's read-only repository mount or trusted post-process Git
+verification.
+
+Issue `#41` first proved that an unsupported provider schema is a terminal, observable failure
+rather than an ambiguous retry. Its exact 8,589,934,592-byte WorkItem image was later archived by
+the ordinary lifecycle receipt. Issue `#42` then proved the next independent boundary: a fresh
+Audit returned `changed_paths=["README.md"]` while trusted Git remained at the input HEAD. Runner
+rejected the Turn as `audit_mutation_forbidden`; its exact 8,589,934,592-byte image was archived,
+Issue `#42` remained open with `agent:discard`, and Draft PR `#43` was closed without merging.
+
+Issue [`#44`](https://github.com/longwdl/codex-dispatcher-fixture/issues/44) completed the positive
+path. WorkItem `wi_5b34425042411a953a08f945` used implementation session
+`01a02fdc-a5f9-7c61-a475-8998cf4495c6` to publish checkpoint
+`e1ff17a34d5f4f9ed2cb6cf0658778fc843836a6`, then resumed that same session and published final
+HEAD `b0f3201f0ccc6d13cca179524a660fa58f109be3`. Both completion-gate evaluations passed on the
+final HEAD. The independent Audit used fresh session `01a02fe0-a06a-79f1-a9e8-73533b1516f4`,
+returned `changed_paths=[]`, left trusted Git unchanged, and produced a delivered Slack Turn
+receipt. GitHub Actions run
+[`32658051742`](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/32658051742)
+completed successfully for that exact HEAD.
+
+After explicit operator authorization, Draft PR
+[`#45`](https://github.com/longwdl/codex-dispatcher-fixture/pull/45) was marked ready and merged as
+merge commit `02d9eaff6605203be063c5e06c88937fcd191477`. The next Dispatcher sweep changed the durable
+WorkItem from `review` to `completed`, retired its Audit generation, and projected
+`agent:completed`; two following sweeps were idle. Issue `#44` remains open as the durable audit
+entry point, and its task branch remains subject to the configured 30-day retention. The exact
+8,589,934,592-byte WorkItem image remains under the configured 7-day completed retention rather
+than being manually removed. Post-completion Runner capacity reported 65,834,344,448 bytes
+available and both Turn and provision admission true. No Docker prune or manual lifecycle bypass
+was used.
+
 ## Schema-18 full disaster-recovery drill and exact reclamation plan — 2026-08-23
 
 The final two-host runtime commit is `6da473495333bdba16e8f4272c00741b5f9c6130`, with release

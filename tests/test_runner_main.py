@@ -69,6 +69,7 @@ def config(root: Path) -> Path:
         executable=True,
     )
     protected_file(schema, "{}\n")
+    protected_file(root / "agent-result-audit.schema.json", "{}\n")
     codex_home = root / "codex-home"
     codex_home.mkdir(mode=0o700, exist_ok=True)
     codex_home.chmod(0o700)
@@ -106,6 +107,10 @@ class RunnerMainTests(unittest.TestCase):
             loaded = load_runner_configuration(config(root))
             self.assertEqual((root / "git").resolve(), loaded.git_path)
             self.assertEqual((root / "codex-home").resolve(), loaded.codex_home)
+            self.assertEqual(
+                (root / "agent-result-audit.schema.json").resolve(),
+                loaded.audit_output_schema,
+            )
             self.assertEqual((root / "work-items").resolve(), loaded.work_items_root)
             self.assertEqual(20.0, loaded.codex_timeout_seconds)
             self.assertEqual("http://127.0.0.1:3128", loaded.egress_proxy_url)
@@ -120,6 +125,17 @@ class RunnerMainTests(unittest.TestCase):
             path.write_text(json.dumps(payload), encoding="utf-8")
 
             self.assertIsNone(load_runner_configuration(path).egress_proxy_url)
+
+    def test_missing_audit_output_schema_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = config(root)
+            (root / "agent-result-audit.schema.json").unlink()
+
+            with self.assertRaisesRegex(
+                RunnerConfigurationError, "audit_output_schema is unavailable"
+            ):
+                load_runner_configuration(path)
 
     def test_explicit_rootless_docker_configuration_is_strict_and_wired(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:

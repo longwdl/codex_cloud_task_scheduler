@@ -203,6 +203,8 @@ class RunnerTurnExecutorTests(unittest.TestCase):
         )
         schema = root / "schema.json"
         schema.write_text("{}\n", encoding="utf-8")
+        audit_schema = root / "audit-schema.json"
+        audit_schema.write_text("{}\n", encoding="utf-8")
         codex_home = root / "shared-codex-home"
         codex_home.mkdir(mode=0o700)
         turns = RunnerTurnExecutor(
@@ -210,6 +212,7 @@ class RunnerTurnExecutorTests(unittest.TestCase):
             codex_path=codex,
             codex_home=codex_home,
             output_schema=schema,
+            audit_output_schema=audit_schema,
             timeout_seconds=10,
             egress_proxy_url=egress_proxy_url,
         )
@@ -386,6 +389,8 @@ class RunnerTurnExecutorTests(unittest.TestCase):
             fake_codex(codex)
             schema = root / "schema.json"
             schema.write_text("{}\n", encoding="utf-8")
+            audit_schema = root / "audit-schema.json"
+            audit_schema.write_text("{}\n", encoding="utf-8")
             codex_home = root / "shared-codex-home"
             codex_home.mkdir(mode=0o700)
             turns = RunnerTurnExecutor(
@@ -393,6 +398,7 @@ class RunnerTurnExecutorTests(unittest.TestCase):
                 codex_path=codex,
                 codex_home=codex_home,
                 output_schema=schema,
+                audit_output_schema=audit_schema,
                 timeout_seconds=10,
             )
             service = LinuxRunnerService(

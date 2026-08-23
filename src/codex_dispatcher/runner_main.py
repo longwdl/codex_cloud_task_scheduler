@@ -45,6 +45,7 @@ class RunnerConfiguration:
     codex_path: Path
     codex_home: Path
     output_schema: Path
+    audit_output_schema: Path
     work_items_root: Path
     active_lock_path: Path
     git_timeout_seconds: float
@@ -128,6 +129,10 @@ def load_runner_configuration(path: Path) -> RunnerConfiguration:
     codex_path = _protected_executable(payload["codex_path"], "codex_path")
     codex_home = _protected_directory(payload["codex_home"], "codex_home")
     output_schema = _protected_regular_file(payload["output_schema"], "output_schema")
+    audit_output_schema = _protected_regular_file(
+        str(output_schema.with_name("agent-result-audit.schema.json")),
+        "audit_output_schema",
+    )
     work_items_root = _protected_directory(
         payload["work_items_root"], "work_items_root"
     )
@@ -200,6 +205,7 @@ def load_runner_configuration(path: Path) -> RunnerConfiguration:
         codex_path=codex_path,
         codex_home=codex_home,
         output_schema=output_schema,
+        audit_output_schema=audit_output_schema,
         work_items_root=work_items_root,
         active_lock_path=active_lock_path,
         git_timeout_seconds=git_timeout,
@@ -233,6 +239,7 @@ def build_runner_service(configuration: RunnerConfiguration) -> LinuxRunnerServi
         codex_path=configuration.codex_path,
         codex_home=configuration.codex_home,
         output_schema=configuration.output_schema,
+        audit_output_schema=configuration.audit_output_schema,
         timeout_seconds=configuration.codex_timeout_seconds,
         egress_proxy_url=configuration.egress_proxy_url,
         docker_runtime=configuration.docker_runtime,

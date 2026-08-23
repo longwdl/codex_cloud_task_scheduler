@@ -109,6 +109,7 @@ class RunnerTurnExecutor:
         codex_path: Path,
         codex_home: Path,
         output_schema: Path,
+        audit_output_schema: Path,
         timeout_seconds: float = 3600.0,
         egress_proxy_url: str | None = None,
         docker_runtime: DockerCodexRuntime | None = None,
@@ -118,6 +119,7 @@ class RunnerTurnExecutor:
             (codex_path, "codex_path"),
             (codex_home, "codex_home"),
             (output_schema, "output_schema"),
+            (audit_output_schema, "audit_output_schema"),
         ):
             if not isinstance(path, Path) or not path.is_absolute() or ".." in path.parts:
                 raise ValueError(f"{field} must be a normalized absolute path")
@@ -127,6 +129,7 @@ class RunnerTurnExecutor:
         self._codex_path = codex_path
         self._codex_home = codex_home
         self._output_schema = output_schema
+        self._audit_output_schema = audit_output_schema
         self._timeout_seconds = timeout_seconds
         self._egress_proxy_url = (
             validate_egress_proxy_url(egress_proxy_url)
@@ -397,6 +400,11 @@ class RunnerTurnExecutor:
             **self._v2_reply_fields(request),
         )
 
+    def _schema_for(self, request: RunnerRequest) -> Path:
+        if request.session_role == SessionGenerationRole.AUDIT.value:
+            return self._audit_output_schema
+        return self._output_schema
+
     def _run_codex(
         self,
         request: RunnerRequest,
@@ -404,15 +412,18 @@ class RunnerTurnExecutor:
         paths: RunnerWorkspacePaths,
     ) -> RunnerTurnReply:
         assert request.turn_id is not None
+        output_schema = self._schema_for(request)
         if self._docker_runtime is not None:
-            return self._run_codex_in_docker(request, prompt, paths)
+            return self._run_codex_in_docker(
+                request, prompt, paths, output_schema=output_schema
+            )
         if not self._chatgpt_authentication_is_ready():
             return self._failed_reply(request, "codex_auth_invalid")
         plan = build_codex_invocation(
             codex_path=self._codex_path,
             repository_directory=paths.repository,
             codex_home=self._codex_home,
-            output_schema=self._output_schema,
+            output_schema=output_schema,
             session_id=request.session_id,
             egress_proxy_url=self._egress_proxy_url,
         )
@@ -488,6 +499,8 @@ class RunnerTurnExecutor:
         request: RunnerRequest,
         prompt: bytes,
         paths: RunnerWorkspacePaths,
+        *,
+        output_schema: Path,
     ) -> RunnerTurnReply:
         assert self._docker_runtime is not None
         assert request.turn_id is not None
@@ -505,17 +518,17 @@ class RunnerTurnExecutor:
                 paths=paths,
                 request=request,
                 auth_file=auth_file,
-                output_schema=self._output_schema,
+                output_schema=output_schema,
             )
             if not self._docker_authentication_is_ready(
-                request, context, auth_file=auth_file
+                request, context, auth_file=auth_file, output_schema=output_schema
             ):
                 return self._failed_reply(request, "codex_auth_invalid")
             validate_docker_command_boundary(
                 runtime=self._docker_runtime,
                 context=context,
                 codex_path=self._codex_path,
-                output_schema=self._output_schema,
+                output_schema=output_schema,
             )
             if request.operation is RunnerOperation.RESUME:
                 assert request.session_id is not None
@@ -538,7 +551,7 @@ class RunnerTurnExecutor:
                 repository=context.repository,
                 codex_home=context.codex_home,
                 auth_file=context.auth_file,
-                output_schema=self._output_schema,
+                output_schema=output_schema,
                 session_id=request.session_id,
                 repository_readonly=(
                     request.session_role == SessionGenerationRole.AUDIT.value
@@ -826,13 +839,14 @@ class RunnerTurnExecutor:
         context: DockerWorkItemContext,
         *,
         auth_file: Path,
+        output_schema: Path,
     ) -> bool:
         assert self._docker_runtime is not None
         validate_docker_command_boundary(
             runtime=self._docker_runtime,
             context=context,
             codex_path=self._codex_path,
-            output_schema=self._output_schema,
+            output_schema=output_schema,
         )
         plan = build_docker_login_status_plan(
             runtime=self._docker_runtime,

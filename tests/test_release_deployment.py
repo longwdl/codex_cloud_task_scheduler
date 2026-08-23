@@ -116,6 +116,10 @@ class ReleaseDeploymentTests(unittest.TestCase):
             "runner_output_schema=/srv/codex-runner/etc/agent-result.schema.json",
             text,
         )
+        self.assertIn(
+            "runner_audit_output_schema=/srv/codex-runner/etc/agent-result-audit.schema.json",
+            text,
+        )
         self.assertIn("runner_schema_backup_root=/srv/codex-runner/schema-backups", text)
         self.assertIn("record_phase runner_schema_validate", text)
         self.assertIn("record_phase runner_schema_install_intent", text)
@@ -128,8 +132,24 @@ class ReleaseDeploymentTests(unittest.TestCase):
         self.assertIn("runner_schema_previous_mode", text)
         self.assertIn("agent-result.schema.json' '$runner_output_schema.next", text)
         self.assertIn("'$runner_output_schema.rollback'", text)
+        self.assertIn("record_phase runner_audit_schema_validate", text)
+        self.assertIn("record_phase runner_audit_schema_install_intent", text)
+        self.assertIn("runner_audit_schema_install_started=1", text)
+        self.assertIn("runner_audit_schema_applied=1", text)
+        self.assertIn("runner_audit_schema_existed", text)
+        self.assertIn("runner_audit_schema_old_sha256", text)
+        self.assertIn("runner_audit_schema_new_sha256", text)
+        self.assertIn(
+            "agent-result-audit.schema.json' '$runner_audit_output_schema.next",
+            text,
+        )
+        self.assertIn("'$runner_audit_output_schema.rollback'", text)
         self.assertLess(
             text.index("record_phase runner_schema_validate"),
+            text.index("record_phase runner_switch_intent"),
+        )
+        self.assertLess(
+            text.index("record_phase runner_audit_schema_validate"),
             text.index("record_phase runner_switch_intent"),
         )
         self.assertLess(
@@ -177,6 +197,17 @@ class ReleaseDeploymentTests(unittest.TestCase):
                     assert_supported_subset(child)
 
         assert_supported_subset(schema)
+
+        audit_schema = json.loads(
+            (ROOT / "config" / "agent-result-audit.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(0, audit_schema["properties"]["changed_paths"]["maxItems"])
+        expected_audit = json.loads(json.dumps(schema))
+        expected_audit["properties"]["changed_paths"]["maxItems"] = 0
+        self.assertEqual(expected_audit, audit_schema)
+        assert_supported_subset(audit_schema)
 
     def test_runner_validator_enforces_protected_cwd_and_umask(self) -> None:
         text = RUNNER_VALIDATOR.read_text(encoding="utf-8")
