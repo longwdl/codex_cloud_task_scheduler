@@ -43,6 +43,7 @@ class ReleaseDeploymentTests(unittest.TestCase):
         self.assertIn("current.rollback", text)
         self.assertIn("release links changed after activation", text)
         self.assertIn("configuration changed after activation", text)
+        self.assertIn("Runner output schema changed after activation", text)
         self.assertLess(
             text.index("record_phase quiesce"),
             text.index("dispatcher_invocation_id_before=$(/usr/bin/systemctl"),
@@ -108,6 +109,56 @@ class ReleaseDeploymentTests(unittest.TestCase):
         self.assertIn("config-backups", text)
         self.assertIn("config.toml.next", text)
         self.assertIn("config.toml.rollback", text)
+
+    def test_release_tool_transactionally_manages_runner_output_schema(self) -> None:
+        text = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn(
+            "runner_output_schema=/srv/codex-runner/etc/agent-result.schema.json",
+            text,
+        )
+        self.assertIn("runner_schema_backup_root=/srv/codex-runner/schema-backups", text)
+        self.assertIn("record_phase runner_schema_validate", text)
+        self.assertIn("record_phase runner_schema_install_intent", text)
+        self.assertIn("runner_schema_install_started=1", text)
+        self.assertIn("runner_schema_applied=1", text)
+        self.assertIn("runner_schema_old_sha256", text)
+        self.assertIn("runner_schema_new_sha256", text)
+        self.assertIn("runner_schema_previous_uid", text)
+        self.assertIn("runner_schema_previous_gid", text)
+        self.assertIn("runner_schema_previous_mode", text)
+        self.assertIn("agent-result.schema.json' '$runner_output_schema.next", text)
+        self.assertIn("'$runner_output_schema.rollback'", text)
+        self.assertLess(
+            text.index("record_phase runner_schema_validate"),
+            text.index("record_phase runner_switch_intent"),
+        )
+        self.assertLess(
+            text.index("record_phase runner_schema_install_intent"),
+            text.index("record_phase runner_capacity"),
+        )
+
+    def test_agent_result_output_schema_is_strict_v2(self) -> None:
+        import json
+
+        schema = json.loads(
+            (ROOT / "config" / "agent-result.schema.json").read_text(encoding="utf-8")
+        )
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(
+            {
+                "schema_version", "status", "summary", "acceptance",
+                "remaining_work", "needs_input", "tests", "changed_paths",
+                "blocker_code", "next_step",
+            },
+            set(schema["required"]),
+        )
+        self.assertEqual(2, schema["properties"]["schema_version"]["const"])
+        self.assertEqual(
+            {"checkpoint", "completed", "needs_input", "blocked"},
+            set(schema["properties"]["status"]["enum"]),
+        )
+        self.assertEqual("array", schema["properties"]["acceptance"]["type"])
+        self.assertEqual("array", schema["properties"]["remaining_work"]["type"])
 
     def test_runner_validator_enforces_protected_cwd_and_umask(self) -> None:
         text = RUNNER_VALIDATOR.read_text(encoding="utf-8")
