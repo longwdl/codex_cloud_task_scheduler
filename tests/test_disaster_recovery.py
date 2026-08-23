@@ -257,7 +257,6 @@ class DisasterRecoveryTests(unittest.TestCase):
             state=PullRequestState.MERGED,
             head_sha=HEAD,
         )
-        tracker.branches[(item.repository, item.task_branch)] = HEAD
         return {
             "database": database,
             "backups": backups,

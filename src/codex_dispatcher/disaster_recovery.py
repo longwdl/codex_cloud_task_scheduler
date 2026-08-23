@@ -376,6 +376,14 @@ def _reconcile_github(store: StateStore, tracker: Tracker) -> tuple[int, int]:
     dispositions = {
         record.work_item_id: record for record in store.list_work_item_dispositions()
     }
+    runner_reclaimed = {
+        record.work_item_id
+        for record in store.list_work_item_archives()
+        if record.status is WorkItemArchiveStatus.ARCHIVED
+    } | {
+        record.work_item_id
+        for record in store.list_work_item_absence_reconciliations()
+    }
     for work_item in store.list_work_items():
         task = tracker.get_task(work_item.repository, str(work_item.issue_number))
         if (
@@ -431,11 +439,25 @@ def _reconcile_github(store: StateStore, tracker: Tracker) -> tuple[int, int]:
             if branch_head is not None:
                 raise DisasterRecoveryError("reclaimed GitHub branch exists again")
         elif work_item.last_published_sha is not None:
-            if branch_head != work_item.last_published_sha:
-                raise DisasterRecoveryError("GitHub task branch conflicts with SQLite")
+            terminal = (
+                work_item.state is WorkItemState.COMPLETED
+                or disposition is not None
+            )
+            if branch_head is None:
+                if not terminal or work_item.work_item_id not in runner_reclaimed:
+                    raise DisasterRecoveryError(
+                        "GitHub task branch is missing without terminal Runner evidence "
+                        f"for Issue #{work_item.issue_number}"
+                    )
+            elif branch_head != work_item.last_published_sha:
+                raise DisasterRecoveryError(
+                    "GitHub task branch conflicts with SQLite for "
+                    f"Issue #{work_item.issue_number}"
+                )
         elif branch_head not in {None, work_item.base_sha}:
             raise DisasterRecoveryError(
-                "unpublished GitHub task branch differs from its persisted base"
+                "unpublished GitHub task branch differs from its persisted base for "
+                f"Issue #{work_item.issue_number}"
             )
     return issue_count, pr_count
 
