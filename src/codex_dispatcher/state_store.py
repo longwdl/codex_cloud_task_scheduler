@@ -34,6 +34,11 @@ from codex_dispatcher.health_alerts import (
     HealthAlertDelivery,
     HealthAlertKind,
 )
+from codex_dispatcher.github_api_metrics import (
+    GitHubApiMetrics,
+    GitHubApiSweepMetric,
+    GitHubApiSweepOutcome,
+)
 from codex_dispatcher.runner_protocol import (
     AgentResult,
     agent_result_to_json,
@@ -3631,6 +3636,90 @@ class StateStore:
             )
         return now
 
+    def record_github_api_sweep(
+        self,
+        metrics: GitHubApiMetrics,
+        *,
+        started_at: str,
+        completed_at: str,
+        outcome: GitHubApiSweepOutcome,
+        sweep_status: str | None = None,
+        error_code: str | None = None,
+    ) -> GitHubApiSweepMetric:
+        if not isinstance(metrics, GitHubApiMetrics):
+            raise TypeError("metrics must be GitHubApiMetrics")
+        if not isinstance(outcome, GitHubApiSweepOutcome):
+            raise TypeError("outcome must be GitHubApiSweepOutcome")
+        started = _aware_timestamp(started_at, "GitHub API sweep start")
+        completed = _aware_timestamp(completed_at, "GitHub API sweep completion")
+        if completed < started:
+            raise ValueError("GitHub API sweep completion precedes its start")
+        if outcome is GitHubApiSweepOutcome.SUCCESS:
+            if (
+                not isinstance(sweep_status, str)
+                or re.fullmatch(r"[a-z][a-z_]{0,63}", sweep_status) is None
+                or error_code is not None
+            ):
+                raise ValueError("successful GitHub API sweep identity is invalid")
+        elif sweep_status is not None or error_code != "github_sweep_failed":
+            raise ValueError("failed GitHub API sweep identity is invalid")
+        values = (
+            started_at,
+            completed_at,
+            outcome.value,
+            sweep_status,
+            error_code,
+            metrics.command_count,
+            metrics.read_count,
+            metrics.write_count,
+            metrics.failure_count,
+            metrics.elapsed_milliseconds,
+            metrics.core_remaining,
+            metrics.core_limit,
+            metrics.core_reset_epoch,
+            metrics.graphql_remaining,
+            metrics.graphql_limit,
+            metrics.graphql_reset_epoch,
+            metrics.rate_limit_error,
+        )
+        with self._transaction() as connection:
+            cursor = connection.execute(
+                "INSERT INTO github_api_sweep_metrics "
+                "(started_at, completed_at, outcome, sweep_status, error_code, "
+                "command_count, read_count, write_count, failure_count, "
+                "elapsed_milliseconds, core_remaining, core_limit, core_reset_epoch, "
+                "graphql_remaining, graphql_limit, graphql_reset_epoch, "
+                "rate_limit_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                values,
+            )
+            sequence = int(cursor.lastrowid)
+        record = self.get_github_api_sweep(sequence)
+        if record is None:
+            raise RuntimeError("persisted GitHub API sweep metric disappeared")
+        return record
+
+    def get_github_api_sweep(self, sequence: int) -> GitHubApiSweepMetric | None:
+        if type(sequence) is not int or sequence <= 0:
+            raise ValueError("GitHub API sweep sequence must be positive")
+        row = self._connection.execute(
+            "SELECT * FROM github_api_sweep_metrics WHERE sequence = ?", (sequence,)
+        ).fetchone()
+        return None if row is None else self._row_to_github_api_sweep(row)
+
+    def get_latest_github_api_sweep(self) -> GitHubApiSweepMetric | None:
+        row = self._connection.execute(
+            "SELECT * FROM github_api_sweep_metrics ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()
+        return None if row is None else self._row_to_github_api_sweep(row)
+
+    def github_api_sweep_count(self) -> int:
+        row = self._connection.execute(
+            "SELECT COUNT(*) FROM github_api_sweep_metrics"
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("GitHub API sweep count is unavailable")
+        return int(row[0])
+
     def get_terminal_branch_cleanup(
         self, work_item_id: str
     ) -> TerminalBranchCleanup | None:
@@ -4625,6 +4714,47 @@ class StateStore:
         values = dict(row)
         values["state"] = RunState(values["state"])
         return Run(**values)
+
+    @staticmethod
+    def _row_to_github_api_sweep(row: sqlite3.Row) -> GitHubApiSweepMetric:
+        return GitHubApiSweepMetric(
+            sequence=int(row["sequence"]),
+            started_at=str(row["started_at"]),
+            completed_at=str(row["completed_at"]),
+            outcome=GitHubApiSweepOutcome(str(row["outcome"])),
+            sweep_status=None if row["sweep_status"] is None else str(row["sweep_status"]),
+            error_code=None if row["error_code"] is None else str(row["error_code"]),
+            metrics=GitHubApiMetrics(
+                command_count=int(row["command_count"]),
+                read_count=int(row["read_count"]),
+                write_count=int(row["write_count"]),
+                failure_count=int(row["failure_count"]),
+                elapsed_milliseconds=int(row["elapsed_milliseconds"]),
+                core_remaining=(
+                    None if row["core_remaining"] is None else int(row["core_remaining"])
+                ),
+                core_limit=None if row["core_limit"] is None else int(row["core_limit"]),
+                core_reset_epoch=(
+                    None if row["core_reset_epoch"] is None else int(row["core_reset_epoch"])
+                ),
+                graphql_remaining=(
+                    None
+                    if row["graphql_remaining"] is None
+                    else int(row["graphql_remaining"])
+                ),
+                graphql_limit=(
+                    None if row["graphql_limit"] is None else int(row["graphql_limit"])
+                ),
+                graphql_reset_epoch=(
+                    None
+                    if row["graphql_reset_epoch"] is None
+                    else int(row["graphql_reset_epoch"])
+                ),
+                rate_limit_error=(
+                    None if row["rate_limit_error"] is None else str(row["rate_limit_error"])
+                ),
+            ),
+        )
 
     @staticmethod
     def _row_to_work_item(row: sqlite3.Row) -> WorkItem:

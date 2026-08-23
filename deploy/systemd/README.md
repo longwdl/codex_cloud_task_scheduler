@@ -215,10 +215,14 @@ Observe with `systemctl status`, `systemctl list-timers`, and bounded queries su
 visible as a failed service activation; the dispatcher timer will try another recovery-first sweep
 after the inactive interval, while the health timer only observes and reports.
 
-Each SSH sweep emits bounded `github_api` evidence: total/read/write command counts, elapsed
-milliseconds, and a best-effort Core/GraphQL rate-limit snapshot. Terminal WorkItems carrying
-immutable Runner archive/absence evidence are omitted from ordinary sweeps and re-audited once per
-`scheduler.terminal_full_scan_interval_seconds`; an interrupted audit never advances its cursor.
+Each SSH sweep emits and durably stores bounded `github_api` evidence: total/read/write/failure
+command counts shared by the tracker and Actions importer, elapsed milliseconds, sweep outcome, and
+a best-effort Core/GraphQL rate-limit snapshot. The lifecycle health check alerts when the latest
+metric is missing, failed, older than its bounded grace period, unable to read rate limits, or at
+five percent budget; it does not rely on a prior journal line. Terminal WorkItems carrying immutable
+Runner archive/absence evidence are omitted from ordinary sweeps and re-audited once per
+`scheduler.terminal_full_scan_interval_seconds`; an interrupted audit never advances its cursor,
+and health compares the durable cursor age to the configured interval plus the same bounded grace.
 
 Terminal Issues remain open indefinitely. After `ssh_runtime.terminal_branch_retention_seconds`,
 only their task branches may be reclaimed. The sweep revalidates the open terminal Issue, exact

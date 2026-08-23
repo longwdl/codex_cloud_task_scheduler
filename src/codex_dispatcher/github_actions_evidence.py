@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -16,6 +17,7 @@ from codex_dispatcher.ci_evidence import (
     RequiredCheckStatus,
 )
 from codex_dispatcher.command_runner import CommandResult, run_command
+from codex_dispatcher.github_api_metrics import GitHubApiMetricsCollector
 from codex_dispatcher.work_items import (
     validate_branch,
     validate_git_sha,
@@ -40,6 +42,7 @@ class GitHubActionsEvidenceImporter:
         gh_path: str | Path,
         token: str | None = None,
         timeout_seconds: float = 30.0,
+        metrics_collector: GitHubApiMetricsCollector | None = None,
     ) -> None:
         candidate = str(gh_path)
         if not candidate or not Path(candidate).is_absolute():
@@ -53,6 +56,7 @@ class GitHubActionsEvidenceImporter:
         self._gh_path = candidate
         self._token = token
         self._timeout_seconds = timeout_seconds
+        self._metrics = metrics_collector or GitHubApiMetricsCollector()
 
     def import_for_head(
         self,
@@ -225,6 +229,7 @@ class GitHubActionsEvidenceImporter:
     def _command(
         self, argv: tuple[str, ...], *, max_output_bytes: int = 65_536
     ) -> CommandResult:
+        started = time.monotonic()
         with TemporaryDirectory(prefix="codex-dispatcher-gh-actions-") as config_directory:
             command_env = {
                 "GH_CONFIG_DIR": config_directory,
@@ -241,6 +246,18 @@ class GitHubActionsEvidenceImporter:
                 env=command_env,
                 secrets=secrets,
             )
+        failed = (
+            result.timed_out
+            or result.error is not None
+            or result.stdout_truncated
+            or result.stderr_truncated
+            or result.returncode != 0
+        )
+        self._metrics.record_command(
+            read=True,
+            failed=failed,
+            elapsed_milliseconds=max(0, int((time.monotonic() - started) * 1000)),
+        )
         if result.timed_out:
             raise CiEvidenceError("gh Actions command timed out")
         if result.error is not None:

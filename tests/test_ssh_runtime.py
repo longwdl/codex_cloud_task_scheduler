@@ -21,6 +21,10 @@ from codex_dispatcher.fixture_faults import (
 )
 from codex_dispatcher.git_publisher import GitTaskBranchPublisher
 from codex_dispatcher.github_actions_evidence import GitHubActionsEvidenceImporter
+from codex_dispatcher.github_api_metrics import (
+    GitHubApiMetrics,
+    GitHubApiSweepOutcome,
+)
 from codex_dispatcher.slack_web_api import SlackWebApiPublisher
 from codex_dispatcher.ssh_preflight import SshPreflightStatus
 from codex_dispatcher.ssh_runtime import (
@@ -111,6 +115,10 @@ class SshRuntimeTests(unittest.TestCase):
         self.assertIsInstance(
             sweep._dispatch._ci_evidence_importer,
             GitHubActionsEvidenceImporter,
+        )
+        self.assertIs(
+            sweep._tracker._metrics,
+            sweep._dispatch._ci_evidence_importer._metrics,
         )
         self.assertFalse((self.root / "mirrors").exists())
         self.assertFalse((self.root / "quarantine").exists())
@@ -373,6 +381,75 @@ class SshRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result, observed)
         sweep.run_once.assert_called_once_with()
+
+    def test_verified_sweep_persists_success_and_failure_metrics(self) -> None:
+        metrics = GitHubApiMetrics(
+            command_count=2,
+            read_count=2,
+            write_count=0,
+            failure_count=0,
+            elapsed_milliseconds=5,
+            core_remaining=4990,
+            core_limit=5000,
+            core_reset_epoch=2_000_000_000,
+            graphql_remaining=4980,
+            graphql_limit=5000,
+            graphql_reset_epoch=2_000_000_001,
+        )
+        result = ControlSweepResult(ControlSweepStatus.IDLE)
+        success = SimpleNamespace(
+            run_once=Mock(return_value=result),
+            collect_github_api_metrics=Mock(return_value=metrics),
+        )
+        checks = (ContractCheck("git", True, "2.55.0"),)
+        with (
+            patch(
+                "codex_dispatcher.ssh_runtime._assemble_ssh_control_sweep",
+                return_value=success,
+            ),
+            patch(
+                "codex_dispatcher.ssh_runtime.run_control_host_contract_checks",
+                return_value=checks,
+            ),
+        ):
+            observed = run_ssh_control_sweep(
+                config=self.config,
+                store=self.store,
+                github_token=TOKEN,
+            )
+        self.assertEqual(metrics, observed.github_api)
+        latest = self.store.get_latest_github_api_sweep()
+        self.assertIsNotNone(latest)
+        assert latest is not None
+        self.assertEqual(GitHubApiSweepOutcome.SUCCESS, latest.outcome)
+        self.assertEqual("idle", latest.sweep_status)
+
+        failed_metrics = replace(metrics, failure_count=1)
+        failure = SimpleNamespace(
+            run_once=Mock(side_effect=RuntimeError("bounded fixture failure")),
+            collect_github_api_metrics=Mock(return_value=failed_metrics),
+        )
+        with (
+            patch(
+                "codex_dispatcher.ssh_runtime._assemble_ssh_control_sweep",
+                return_value=failure,
+            ),
+            patch(
+                "codex_dispatcher.ssh_runtime.run_control_host_contract_checks",
+                return_value=checks,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "bounded fixture"):
+                run_ssh_control_sweep(
+                    config=self.config,
+                    store=self.store,
+                    github_token=TOKEN,
+                )
+        latest = self.store.get_latest_github_api_sweep()
+        self.assertIsNotNone(latest)
+        assert latest is not None
+        self.assertEqual(GitHubApiSweepOutcome.FAILURE, latest.outcome)
+        self.assertEqual("github_sweep_failed", latest.error_code)
 
     def test_preflight_uses_temporary_snapshot_and_only_tracker_reads(self) -> None:
         tracker = FakeTracker()

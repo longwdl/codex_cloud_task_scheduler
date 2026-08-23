@@ -66,8 +66,9 @@ Fixture target is the remote Linux Codex CLI executor, and the implementation no
 - a transactional two-host release tool with a read-only plan, durable schema-v2 phase receipts,
   bounded natural quiescence, exact optional configuration rollback, lost-response reconciliation,
   Runner-before-Control activation, and a manually observed sweep before restarting timers;
-- a durable daily terminal-audit cursor plus bounded per-sweep GitHub command, latency, and
-  rate-limit evidence, so ordinary sweeps skip already-proved terminal WorkItems;
+- a durable daily terminal-audit cursor plus schema-17 per-sweep GitHub metrics shared by the
+  tracker and Actions importer, including read/write/failure counts, latency, terminal outcome, and
+  rate-limit evidence; health alerts on stale/missing evidence instead of trusting process stdout;
 - permanent open terminal Issues and exact-evidence task-branch reclamation after an explicitly
   configured retention interval, with prepared/delete/absence receipts and health projection.
 - a dedicated exact-target Fixture canary for terminal-branch delete receipt loss and absence

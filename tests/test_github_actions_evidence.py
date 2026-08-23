@@ -7,6 +7,7 @@ from unittest.mock import patch
 from codex_dispatcher.ci_evidence import CiEvidenceError, RequiredCheckStatus
 from codex_dispatcher.command_runner import CommandResult
 from codex_dispatcher.github_actions_evidence import GitHubActionsEvidenceImporter
+from codex_dispatcher.github_api_metrics import GitHubApiMetricsCollector
 
 
 REPOSITORY = "owner/repo"
@@ -101,6 +102,33 @@ class GitHubActionsEvidenceImporterTests(unittest.TestCase):
             self.assertEqual(TOKEN, call.kwargs["env"]["GH_TOKEN"])
             self.assertEqual((TOKEN,), call.kwargs["secrets"])
 
+    def test_shared_metrics_include_all_three_actions_reads(self) -> None:
+        collector = GitHubApiMetricsCollector()
+        importer = GitHubActionsEvidenceImporter(
+            gh_path="/usr/bin/gh",
+            token=TOKEN,
+            metrics_collector=collector,
+        )
+        with patch(
+            "codex_dispatcher.github_actions_evidence.run_command",
+            side_effect=(ref_result(), lines_result(run_payload()), ref_result()),
+        ):
+            importer.import_for_head(
+                repository=REPOSITORY,
+                task_branch=BRANCH,
+                head_sha=HEAD,
+                required_checks=("tests",),
+                observed_at="2026-08-22T08:02:00Z",
+            )
+
+        metrics = collector.snapshot(
+            rate_limit_error="github_rate_limit_unavailable"
+        )
+        self.assertEqual(3, metrics.command_count)
+        self.assertEqual(3, metrics.read_count)
+        self.assertEqual(0, metrics.write_count)
+        self.assertEqual(0, metrics.failure_count)
+
     def test_maps_incomplete_and_non_successful_runs(self) -> None:
         pending, _ = self.import_with(
             ref_result(),
@@ -194,12 +222,16 @@ class GitHubActionsEvidenceImporterTests(unittest.TestCase):
                 )
 
     def test_command_failures_never_include_token_or_provider_stderr(self) -> None:
+        collector = GitHubApiMetricsCollector()
+        importer = GitHubActionsEvidenceImporter(
+            gh_path="/usr/bin/gh", token=TOKEN, metrics_collector=collector
+        )
         with patch(
             "codex_dispatcher.github_actions_evidence.run_command",
             return_value=CommandResult(1, "", f"denied for {TOKEN}"),
         ):
             with self.assertRaises(CiEvidenceError) as captured:
-                self.importer().import_for_head(
+                importer.import_for_head(
                     repository=REPOSITORY,
                     task_branch=BRANCH,
                     head_sha=HEAD,
@@ -208,6 +240,11 @@ class GitHubActionsEvidenceImporterTests(unittest.TestCase):
                 )
         self.assertNotIn(TOKEN, str(captured.exception))
         self.assertNotIn("denied", str(captured.exception))
+        metrics = collector.snapshot(
+            rate_limit_error="github_rate_limit_unavailable"
+        )
+        self.assertEqual(1, metrics.command_count)
+        self.assertEqual(1, metrics.failure_count)
 
     def test_rejects_incomplete_or_inconsistent_pagination(self) -> None:
         incomplete = CommandResult(

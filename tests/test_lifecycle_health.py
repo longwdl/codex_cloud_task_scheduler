@@ -20,6 +20,10 @@ from codex_dispatcher.lifecycle_health import (
     inspect_runner_capacity,
     inspect_systemd_health,
 )
+from codex_dispatcher.github_api_metrics import (
+    GitHubApiMetrics,
+    GitHubApiSweepOutcome,
+)
 from codex_dispatcher.runner_transport import (
     RunnerCapacityReply,
     RunnerTransportInterrupted,
@@ -90,6 +94,29 @@ def _complete(store: StateStore, item: WorkItem, at: str) -> None:
     store._connection.commit()
 
 
+def _seed_observability(store: StateStore, at: str) -> None:
+    store.record_sweep_cursor("terminal_github_audit", completed_at=at)
+    store.record_github_api_sweep(
+        GitHubApiMetrics(
+            command_count=1,
+            read_count=1,
+            write_count=0,
+            failure_count=0,
+            elapsed_milliseconds=10,
+            core_remaining=4900,
+            core_limit=5000,
+            core_reset_epoch=2_000_000_000,
+            graphql_remaining=4800,
+            graphql_limit=5000,
+            graphql_reset_epoch=2_000_000_001,
+        ),
+        started_at=at,
+        completed_at=at,
+        outcome=GitHubApiSweepOutcome.SUCCESS,
+        sweep_status="idle",
+    )
+
+
 class LifecycleHealthTests(unittest.TestCase):
     def test_runner_capacity_health_reports_thresholds_and_unavailability(self) -> None:
         class CapacityTransport:
@@ -128,6 +155,7 @@ class LifecycleHealthTests(unittest.TestCase):
             database = Path(temp_dir) / "state.db"
             with StateStore(database) as store:
                 store.migrate()
+                _seed_observability(store, now.isoformat())
                 blocked = _item(1, old)
                 store.create_work_item(blocked)
                 store.update_work_item_state(
@@ -176,6 +204,7 @@ class LifecycleHealthTests(unittest.TestCase):
             database = Path(temp_dir) / "state.db"
             with StateStore(database) as store:
                 store.migrate()
+                _seed_observability(store, now.isoformat())
                 blocked = _item(4, recent)
                 store.create_work_item(blocked)
                 store.update_work_item_state(
@@ -189,6 +218,52 @@ class LifecycleHealthTests(unittest.TestCase):
 
             self.assertTrue(snapshot.ok)
             self.assertEqual((), snapshot.alerts)
+
+    def test_observability_health_uses_persisted_metric_and_cursor_age(self) -> None:
+        now = datetime(2026, 8, 23, tzinfo=timezone.utc)
+        old = "2026-08-20T00:00:00+00:00"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "state.db"
+            with StateStore(database) as store:
+                store.migrate()
+                missing = inspect_lifecycle_health(_config(database), store, now=now)
+                self.assertEqual(
+                    {"github_api_metrics_missing", "terminal_github_audit_missing"},
+                    {alert.code for alert in missing.alerts},
+                )
+                store.record_sweep_cursor(
+                    "terminal_github_audit", completed_at=old
+                )
+                store.record_github_api_sweep(
+                    GitHubApiMetrics(
+                        command_count=2,
+                        read_count=2,
+                        write_count=0,
+                        failure_count=1,
+                        elapsed_milliseconds=20,
+                        core_remaining=4900,
+                        core_limit=5000,
+                        core_reset_epoch=2_000_000_000,
+                        graphql_remaining=4800,
+                        graphql_limit=5000,
+                        graphql_reset_epoch=2_000_000_001,
+                    ),
+                    started_at=now.isoformat(),
+                    completed_at=now.isoformat(),
+                    outcome=GitHubApiSweepOutcome.FAILURE,
+                    error_code="github_sweep_failed",
+                )
+                observed = inspect_lifecycle_health(
+                    _config(database), store, now=now
+                )
+
+        self.assertEqual(1, observed.github_api_sweeps)
+        self.assertEqual(0, observed.github_api_latest_age_seconds)
+        self.assertGreater(observed.terminal_github_audit_age_seconds or 0, 0)
+        self.assertEqual(
+            {"github_api_last_sweep_failed", "terminal_github_audit_stale"},
+            {alert.code for alert in observed.alerts},
+        )
 
     def test_systemd_inspection_requires_enabled_timers_and_successful_services(self) -> None:
         def reader(unit: str) -> SystemdUnitState:

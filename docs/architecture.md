@@ -251,6 +251,14 @@ configured workflow name can become `passed`, `pending`, or `failed` evidence. R
 same-name runs, malformed output, permission failure, or output truncation aborts rotation. The
 Checks API is not used.
 
+The tracker and Actions importer share one in-process GitHub API metrics collector for the entire
+Control sweep. Every attempted command is classified as read or write and records bounded elapsed
+time and failure status before adapter parsing. After the sweep, the existing rate-limit read is
+included and schema 17 atomically stores the aggregate with success/failure outcome; an exception
+therefore leaves durable evidence instead of losing the process-local counters. Lifecycle health
+uses the latest stored completion age and the daily terminal-audit cursor age, and exposes stable
+missing, stale, failure, unavailable-budget, and low-budget alert codes.
+
 The acceptance evaluator recognizes only three explicit Issue predicates:
 
 ```text

@@ -8,6 +8,7 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,6 +24,10 @@ from codex_dispatcher.dispatcher_lock import DispatcherProcessLock
 from codex_dispatcher.git_bundle_verifier import GitBundleQuarantineVerifier
 from codex_dispatcher.git_publisher import GitTaskBranchPublisher
 from codex_dispatcher.github_actions_evidence import GitHubActionsEvidenceImporter
+from codex_dispatcher.github_api_metrics import (
+    GitHubApiMetricsCollector,
+    GitHubApiSweepOutcome,
+)
 from codex_dispatcher.github_delivery import GitHubDeliveryCoordinator
 from codex_dispatcher.slack_delivery import SlackDeliveryCoordinator
 from codex_dispatcher.slack_web_api import SlackWebApiPublisher
@@ -223,7 +228,12 @@ def _assemble_ssh_control_sweep(
 ) -> SshControlSweep:
     """Assemble ports using the exact executable paths that were verified."""
 
-    tracker = GitHubCliTracker(gh_path=gh_path, token=github_token)
+    github_metrics = GitHubApiMetricsCollector()
+    tracker = GitHubCliTracker(
+        gh_path=gh_path,
+        token=github_token,
+        metrics_collector=github_metrics,
+    )
     source = TrustedMirrorSource(
         refresher=GitHubMirrorRefresher(
             git_path=git_path,
@@ -286,6 +296,7 @@ def _assemble_ssh_control_sweep(
         ci_evidence_importer=GitHubActionsEvidenceImporter(
             gh_path=gh_path,
             token=github_token,
+            metrics_collector=github_metrics,
         ),
     )
     publisher = GitTaskBranchPublisher(
@@ -381,9 +392,31 @@ def run_ssh_control_sweep(
         ssh_path=ssh_path,
         slack_token=slack_token,
     )
-    result = sweep.run_once()
+    started_at = datetime.now(timezone.utc).isoformat()
+    try:
+        result = sweep.run_once()
+    except Exception:
+        collect_metrics = getattr(sweep, "collect_github_api_metrics", None)
+        metrics = collect_metrics() if callable(collect_metrics) else None
+        if metrics is not None:
+            store.record_github_api_sweep(
+                metrics,
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                outcome=GitHubApiSweepOutcome.FAILURE,
+                error_code="github_sweep_failed",
+            )
+        raise
     collect_metrics = getattr(sweep, "collect_github_api_metrics", None)
     metrics = collect_metrics() if callable(collect_metrics) else None
+    if metrics is not None:
+        store.record_github_api_sweep(
+            metrics,
+            started_at=started_at,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            outcome=GitHubApiSweepOutcome.SUCCESS,
+            sweep_status=result.status.value,
+        )
     return replace(result, github_api=metrics)
 
 

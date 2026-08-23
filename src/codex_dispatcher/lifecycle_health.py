@@ -8,6 +8,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from codex_dispatcher.config import Config
+from codex_dispatcher.github_api_metrics import (
+    GitHubApiSweepMetric,
+    GitHubApiSweepOutcome,
+)
 from codex_dispatcher.runner_protocol import (
     NEXT_PROTOCOL_VERSION,
     RunnerOperation,
@@ -32,6 +36,7 @@ MAX_BLOCKED_AGE_SECONDS = 24 * 60 * 60
 MAX_ARCHIVE_PENDING_AGE_SECONDS = 15 * 60
 ACTIVE_TURN_GRACE_SECONDS = 5 * 60
 MAX_REPORTED_ALERTS = 50
+MIN_GITHUB_OBSERVABILITY_GRACE_SECONDS = 30 * 60
 
 SYSTEMD_TIMER_UNITS = (
     "codex-dispatcher.timer",
@@ -86,6 +91,11 @@ class LifecycleHealthSnapshot:
     pending_branch_cleanups: int
     blocked_branch_cleanups: int
     cleaned_branches: int
+    github_api_sweeps: int
+    github_api_latest: GitHubApiSweepMetric | None
+    github_api_latest_age_seconds: int | None
+    terminal_github_audit_completed_at: str | None
+    terminal_github_audit_age_seconds: int | None
     alerts: tuple[LifecycleAlert, ...]
     alerts_truncated: bool
 
@@ -115,6 +125,15 @@ class LifecycleHealthSnapshot:
             "pending_branch_cleanups": self.pending_branch_cleanups,
             "blocked_branch_cleanups": self.blocked_branch_cleanups,
             "cleaned_branches": self.cleaned_branches,
+            "github_api_sweeps": self.github_api_sweeps,
+            "github_api_latest": (
+                None
+                if self.github_api_latest is None
+                else self.github_api_latest.to_mapping()
+            ),
+            "github_api_latest_age_seconds": self.github_api_latest_age_seconds,
+            "terminal_github_audit_completed_at": self.terminal_github_audit_completed_at,
+            "terminal_github_audit_age_seconds": self.terminal_github_audit_age_seconds,
             "alert_count": len(self.alerts),
             "alerts_truncated": self.alerts_truncated,
             "alerts": [alert.to_mapping() for alert in self.alerts],
@@ -164,6 +183,13 @@ def inspect_lifecycle_health(
         disposition.work_item_id: disposition
         for disposition in store.list_work_item_dispositions()
     }
+    github_api_sweeps = store.github_api_sweep_count()
+    github_api_latest = store.get_latest_github_api_sweep()
+    github_api_latest_age_seconds: int | None = None
+    terminal_github_audit_completed_at = store.get_sweep_cursor(
+        "terminal_github_audit"
+    )
+    terminal_github_audit_age_seconds: int | None = None
 
     alerts: list[LifecycleAlert] = []
     blocked_work_items = 0
@@ -180,6 +206,64 @@ def inspect_lifecycle_health(
         alerts.append(LifecycleAlert("database_integrity_failed"))
     if foreign_key_violations:
         alerts.append(LifecycleAlert("database_foreign_key_violation"))
+
+    observability_grace = max(
+        MIN_GITHUB_OBSERVABILITY_GRACE_SECONDS,
+        config.scheduler.poll_interval_seconds * 5,
+    )
+    if github_api_latest is None:
+        alerts.append(LifecycleAlert("github_api_metrics_missing"))
+    else:
+        try:
+            github_api_latest_age_seconds = _age_seconds(
+                moment, github_api_latest.completed_at
+            )
+        except ValueError:
+            alerts.append(LifecycleAlert("github_api_metrics_timestamp_invalid"))
+        else:
+            if github_api_latest_age_seconds > observability_grace:
+                alerts.append(
+                    LifecycleAlert(
+                        "github_api_metrics_stale",
+                        age_seconds=github_api_latest_age_seconds,
+                    )
+                )
+        if github_api_latest.outcome is GitHubApiSweepOutcome.FAILURE:
+            alerts.append(LifecycleAlert("github_api_last_sweep_failed"))
+        if github_api_latest.metrics.rate_limit_error is not None:
+            alerts.append(LifecycleAlert("github_rate_limit_unavailable"))
+        if _rate_budget_low(
+            github_api_latest.metrics.core_remaining,
+            github_api_latest.metrics.core_limit,
+        ):
+            alerts.append(LifecycleAlert("github_core_rate_limit_low"))
+        if _rate_budget_low(
+            github_api_latest.metrics.graphql_remaining,
+            github_api_latest.metrics.graphql_limit,
+        ):
+            alerts.append(LifecycleAlert("github_graphql_rate_limit_low"))
+
+    if terminal_github_audit_completed_at is None:
+        alerts.append(LifecycleAlert("terminal_github_audit_missing"))
+    else:
+        try:
+            terminal_github_audit_age_seconds = _age_seconds(
+                moment, terminal_github_audit_completed_at
+            )
+        except ValueError:
+            alerts.append(LifecycleAlert("terminal_github_audit_timestamp_invalid"))
+        else:
+            terminal_deadline = (
+                config.scheduler.terminal_full_scan_interval_seconds
+                + observability_grace
+            )
+            if terminal_github_audit_age_seconds > terminal_deadline:
+                alerts.append(
+                    LifecycleAlert(
+                        "terminal_github_audit_stale",
+                        age_seconds=terminal_github_audit_age_seconds,
+                    )
+                )
 
     for work_item in work_items:
         archive = store.get_work_item_archive(work_item.work_item_id)
@@ -306,6 +390,11 @@ def inspect_lifecycle_health(
         pending_branch_cleanups=pending_branch_cleanups,
         blocked_branch_cleanups=blocked_branch_cleanups,
         cleaned_branches=cleaned_branches,
+        github_api_sweeps=github_api_sweeps,
+        github_api_latest=github_api_latest,
+        github_api_latest_age_seconds=github_api_latest_age_seconds,
+        terminal_github_audit_completed_at=terminal_github_audit_completed_at,
+        terminal_github_audit_age_seconds=terminal_github_audit_age_seconds,
         alerts=tuple(alerts[:MAX_REPORTED_ALERTS]),
         alerts_truncated=truncated,
     )
@@ -431,6 +520,12 @@ def _item_alert(
         issue_number=work_item.issue_number,
         age_seconds=age_seconds,
     )
+
+
+def _rate_budget_low(remaining: int | None, limit: int | None) -> bool:
+    if remaining is None or limit is None:
+        return False
+    return remaining == 0 or (limit > 0 and remaining * 20 <= limit)
 
 
 def _timestamp(value: str) -> datetime:

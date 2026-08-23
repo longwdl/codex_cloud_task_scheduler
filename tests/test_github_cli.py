@@ -145,6 +145,7 @@ class GitHubCliTrackerTests(unittest.TestCase):
         self.assertEqual(2, metrics.command_count)
         self.assertEqual(2, metrics.read_count)
         self.assertEqual(0, metrics.write_count)
+        self.assertEqual(0, metrics.failure_count)
         self.assertEqual(4990, metrics.core_remaining)
         self.assertEqual(4980, metrics.graphql_remaining)
         self.assertIsNone(metrics.rate_limit_error)
@@ -158,6 +159,7 @@ class GitHubCliTrackerTests(unittest.TestCase):
             metrics = tracker.collect_api_metrics()
         self.assertEqual("github_rate_limit_unavailable", metrics.rate_limit_error)
         self.assertEqual(1, metrics.command_count)
+        self.assertEqual(1, metrics.failure_count)
 
     def test_discard_state_requires_stable_label_event_identity(self) -> None:
         discarded = issue(

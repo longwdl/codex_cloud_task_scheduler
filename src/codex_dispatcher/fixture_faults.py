@@ -853,6 +853,10 @@ class _FixtureFaultTracker:
         self._delegate = delegate
         self._store = store
 
+    def collect_api_metrics(self):
+        collect = getattr(self._delegate, "collect_api_metrics", None)
+        return collect() if callable(collect) else None
+
     def list_ready_tasks(self, repository: str) -> tuple[TrackerTask, ...]:
         self._injection.require_target(repository)
         return self._delegate.list_ready_tasks(repository)

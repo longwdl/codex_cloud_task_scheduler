@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -18,6 +17,10 @@ from typing import Any
 from urllib.parse import quote
 
 from codex_dispatcher.command_runner import CommandResult, run_command
+from codex_dispatcher.github_api_metrics import (
+    GitHubApiMetrics,
+    GitHubApiMetricsCollector,
+)
 from codex_dispatcher.trackers.base import (
     ClaimResult,
     DraftPullRequestRequest,
@@ -42,36 +45,6 @@ class GitHubCliUnsupportedReadError(GitHubCliTrackerError):
     """Raised for tracker reads not implemented by the current adapter."""
 
 
-@dataclass(frozen=True, slots=True)
-class GitHubApiMetrics:
-    command_count: int
-    read_count: int
-    write_count: int
-    elapsed_milliseconds: int
-    core_remaining: int | None = None
-    core_limit: int | None = None
-    core_reset_epoch: int | None = None
-    graphql_remaining: int | None = None
-    graphql_limit: int | None = None
-    graphql_reset_epoch: int | None = None
-    rate_limit_error: str | None = None
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "command_count": self.command_count,
-            "read_count": self.read_count,
-            "write_count": self.write_count,
-            "elapsed_milliseconds": self.elapsed_milliseconds,
-            "core_remaining": self.core_remaining,
-            "core_limit": self.core_limit,
-            "core_reset_epoch": self.core_reset_epoch,
-            "graphql_remaining": self.graphql_remaining,
-            "graphql_limit": self.graphql_limit,
-            "graphql_reset_epoch": self.graphql_reset_epoch,
-            "rate_limit_error": self.rate_limit_error,
-        }
-
-
 _RUN_COMMENT_PREFIX = "<!-- codex-dispatcher:"
 
 
@@ -94,6 +67,7 @@ class GitHubCliTracker:
         gh_path: str | Path,
         token: str | None = None,
         timeout_seconds: float = 30.0,
+        metrics_collector: GitHubApiMetricsCollector | None = None,
     ) -> None:
         candidate = str(gh_path)
         if not candidate or not Path(candidate).is_absolute():
@@ -107,10 +81,7 @@ class GitHubCliTracker:
         self._gh_path = candidate
         self._token = token
         self._timeout_seconds = timeout_seconds
-        self._command_count = 0
-        self._read_count = 0
-        self._write_count = 0
-        self._elapsed_milliseconds = 0
+        self._metrics = metrics_collector or GitHubApiMetricsCollector()
 
     def collect_api_metrics(self) -> GitHubApiMetrics:
         """Return bounded command counters plus a best-effort provider budget snapshot."""
@@ -131,11 +102,7 @@ class GitHubCliTracker:
             rate_values = _parse_rate_limit(payload)
         except (GitHubCliTrackerError, ValueError):
             rate_error = "github_rate_limit_unavailable"
-        return GitHubApiMetrics(
-            command_count=self._command_count,
-            read_count=self._read_count,
-            write_count=self._write_count,
-            elapsed_milliseconds=self._elapsed_milliseconds,
+        return self._metrics.snapshot(
             core_remaining=None if rate_values is None else rate_values["core_remaining"],
             core_limit=None if rate_values is None else rate_values["core_limit"],
             core_reset_epoch=(
@@ -625,21 +592,19 @@ class GitHubCliTracker:
                 env=command_env,
                 secrets=secrets,
             )
-        self._command_count += 1
-        if _is_read_command(argv):
-            self._read_count += 1
-        else:
-            self._write_count += 1
-        self._elapsed_milliseconds += max(
-            0, int((time.monotonic() - started) * 1000)
-        )
-        if (
+        failed = (
             result.returncode != 0
             or result.timed_out
             or result.error is not None
             or result.stdout_truncated
             or result.stderr_truncated
-        ):
+        )
+        self._metrics.record_command(
+            read=_is_read_command(argv),
+            failed=failed,
+            elapsed_milliseconds=max(0, int((time.monotonic() - started) * 1000)),
+        )
+        if failed:
             raise GitHubCliTrackerError(_command_failure(result))
         return result
 

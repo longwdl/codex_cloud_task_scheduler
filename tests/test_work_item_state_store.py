@@ -466,7 +466,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 ).fetchall()
                 legacy_runs = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
                 self.assertEqual(
-                [(version,) for version in range(1, 17)],
+                [(version,) for version in range(1, 18)],
                     versions,
                 )
             self.assertEqual(0, legacy_runs)
@@ -535,7 +535,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
                 self.assertEqual(
-                [(version,) for version in range(1, 17)],
+                [(version,) for version in range(1, 18)],
                     versions,
                 )
 
