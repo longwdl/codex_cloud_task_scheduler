@@ -28,6 +28,7 @@ class ReleaseDeploymentTests(unittest.TestCase):
         self.assertIn("PYTHONPATH=src:.", text)
         self.assertIn("umask 077; cd", text)
         self.assertIn("codex-runner-release-validate-v1", text)
+        self.assertIn('/usr/bin/chmod 0700 "$runner_validation"', text)
         self.assertIn("codex-runner", text)
         self.assertLess(
             text.index("/srv/codex-runner/current.next"),

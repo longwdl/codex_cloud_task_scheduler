@@ -194,6 +194,8 @@ validate_runner() {
         /usr/bin/sudo -n /usr/bin/chown -R codex-runner:codex-runner \
         "$runner_validation"
     /usr/bin/ssh -o BatchMode=yes codex-runner \
+        /usr/bin/sudo -n /usr/bin/chmod 0700 "$runner_validation"
+    /usr/bin/ssh -o BatchMode=yes codex-runner \
         /usr/bin/sudo -n -u codex-runner /usr/bin/env -i \
         HOME=/srv/codex-runner/home LANG=C.UTF-8 LC_ALL=C.UTF-8 \
         PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
