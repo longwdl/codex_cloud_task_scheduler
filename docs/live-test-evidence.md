@@ -3,6 +3,62 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Schema-18 full disaster-recovery drill and exact reclamation plan — 2026-08-23
+
+The final two-host runtime commit is `6da473495333bdba16e8f4272c00741b5f9c6130`, with release
+archive SHA-256 `69cf08ac72307aac76851edfc8b89b0a8315739780696b425afd630599e3de63`.
+Both the Control and Runner service accounts passed all 593 tests before the Runner-first switch.
+The committed receipt preserved `aa2fff96511e81d499531208ec10dba088a009bd` as the exact prior
+Control and Runner release and left all Control timers stopped for manual handoff.
+
+The successful isolated drill receipt is
+`/var/lib/codex-dispatcher/disaster-recovery-drills/20260823T150830Z-6da4734/receipt.json`.
+It selected backup `state-20260823T150416.930131Z.db`, whose SHA-256 and the restored database
+SHA-256 were both `96c13580722c624296ff75af82d60d63a239021548872111a0b0b2d47a6d8aaf`.
+The measured application recovery interval was exactly 80,719 milliseconds and the backup was 266
+seconds old at drill start. This interval covered backup selection, isolated restore, schema and
+release validation, an empty Control application-filesystem reconstruction, and Runner, GitHub,
+and Slack read-back. VM/OS/network/credential provisioning remained explicitly unmeasured.
+
+The restored database passed integrity, foreign-key, and exact migration-1-through-18 checks. It
+contained 19 WorkItems. Runner reconciliation proved 17 permanent archive tombstones and two
+absence tombstones; GitHub reconciliation proved 19 Issues and 17 PRs; Slack GET-only read-back
+proved all 31 durable receipts. The rebuilt-root manifest SHA-256 was
+`deaf36453e7cbfe24f90d05af14b4fdaf252f06b94ac661a755dede3c66eb90e` and the receipt recorded
+`online_state_modified=false`. The failure boundary never replaces the online database, switches a
+live symlink, or changes a Runner Turn; a failed attempt retains its backup and removes only its
+exact isolated recovery root after inspection.
+
+Runner reclamation plan `06b8114af8309de53ac79b587accc8ae3ac41cd8809685be1e59c8f5cf7f701e`
+is permanently stored below `/srv/codex-runner/reclamation-plans/` with reference-inventory
+SHA-256 `3c3cc1c784884631689a995d0ff7a8abe60efe95a4f38ea4ed4996bfb5f38e03`.
+It protects current release `6da4734`, rollback release `aa2fff9`, and configured/rollback image
+`ghcr.io/longwdl/codex-cloud-task-scheduler-runner@sha256:da3662343e86ebeeba97f54f1c7f03faf03b988e07677cbd171a80d9903c772d`.
+The inventory had 21 release trees, two addressable final Runner images, no active WorkItem image
+binding, 17 archived registry identities, two absence identities, and no blocked reason. Twenty-two
+unaddressable Docker build intermediates inherited Runner labels but had neither RepoDigest nor
+RepoTag; they were deliberately excluded rather than assigned guessed provenance or deletion
+identities.
+
+The exact release targets are `081a4f3`, `134cafe`, `257fa86`, `2ec4dc9`, `2f7747f`, `3b7858b`,
+`8654269`, `9d88507`, `a630b99`, `a8800c4`, `bce452a`, `c2e27b0`, `cc200bf`, `cc9ccab`, `e7bde53`,
+`ed50a1e`, `f38959a`, `f98a512`, and `fd2f43b`; their full commits, paths, allocated bytes, and tree
+SHA-256 values are bound in the permanent plan. Their total is 66,887,680 bytes. The one exact image
+target is image ID `sha256:a36f9077ec5e918a58152f7e99ec31a0f1ae73d9a6a85602d47d312324ee4978`,
+RepoDigest `codex-cloud-task-scheduler-runner@sha256:a36f9077ec5e918a58152f7e99ec31a0f1ae73d9a6a85602d47d312324ee4978`,
+source commit `5c268fb6fe4bb59ebab0cc9f84570bfff47de90b`, provenance `tree_equivalent`, zero
+containers, and Docker unique-size estimate 351,700,000 bytes. The combined estimate is 418,587,680
+bytes. Two separate rechecks, including the final pre-approval check, reported
+`reinspection_matches=true`, `state_writes=0`, and `requires_separate_apply=true`. No reclamation
+apply or Docker prune command was executed.
+
+The post-release preflight and both observed sweeps were `idle`, with four GitHub reads, zero
+writes, and zero failures. Fresh Online Backup `state-20260823T151231.030355Z.db` was 614,400 bytes
+with integrity `ok`; its restore drill passed migrations 1 through 18, zero foreign-key violations,
+and temporary-file cleanup. Final health reported zero alerts, zero active or blocked WorkItems,
+zero pending or blocked archive/branch cleanup, Runner capacity admissible with 74,031,616,000 bytes
+available, all four Control timers enabled/active, and the Runner capacity timer enabled/active.
+
 ## Safe inactive-Turn abandonment and schema-18 release — 2026-08-23
 
 Commit `cc9ccab4f6679947b3d15957924bd0f25a95ee14`, archive SHA-256
