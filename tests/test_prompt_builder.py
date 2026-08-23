@@ -322,6 +322,13 @@ class PromptBuilderTests(unittest.TestCase):
         self.assertIn("Session Role: audit", prompt.content)
         self.assertIn("## Fresh final audit", prompt.content)
         self.assertIn("Do not inherit the implementation session's confidence", prompt.content)
+        self.assertIn(
+            "Because Audit is read-only, return changed_paths=[]", prompt.content
+        )
+        self.assertIn(
+            "not paths observed in the completion candidate's existing diff",
+            prompt.content,
+        )
 
     def test_existing_v1_turn_prompt_remains_byte_for_byte_unchanged(self) -> None:
         snapshot = build_turn_prompt_snapshot(
