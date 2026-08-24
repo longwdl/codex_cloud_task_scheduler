@@ -36,6 +36,9 @@ Create and protect:
 /var/lib/codex-dispatcher/backups/               service owner 0700
 /var/lib/codex-dispatcher/disaster-recovery-bundles/ service owner 0700
 /var/lib/codex-dispatcher/control-reclamation-plans/ root:root 0700
+/var/lib/codex-dispatcher/control-reclamation-receipts/ root:root 0700
+/var/lib/codex-dispatcher/offhost-bundle-confirmations/ root:root 0700
+/var/lib/codex-dispatcher/control-reclamation-status/ root:codex-dispatcher 0750
 /run/codex-dispatcher/dispatcher.lock            service runtime path
 ```
 
@@ -121,15 +124,18 @@ systemd-analyze verify \
   deploy/systemd/codex-dispatcher.timer \
   deploy/systemd/codex-dispatcher-health.service \
   deploy/systemd/codex-dispatcher-backup.service \
-  deploy/systemd/codex-dispatcher-restore-drill.service
+  deploy/systemd/codex-dispatcher-restore-drill.service \
+  deploy/systemd/codex-dispatcher-control-reclamation.service \
+  deploy/systemd/codex-dispatcher-control-reclamation.timer
 ```
 
 Manually run backup and restore-drill services before enabling timers. Require mode-`0600` backup,
 integrity `ok`, zero foreign-key violations, exact migration ledger, and removal of the temporary
-restore. Confirm dispatcher/health/backup/restore timers and Runner capacity timer are enabled and
-active only after the release handoff is observed. Also require the Runner reclamation-plan timer
-to be enabled/active. Run its service once after the release receipt commits, then re-run lifecycle
-health so both postdate and bind that receipt. Record the exact operational boundary with:
+restore. Confirm dispatcher/health/backup/restore/Control-reclamation timers and Runner capacity
+timer are enabled and active only after the release handoff is observed. Also require the Runner
+reclamation-plan timer to be enabled/active. Run both reclamation planner services once after the
+release receipt commits, then re-run lifecycle health so both statuses postdate and bind that
+receipt. Record the exact operational boundary with:
 
 ```bash
 sudo /opt/codex-dispatcher/current/scripts/codex-dispatcher-release-handoff-v1 \
@@ -181,8 +187,9 @@ are separate authorization checkpoints. Do not combine them into the first happy
 - Generate exact release/image reclamation plans before space becomes urgent; never use broad prune.
 - Keep `/var/lib/codex-dispatcher/disaster-recovery-bundles` and
   `/var/lib/codex-dispatcher/control-reclamation-plans` mode `0700`; export each accepted DR bundle
-  to protected storage outside both Linux hosts.
-- Preserve current and immediate rollback releases plus every referenced image/receipt.
+  to protected storage outside both Linux hosts and record its exact manifest-bound confirmation.
+- Preserve current and immediate rollback releases, their newest successful DR roots/source
+  bundles, and every referenced image/receipt.
 - Keep terminal Issues open when they are used as durable audit anchors.
 - Add live evidence only for a new boundary or provider behavior, not for routine idle sweeps.
 

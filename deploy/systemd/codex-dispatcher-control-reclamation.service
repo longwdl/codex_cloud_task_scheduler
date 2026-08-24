@@ -1,0 +1,54 @@
+[Unit]
+Description=Codex dispatcher exact read-only Control Host reclamation planning
+Documentation=file:///opt/codex-dispatcher/current/docs/schema18-disaster-recovery-and-runner-reclamation.md
+ConditionFileIsExecutable=/opt/codex-dispatcher/current/scripts/codex-dispatcher-control-reclamation-plan-v1
+ConditionPathIsDirectory=/opt/codex-dispatcher/releases
+ConditionPathIsDirectory=/var/lib/codex-dispatcher/control-reclamation-plans
+ConditionPathIsDirectory=/var/lib/codex-dispatcher/control-reclamation-status
+ConditionPathIsDirectory=/var/lib/codex-dispatcher/offhost-bundle-confirmations
+
+[Service]
+Type=oneshot
+User=root
+Group=codex-dispatcher
+UMask=0027
+WorkingDirectory=/var/lib/codex-dispatcher
+ExecStart=/opt/codex-dispatcher/current/scripts/codex-dispatcher-control-reclamation-plan-v1 auto-plan
+
+TimeoutStartSec=10min
+TimeoutStopSec=30s
+KillMode=control-group
+SendSIGKILL=yes
+Restart=no
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=codex-dispatcher-control-reclamation
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ReadWritePaths=/var/lib/codex-dispatcher/control-reclamation-plans /var/lib/codex-dispatcher/control-reclamation-status
+ProcSubset=pid
+KeyringMode=private
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+TasksMax=128

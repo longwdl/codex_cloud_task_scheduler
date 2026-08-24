@@ -7,7 +7,9 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+from unittest.mock import patch
 
+from codex_dispatcher.control_reclamation_status import build_control_reclamation_status
 from codex_dispatcher.config import (
     Config,
     RepositoryConfig,
@@ -20,6 +22,7 @@ from codex_dispatcher.lifecycle_health import (
     SYSTEMD_SERVICE_UNITS,
     SYSTEMD_TIMER_UNITS,
     SystemdUnitState,
+    inspect_control_reclamation_status,
     inspect_lifecycle_health,
     inspect_runner_capacity,
     inspect_runner_reclamation_status,
@@ -455,6 +458,37 @@ class LifecycleHealthTests(unittest.TestCase):
         )
         self.assertIsNotNone(reply)
         self.assertEqual("runner_reclamation_status_stale", alerts[0].code)
+
+    def test_control_reclamation_health_alerts_for_plan_and_staleness(self) -> None:
+        status = build_control_reclamation_status(
+            current_release_commit="c" * 40,
+            host_available_bytes=9 * 1024**3,
+            release_count=5,
+            recovery_root_count=1,
+            target_count=3,
+            bundle_target_count=0,
+            unconfirmed_bundle_count=0,
+            expected_total_bytes=1024,
+            plan_sha256="d" * 64,
+            now=datetime(2026, 8, 24, tzinfo=timezone.utc),
+        )
+        with patch(
+            "codex_dispatcher.lifecycle_health.load_control_reclamation_status",
+            return_value=status,
+        ):
+            observed, alerts = inspect_control_reclamation_status(
+                now=datetime(2026, 8, 24, 1, tzinfo=timezone.utc)
+            )
+            self.assertEqual(status, observed)
+            self.assertEqual("control_reclamation_plan_ready", alerts[0].code)
+            self.assertEqual("d" * 64, alerts[0].plan_sha256)
+
+            observed, alerts = inspect_control_reclamation_status(
+                now=datetime(2026, 8, 25, tzinfo=timezone.utc)
+            )
+            self.assertEqual(status, observed)
+            self.assertEqual("control_reclamation_status_stale", alerts[0].code)
+
     def test_reports_long_blocked_overdue_completed_and_ambiguous_archive(self) -> None:
         now = datetime(2026, 8, 23, tzinfo=timezone.utc)
         old = "2026-08-01T00:00:00+00:00"

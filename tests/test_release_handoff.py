@@ -10,6 +10,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from codex_dispatcher.control_reclamation_status import (
+    build_control_reclamation_status,
+)
 from codex_dispatcher.github_api_metrics import (
     GitHubApiMetrics,
     GitHubApiSweepOutcome,
@@ -206,6 +209,26 @@ class ReleaseHandoffTests(unittest.TestCase):
         (receipts / f"{COMMIT}.json").chmod(0o600)
         current = root / "current"
         current.symlink_to(f"/opt/codex-dispatcher/releases/{COMMIT}")
+        control_status = root / "control-reclamation-status.json"
+        control_status.write_text(
+            json.dumps(
+                build_control_reclamation_status(
+                    current_release_commit=COMMIT,
+                    host_available_bytes=12 * 1024**3,
+                    release_count=2,
+                    recovery_root_count=1,
+                    target_count=0,
+                    bundle_target_count=0,
+                    unconfirmed_bundle_count=0,
+                    expected_total_bytes=0,
+                    plan_sha256="f" * 64,
+                    now=datetime(2026, 8, 24, 8, 16, tzinfo=timezone.utc),
+                ).to_mapping()
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        control_status.chmod(0o640)
         return {
             "database": database,
             "backups": backups,
@@ -213,6 +236,7 @@ class ReleaseHandoffTests(unittest.TestCase):
             "receipts": receipts,
             "handoffs": root / "handoffs",
             "current": current,
+            "control_status": control_status,
         }
 
     def test_records_complete_handoff_once_and_returns_it_idempotently(self) -> None:
@@ -232,6 +256,8 @@ class ReleaseHandoffTests(unittest.TestCase):
                     handoff_receipt_root=paths["handoffs"],
                     database_path=paths["database"],
                     backup_root=paths["backups"],
+                    control_reclamation_status_path=paths["control_status"],
+                    control_reclamation_status_owner_uid=os.geteuid(),
                 )
             calls = commands.calls
             second = record_release_handoff(
@@ -243,6 +269,8 @@ class ReleaseHandoffTests(unittest.TestCase):
                 handoff_receipt_root=paths["handoffs"],
                 database_path=paths["database"],
                 backup_root=paths["backups"],
+                control_reclamation_status_path=paths["control_status"],
+                control_reclamation_status_owner_uid=os.geteuid(),
             )
 
             self.assertEqual(first, second)
@@ -286,6 +314,8 @@ class ReleaseHandoffTests(unittest.TestCase):
                     handoff_receipt_root=paths["handoffs"],
                     database_path=paths["database"],
                     backup_root=paths["backups"],
+                    control_reclamation_status_path=paths["control_status"],
+                    control_reclamation_status_owner_uid=os.geteuid(),
                 )
             self.assertFalse((paths["handoffs"] / f"{COMMIT}.json").exists())
 
@@ -309,6 +339,8 @@ class ReleaseHandoffTests(unittest.TestCase):
                     handoff_receipt_root=paths["handoffs"],
                     database_path=paths["database"],
                     backup_root=paths["backups"],
+                    control_reclamation_status_path=paths["control_status"],
+                    control_reclamation_status_owner_uid=os.geteuid(),
                 )
 
             health = receipt["lifecycle_health"]

@@ -1,0 +1,13 @@
+[Unit]
+Description=Generate exact Control Host reclamation plans every six hours
+
+[Timer]
+Unit=codex-dispatcher-control-reclamation.service
+OnBootSec=12min
+OnUnitInactiveSec=6h
+RandomizedDelaySec=15min
+AccuracySec=5min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

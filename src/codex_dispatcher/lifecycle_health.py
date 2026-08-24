@@ -8,6 +8,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from codex_dispatcher.config import Config
+from codex_dispatcher.control_reclamation_status import (
+    MAXIMUM_STATUS_AGE_SECONDS as MAXIMUM_CONTROL_RECLAMATION_STATUS_AGE_SECONDS,
+    ControlReclamationStatus,
+    ControlReclamationStatusError,
+    load_control_reclamation_status,
+)
 from codex_dispatcher.followup_intents import FollowupIntentState
 from codex_dispatcher.github_api_metrics import (
     GitHubApiSweepMetric,
@@ -53,11 +59,13 @@ SYSTEMD_TIMER_UNITS = (
     "codex-dispatcher-backup.timer",
     "codex-dispatcher-health.timer",
     "codex-dispatcher-restore-drill.timer",
+    "codex-dispatcher-control-reclamation.timer",
 )
 SYSTEMD_SERVICE_UNITS = (
     "codex-dispatcher.service",
     "codex-dispatcher-backup.service",
     "codex-dispatcher-restore-drill.service",
+    "codex-dispatcher-control-reclamation.service",
 )
 
 
@@ -575,6 +583,34 @@ def inspect_runner_capacity(
     if not reply.provision_admissible:
         alerts.append(LifecycleAlert("runner_provision_capacity_low"))
     return reply, tuple(alerts)
+
+
+def inspect_control_reclamation_status(
+    *, now: datetime | None = None
+) -> tuple[ControlReclamationStatus | None, tuple[LifecycleAlert, ...]]:
+    """Read the protected local planner status without changing Control state."""
+    try:
+        status = load_control_reclamation_status()
+        checked_at = datetime.fromisoformat(status.checked_at.replace("Z", "+00:00"))
+        moment = datetime.now(timezone.utc) if now is None else now
+        if moment.tzinfo is None:
+            raise ValueError("Control reclamation health timestamp lacks timezone")
+        age = int((moment.astimezone(timezone.utc) - checked_at).total_seconds())
+        if age < -300:
+            raise ValueError("Control reclamation status is from the future")
+    except (OSError, ValueError, ControlReclamationStatusError):
+        return None, (LifecycleAlert("control_reclamation_status_unavailable"),)
+    if age > MAXIMUM_CONTROL_RECLAMATION_STATUS_AGE_SECONDS:
+        return status, (
+            LifecycleAlert("control_reclamation_status_stale", age_seconds=age),
+        )
+    if status.trigger_reasons:
+        return status, (
+            LifecycleAlert(
+                "control_reclamation_plan_ready", plan_sha256=status.plan_sha256
+            ),
+        )
+    return status, ()
 
 
 def inspect_runner_reclamation_status(

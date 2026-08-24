@@ -13,12 +13,15 @@ HEALTH_SERVICE_PATH = ROOT / "deploy/systemd/codex-dispatcher-health.service"
 HEALTH_TIMER_PATH = ROOT / "deploy/systemd/codex-dispatcher-health.timer"
 RESTORE_SERVICE_PATH = ROOT / "deploy/systemd/codex-dispatcher-restore-drill.service"
 RESTORE_TIMER_PATH = ROOT / "deploy/systemd/codex-dispatcher-restore-drill.timer"
+RECLAMATION_SERVICE_PATH = ROOT / "deploy/systemd/codex-dispatcher-control-reclamation.service"
+RECLAMATION_TIMER_PATH = ROOT / "deploy/systemd/codex-dispatcher-control-reclamation.timer"
 ENVIRONMENT_EXAMPLE_PATH = ROOT / "deploy/systemd/dispatcher.env.example"
 HEALTH_ENVIRONMENT_EXAMPLE_PATH = ROOT / "deploy/systemd/health.env.example"
 WRAPPER_PATH = ROOT / "scripts/codex-dispatcher-v1"
 BACKUP_WRAPPER_PATH = ROOT / "scripts/codex-dispatcher-backup-v1"
 HEALTH_WRAPPER_PATH = ROOT / "scripts/codex-dispatcher-health-v1"
 RESTORE_WRAPPER_PATH = ROOT / "scripts/codex-dispatcher-restore-drill-v1"
+RECLAMATION_WRAPPER_PATH = ROOT / "scripts/codex-dispatcher-control-reclamation-plan-v1"
 
 
 def _unit_sections(path: Path) -> dict[str, list[tuple[str, str]]]:
@@ -45,6 +48,39 @@ def _values(
 
 
 class ControlHostSystemdTests(unittest.TestCase):
+    def test_control_reclamation_planner_is_root_network_isolated_and_read_only(self) -> None:
+        sections = _unit_sections(RECLAMATION_SERVICE_PATH)
+        self.assertEqual(["oneshot"], _values(sections, "Service", "Type"))
+        self.assertEqual(["root"], _values(sections, "Service", "User"))
+        self.assertEqual(["yes"], _values(sections, "Service", "PrivateNetwork"))
+        self.assertEqual([], _values(sections, "Service", "EnvironmentFile"))
+        self.assertEqual(
+            [
+                "/opt/codex-dispatcher/current/scripts/"
+                "codex-dispatcher-control-reclamation-plan-v1 auto-plan"
+            ],
+            _values(sections, "Service", "ExecStart"),
+        )
+        self.assertEqual(
+            [
+                "/var/lib/codex-dispatcher/control-reclamation-plans "
+                "/var/lib/codex-dispatcher/control-reclamation-status"
+            ],
+            _values(sections, "Service", "ReadWritePaths"),
+        )
+        timer = _unit_sections(RECLAMATION_TIMER_PATH)
+        self.assertEqual(
+            ["codex-dispatcher-control-reclamation.service"],
+            _values(timer, "Timer", "Unit"),
+        )
+        self.assertEqual(["6h"], _values(timer, "Timer", "OnUnitInactiveSec"))
+        self.assertEqual(["false"], _values(timer, "Timer", "Persistent"))
+        wrapper = RECLAMATION_WRAPPER_PATH.read_text(encoding="utf-8")
+        self.assertNotEqual(0, RECLAMATION_WRAPPER_PATH.stat().st_mode & 0o111)
+        self.assertIn("root is required", wrapper)
+        self.assertIn("bundle-confirm", wrapper)
+        self.assertNotIn("eval ", wrapper)
+
     def test_service_is_one_fixed_nonconcurrent_write_enabled_sweep(self) -> None:
         sections = _unit_sections(SERVICE_PATH)
         self.assertEqual(["oneshot"], _values(sections, "Service", "Type"))

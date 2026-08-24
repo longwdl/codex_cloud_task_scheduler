@@ -138,9 +138,11 @@ runner_audit_output_schema=/srv/codex-runner/etc/agent-result-audit.schema.json
 runner_schema_backup_root=/srv/codex-runner/schema-backups
 runner_reference_receipt_root=/srv/codex-runner/reclamation-reference-receipts
 runner_reclamation_status_root=/srv/codex-runner/reclamation-status
-control_units='codex-dispatcher.service codex-dispatcher.timer codex-dispatcher-backup.service codex-dispatcher-backup.timer codex-dispatcher-health.service codex-dispatcher-health.timer codex-dispatcher-restore-drill.service codex-dispatcher-restore-drill.timer'
-control_services='codex-dispatcher.service codex-dispatcher-health.service codex-dispatcher-backup.service codex-dispatcher-restore-drill.service'
-control_timers='codex-dispatcher.timer codex-dispatcher-health.timer codex-dispatcher-backup.timer codex-dispatcher-restore-drill.timer'
+control_base_units='codex-dispatcher.service codex-dispatcher.timer codex-dispatcher-backup.service codex-dispatcher-backup.timer codex-dispatcher-health.service codex-dispatcher-health.timer codex-dispatcher-restore-drill.service codex-dispatcher-restore-drill.timer'
+control_optional_units='codex-dispatcher-control-reclamation.service codex-dispatcher-control-reclamation.timer'
+control_units="$control_base_units $control_optional_units"
+control_services='codex-dispatcher.service codex-dispatcher-health.service codex-dispatcher-backup.service codex-dispatcher-restore-drill.service codex-dispatcher-control-reclamation.service'
+control_timers='codex-dispatcher.timer codex-dispatcher-health.timer codex-dispatcher-backup.timer codex-dispatcher-restore-drill.timer codex-dispatcher-control-reclamation.timer'
 
 receipt_status() {
     if ! /usr/bin/sudo -n /usr/bin/test -f "$receipt" || \
@@ -248,9 +250,18 @@ valid_runner_link() {
 restore_units() {
     restore_control=$1
     restore_runner=$2
-    for unit in $control_units; do
+    for unit in $control_base_units; do
         /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 \
             "$restore_control/deploy/systemd/$unit" "/etc/systemd/system/$unit"
+    done
+    for unit in $control_optional_units; do
+        if [ -f "$restore_control/deploy/systemd/$unit" ]; then
+            /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 \
+                "$restore_control/deploy/systemd/$unit" "/etc/systemd/system/$unit"
+        else
+            /usr/bin/sudo -n /usr/bin/systemctl disable --now "$unit" >/dev/null 2>&1 || true
+            /usr/bin/sudo -n /usr/bin/rm -f "/etc/systemd/system/$unit"
+        fi
     done
     case "$restore_runner" in
         /*) restore_runner_release=$restore_runner ;;
@@ -952,6 +963,12 @@ activated_control=1
 receipt_write in_progress control_switch_observed ''
 
 record_phase units_install
+/usr/bin/sudo -n /usr/bin/install -d -o root -g root -m 0700 \
+    /var/lib/codex-dispatcher/control-reclamation-plans \
+    /var/lib/codex-dispatcher/control-reclamation-receipts \
+    /var/lib/codex-dispatcher/offhost-bundle-confirmations
+/usr/bin/sudo -n /usr/bin/install -d -o root -g codex-dispatcher -m 0750 \
+    /var/lib/codex-dispatcher/control-reclamation-status
 for unit in $control_units; do
     /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 \
         "$control_release/deploy/systemd/$unit" "/etc/systemd/system/$unit"
@@ -980,7 +997,9 @@ receipt_write in_progress runner_audit_schema_install_observed ''
     /etc/systemd/system/codex-dispatcher-health.service \
     /etc/systemd/system/codex-dispatcher-health.timer \
     /etc/systemd/system/codex-dispatcher-restore-drill.service \
-    /etc/systemd/system/codex-dispatcher-restore-drill.timer
+    /etc/systemd/system/codex-dispatcher-restore-drill.timer \
+    /etc/systemd/system/codex-dispatcher-control-reclamation.service \
+    /etc/systemd/system/codex-dispatcher-control-reclamation.timer
 /usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n /usr/bin/systemd-analyze verify \
     /etc/systemd/system/codex-runner-capacity.service \
     /etc/systemd/system/codex-runner-capacity.timer \

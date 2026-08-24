@@ -430,6 +430,7 @@ def _lifecycle_health(
         )
         from codex_dispatcher.lifecycle_health import (
             MAX_REPORTED_ALERTS,
+            inspect_control_reclamation_status,
             inspect_lifecycle_health,
             inspect_runner_capacity,
             inspect_runner_reclamation_status,
@@ -459,7 +460,13 @@ def _lifecycle_health(
                 unit_states, systemd_alerts = inspect_systemd_health()
             runner_capacity = None
             runner_reclamation = None
+            control_reclamation = None
             runner_alerts = ()
+            control_reclamation_alerts = ()
+            if check_systemd:
+                control_reclamation, control_reclamation_alerts = (
+                    inspect_control_reclamation_status()
+                )
             if check_runner_capacity:
                 runner_capacity, runner_alerts = inspect_runner_capacity(config)
                 runner_reclamation, reclamation_alerts = (
@@ -470,15 +477,20 @@ def _lifecycle_health(
                 tuple(snapshot.alerts)
                 + tuple(systemd_alerts)
                 + tuple(runner_alerts)
+                + tuple(control_reclamation_alerts)
             )
             alerts_truncated = snapshot.alerts_truncated or (
                 len(combined_alerts) > MAX_REPORTED_ALERTS
             )
             combined_alerts = combined_alerts[:MAX_REPORTED_ALERTS]
-            blocking_runner_alerts = tuple(
+            blocking_operational_alerts = tuple(
                 alert
-                for alert in runner_alerts
-                if alert.code != "runner_reclamation_plan_ready"
+                for alert in (*runner_alerts, *control_reclamation_alerts)
+                if alert.code
+                not in {
+                    "runner_reclamation_plan_ready",
+                    "control_reclamation_plan_ready",
+                }
             )
             notification = None
             if notify_slack:
@@ -505,7 +517,7 @@ def _lifecycle_health(
         payload["alert_count"] = len(combined_alerts)
         payload["alerts_truncated"] = alerts_truncated
         payload["ok"] = (
-            snapshot.ok and not systemd_alerts and not blocking_runner_alerts
+            snapshot.ok and not systemd_alerts and not blocking_operational_alerts
         )
         payload["systemd_checked"] = check_systemd
         if check_systemd:
@@ -515,6 +527,8 @@ def _lifecycle_health(
             payload["runner_capacity"] = runner_capacity.to_mapping()
         if runner_reclamation is not None:
             payload["runner_reclamation"] = runner_reclamation.to_mapping()
+        if control_reclamation is not None:
+            payload["control_reclamation"] = control_reclamation.to_mapping()
         payload["slack_notification_enabled"] = notify_slack
         if notification is not None:
             payload["slack_notification"] = notification.to_mapping()

@@ -18,11 +18,12 @@ The 15-minute health timer receives only the protected Slack environment and out
 checks integrity and foreign keys, and reports bounded structured alerts for a Turn older than the
 configured SSH operation timeout plus five minutes, a WorkItem blocked for more than 24 hours, an
 archive pending for more than 15 minutes, an ambiguous/blocked archive, or an overdue disposition
-or completed-retention archive. With `--systemd`, the fixed wrapper also requires all four timers
+or completed-retention archive. With `--systemd`, the fixed wrapper also requires all five timers
 to be loaded, enabled, and active and rejects a failed dispatcher, backup, or restore-drill service
 result. It also sends fixed protocol-v2 read-only capacity and reclamation-status requests through
 the pinned Runner SSH endpoint. Capacity reports unavailable, Turn-low, or provision-low state;
-reclamation reports unavailable/stale planner status or an exact plan ready for separate approval.
+Runner and Control reclamation report unavailable/stale planner status or an exact plan ready for
+separate approval.
 It writes only the
 migration-14 health outbox and active-episode row, sends one deduplicated Slack alert per stable
 episode plus one threaded recovery, and never contacts GitHub or repairs remote state. The health
@@ -81,7 +82,9 @@ systemd-analyze verify \
   deploy/systemd/codex-dispatcher-health.service \
   deploy/systemd/codex-dispatcher-health.timer \
   deploy/systemd/codex-dispatcher-restore-drill.service \
-  deploy/systemd/codex-dispatcher-restore-drill.timer
+  deploy/systemd/codex-dispatcher-restore-drill.timer \
+  deploy/systemd/codex-dispatcher-control-reclamation.service \
+  deploy/systemd/codex-dispatcher-control-reclamation.timer
 ```
 
 Prepare these persistent subdirectories with owner/group `codex-dispatcher` and mode `0700`:
@@ -150,7 +153,7 @@ stable, while its durable receipt format is schema version 2. The operator must 
 exact `git archive` at
 `/var/tmp/codex-dispatcher-release-<40-hex-commit>.tar` and independently record its SHA-256. The
 tool accepts only that path shape and exact digest, rejects links and unsafe tar members, creates a
-fresh Online Backup, stops all four Control timers, masks service activation while it waits up to the
+fresh Online Backup, stops all five Control timers, masks service activation while it waits up to the
 explicit `--wait-active-seconds` bound for an already-running service to finish naturally, requires
 both host locks to be available, and runs the complete tests and compilation from short
 service-owned copies under `umask 077`. It never kills an active Dispatcher or maintenance job.
@@ -226,8 +229,9 @@ receipts, all Control timers, the Runner planner timer/status, and the transacti
 ledger. Root performs Runner read-back through the reviewed fixed `ecs-user` SSH account and never
 loads a second SSH identity. It writes only
 `/opt/codex-dispatcher/release-handoff-receipts/<commit>.json`; it never changes the release receipt
-or starts a service. A sole exact `runner_reclamation_plan_ready` alert is retained as a
-non-blocking warning; stale, unavailable, capacity, lifecycle, or consistency alerts still block.
+or starts a service. Exact current `runner_reclamation_plan_ready` and
+`control_reclamation_plan_ready` alerts are retained as non-blocking warnings; stale, unavailable,
+capacity, lifecycle, or consistency alerts still block.
 Disaster recovery requires both receipts.
 
 Observe with `systemctl status`, `systemctl list-timers`, and bounded queries such as
@@ -269,10 +273,12 @@ canaries similarly use one controlled invalid input or stopped timer, never dele
 WorkItems, branches, or images; record the alert and recovery permalinks before re-enabling timers.
 
 The same health invocation sends a strict `reclamation_status` read. It never asks Runner to plan or
-delete during the SSH request: the separate root timer publishes a protected status file, and the
-forced endpoint only validates and returns its bounded summary. Alerts are
+delete during the SSH request: the separate Runner root timer publishes a protected status file,
+and the forced endpoint only validates and returns its bounded summary. The Control planner timer
+similarly writes only its protected local status and an immutable non-authorizing plan. Alerts are
 `runner_reclamation_status_unavailable`, `runner_reclamation_status_stale`, or
-`runner_reclamation_plan_ready` and are routed to the configured system channel.
+`runner_reclamation_plan_ready`, plus their Control equivalents; all are routed to the configured
+system channel.
 
 Emergency stop disables `codex-dispatcher.timer`, `codex-dispatcher-backup.timer`, and
 `codex-dispatcher-health.timer`, and `codex-dispatcher-restore-drill.timer`, followed, if necessary,

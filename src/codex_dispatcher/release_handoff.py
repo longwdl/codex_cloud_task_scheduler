@@ -16,6 +16,11 @@ import subprocess
 import sys
 from typing import Any
 
+from codex_dispatcher.control_reclamation_status import (
+    MAXIMUM_STATUS_AGE_SECONDS as MAXIMUM_CONTROL_STATUS_AGE_SECONDS,
+    ControlReclamationStatus,
+    load_control_reclamation_status,
+)
 from codex_dispatcher.github_api_metrics import GitHubApiSweepOutcome
 from codex_dispatcher.runner_reclamation_status import (
     MAXIMUM_STATUS_AGE_SECONDS,
@@ -35,17 +40,22 @@ RUNNER_CURRENT = "/srv/codex-runner/current"
 RUNNER_REFERENCES = "/srv/codex-runner/etc/reclamation-rollback-references.json"
 RUNNER_REFERENCE_RECEIPTS = "/srv/codex-runner/reclamation-reference-receipts"
 RUNNER_STATUS = "/srv/codex-runner/reclamation-status/latest.json"
+CONTROL_RECLAMATION_STATUS = Path(
+    "/var/lib/codex-dispatcher/control-reclamation-status/latest.json"
+)
 
 CONTROL_TIMERS = (
     "codex-dispatcher.timer",
     "codex-dispatcher-backup.timer",
     "codex-dispatcher-health.timer",
     "codex-dispatcher-restore-drill.timer",
+    "codex-dispatcher-control-reclamation.timer",
 )
 CONTROL_SERVICES = (
     "codex-dispatcher-backup.service",
     "codex-dispatcher-restore-drill.service",
     "codex-dispatcher-health.service",
+    "codex-dispatcher-control-reclamation.service",
 )
 RUNNER_TIMER = "codex-runner-reclamation-plan.timer"
 RUNNER_SERVICE = "codex-runner-reclamation-plan.service"
@@ -72,6 +82,8 @@ def record_release_handoff(
     handoff_receipt_root: Path = HANDOFF_RECEIPT_ROOT,
     database_path: Path = DATABASE_PATH,
     backup_root: Path = BACKUP_ROOT,
+    control_reclamation_status_path: Path = CONTROL_RECLAMATION_STATUS,
+    control_reclamation_status_owner_uid: int = 0,
 ) -> dict[str, object]:
     """Validate the post-release boundary and write one immutable receipt."""
     _validate_commit(release_commit)
@@ -212,7 +224,23 @@ def record_release_handoff(
     status_age = int((moment - status_checked).total_seconds())
     if status_checked < release_updated or status_age < -300 or status_age > MAXIMUM_STATUS_AGE_SECONDS:
         raise ReleaseHandoffError("Runner reclamation status is not current for this release")
-    _validate_health_alert_boundary(health, notification, status)
+    control_status_raw = control_reclamation_status_path.read_bytes()
+    control_status = load_control_reclamation_status(
+        control_reclamation_status_path,
+        trusted_owner_uid=control_reclamation_status_owner_uid,
+    )
+    control_checked = _timestamp(
+        control_status.checked_at, "Control reclamation status checked_at"
+    )
+    control_age = int((moment - control_checked).total_seconds())
+    if (
+        control_status.current_release_commit != release_commit
+        or control_checked < release_updated
+        or control_age < -300
+        or control_age > MAXIMUM_CONTROL_STATUS_AGE_SECONDS
+    ):
+        raise ReleaseHandoffError("Control reclamation status is not current for this release")
+    _validate_health_alert_boundary(health, notification, status, control_status)
 
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -249,6 +277,8 @@ def record_release_handoff(
         "runner_reference_receipt_sha256": sha256(reference_receipt_raw).hexdigest(),
         "runner_reclamation_status_sha256": sha256(status_raw).hexdigest(),
         "runner_reclamation_status": status.to_mapping(),
+        "control_reclamation_status_sha256": sha256(control_status_raw).hexdigest(),
+        "control_reclamation_status": control_status.to_mapping(),
         "timers_started": True,
         "external_writes": False,
         "authorizes_reclamation_apply": False,
@@ -322,18 +352,28 @@ def _validate_runner_references(
 def _validate_health_alert_boundary(
     health: dict[str, Any],
     notification: dict[str, Any],
-    status: RunnerReclamationStatus,
+    runner_status: RunnerReclamationStatus,
+    control_status: ControlReclamationStatus,
 ) -> None:
     alerts = health.get("alerts")
-    if status.trigger_reasons:
-        expected = [
+    expected: list[dict[str, object]] = []
+    if runner_status.trigger_reasons:
+        expected.append(
             {
                 "code": "runner_reclamation_plan_ready",
-                "plan_sha256": status.plan_sha256,
+                "plan_sha256": runner_status.plan_sha256,
             }
-        ]
+        )
+    if control_status.trigger_reasons:
+        expected.append(
+            {
+                "code": "control_reclamation_plan_ready",
+                "plan_sha256": control_status.plan_sha256,
+            }
+        )
+    if expected:
         if (
-            health.get("alert_count") != 1
+            health.get("alert_count") != len(expected)
             or alerts != expected
             or notification.get("action")
             not in {"alert_opened", "alert_updated", "unchanged"}
@@ -341,7 +381,7 @@ def _validate_health_alert_boundary(
             or not isinstance(notification.get("permalink"), str)
         ):
             raise ReleaseHandoffError(
-                "post-release health is not the exact non-blocking reclamation alert"
+                "post-release health is not the exact non-blocking reclamation boundary"
             )
         return
     if (

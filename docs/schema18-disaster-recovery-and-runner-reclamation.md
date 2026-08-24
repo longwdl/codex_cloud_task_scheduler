@@ -234,24 +234,71 @@ reconciliation workflow above; a binary or symlink rollback alone cannot resolve
 durable evidence. Re-enable the timer only after `status`, lifecycle health, Runner read-back, and
 an immediate ordinary sweep all agree, with the sweep producing no unexpected write.
 
-## Control Host exact reclamation plan
+## Control Host exact reclamation lifecycle
 
-Control Host planning has no apply command. It hashes each candidate and writes one immutable,
-non-authorizing plan. The current and immediate rollback releases, current release receipt, newest
-successful DR root for the current release, and current-release DR inputs are protected. Candidates
-are limited to exact old release trees, older/failed DR roots, superseded DR inputs, and unprotected
-uploaded release archives. Permanent release/handoff/reclamation receipts are not candidates.
+The Control planner hashes every candidate and writes one immutable, non-authorizing plan. It always
+protects the current and immediate rollback release trees, the current release receipt, each of
+those releases' newest successful DR root and source bundle, their DR inputs, and their uploaded
+release archives. This preserves the rollback recovery chain when a newly activated current release
+has not yet completed its own full DR drill. Permanent release, handoff, reclamation, and off-host
+confirmation receipts are never candidates.
+
+A DR bundle is not eligible until the protected off-host copy has been independently matched to its
+on-host manifest and a permanent confirmation receipt has been written. The copy identifier is
+metadata, not a network fetch; the operator must verify the off-host bytes first. Record that fact
+exactly once with:
+
+```bash
+sudo /opt/codex-dispatcher/current/scripts/codex-dispatcher-control-reclamation-plan-v1 \
+  bundle-confirm \
+  --bundle-id <exact-control-bundle-directory-name> \
+  --manifest-sha256 <64-hex-on-host-and-off-host-manifest-sha256> \
+  --off-host-copy-id <stable-storage-identity> \
+  --apply
+```
+
+The command validates the complete on-host bundle and writes a root-owned mode-`0600` immutable
+receipt keyed by the manifest digest. It does not copy or delete a bundle. A conflicting retry fails
+closed.
 
 ```bash
 sudo install -d -o root -g root -m 0700 \
-  /var/lib/codex-dispatcher/control-reclamation-plans
+  /var/lib/codex-dispatcher/control-reclamation-plans \
+  /var/lib/codex-dispatcher/control-reclamation-receipts \
+  /var/lib/codex-dispatcher/offhost-bundle-confirmations
+sudo install -d -o root -g codex-dispatcher -m 0750 \
+  /var/lib/codex-dispatcher/control-reclamation-status
 sudo /opt/codex-dispatcher/current/scripts/codex-dispatcher-control-reclamation-plan-v1 \
-  --write-plan
+  plan --write-plan
 ```
 
-Require `authorizes_apply=false`. Any later deletion implementation needs a separate review and
-approval, must re-hash every target, and must produce a permanent receipt. Never translate this plan
-into `rm` globs or broad filesystem cleanup.
+The six-hour `codex-dispatcher-control-reclamation.timer` runs `auto-plan`. Fixed triggers are less
+than 8 GiB available, more than four release trees, more than four DR roots, any verified bundle
+target, at least 1 GiB reclaimable, or an on-host bundle missing off-host confirmation. It writes a
+strict protected status and only writes an immutable plan when a trigger fires. Lifecycle health
+routes unavailable, stale, and exact plan-ready state to the system Slack channel. This timer has no
+apply flag and cannot delete assets.
+
+Require `authorizes_apply=false`. Before a separately approved deletion, re-read the immutable plan,
+rebuild the complete live inventory, and require the hashes and target set to match:
+
+```bash
+sudo /opt/codex-dispatcher/current/scripts/codex-dispatcher-control-reclamation-plan-v1 \
+  recheck --plan-sha256 <64-hex-plan-sha256>
+```
+
+Only after the operator has reviewed the exact paths and current byte estimate and separately
+authorized that exact digest may apply run:
+
+```bash
+sudo /opt/codex-dispatcher/current/scripts/codex-dispatcher-control-reclamation-plan-v1 \
+  apply --plan-sha256 <64-hex-plan-sha256> --apply
+```
+
+Apply rejects inventory drift before deletion, then re-hashes each direct child immediately before
+removing it. It writes a mode-`0600` permanent receipt before the first removal and after every exact
+target. A partial failure is terminal evidence; do not rerun or edit it. Never translate a plan into
+`rm` globs, `find -delete`, or broad filesystem cleanup.
 
 ## Runner release and image reference inventory
 
@@ -267,11 +314,11 @@ sudo /opt/codex-dispatcher/current/scripts/codex-dispatcher-release-handoff-v1 \
 ```
 
 The handoff command is idempotent and writes only its immutable root-owned receipt. It fails unless
-the latest Dispatcher sweep, backup, restore drill, lifecycle health, Control timers, Runner
-planner timer/status, and transactional reference ledger all postdate and agree with the release.
-It never updates the release receipt and never authorizes reclamation. The sole permitted warning
-is an exact current `runner_reclamation_plan_ready` projection with a durable system-channel
-receipt; stale, unavailable, capacity, lifecycle, or consistency alerts fail closed.
+the latest Dispatcher sweep, backup, restore drill, lifecycle health, Control timers, both exact
+planners/statuses, and transactional reference ledger all postdate and agree with the release. It
+never updates the release receipt and never authorizes reclamation. Exact current Runner or Control
+plan-ready projections with durable system-channel receipts are the only permitted warnings;
+stale, unavailable, capacity, lifecycle, or consistency alerts fail closed.
 
 The isolated four-trigger canary exercises the real exact-plan, fixed-threshold, durable health
 outbox, and system-channel routing code. Plan mode uses an isolated fake Slack publisher and makes

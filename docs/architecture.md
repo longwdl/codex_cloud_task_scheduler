@@ -200,10 +200,12 @@ reinspection and permanent receipt; broad prune commands are forbidden.
 
 ## Operations, health, and disaster recovery
 
-The Control Host runs four oneshot timers: Dispatcher, lifecycle health, online backup, and restore
-drill. The Runner runs capacity and exact reclamation-planning timers. Health reads durable
+The Control Host runs five oneshot timers: Dispatcher, lifecycle health, online backup, restore
+drill, and exact Control reclamation planning. The Runner runs capacity and exact
+reclamation-planning timers. Health reads durable
 lifecycle state, systemd state, GitHub API metrics/cursor age, archive/branch backlog, follow-up
-state, Runner capacity, and the strict latest reclamation status. Slack alert and recovery
+state, Runner capacity, and the strict latest Runner and Control reclamation statuses. Slack alert
+and recovery
 projection uses a dedicated durable outbox and only the configured system channel; it never reuses
 a WorkItem thread or the Issue channel.
 
@@ -234,9 +236,9 @@ release transaction receipt. The handoff command is idempotent for the same comm
 GitHub, Slack, Runner-asset, or online-database write, and refuses incomplete or stale evidence.
 Its root-owned writer performs Runner observation through the fixed reviewed `ecs-user` SSH
 identity rather than depending on root SSH configuration.
-An exact current `runner_reclamation_plan_ready` notification is recorded as a non-blocking
-operational warning because the plan cannot authorize deletion; every other health alert blocks
-handoff.
+An exact current Runner or Control reclamation-plan-ready notification is recorded as a
+non-blocking operational warning because neither plan can authorize deletion; every unavailable,
+stale, lifecycle, capacity, or consistency alert blocks handoff.
 
 ## Compatibility boundary
 
