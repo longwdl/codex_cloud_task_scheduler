@@ -899,21 +899,19 @@ def _parse_issue(value: Any, repository: str, path: str) -> TrackerTask:
         for item in (issue_node_id, title, body, created_at, updated_at)
     ):
         raise GitHubCliTrackerError(f"{path} has invalid string field")
+    valid_state_reason = (
+        state_reason in {None, "", "REOPENED"}
+        if state == "OPEN"
+        else state_reason in {"COMPLETED", "NOT_PLANNED", "DUPLICATE"}
+        if state == "CLOSED"
+        else False
+    )
     if (
         not issue_node_id
         or not title
         or not created_at
         or not updated_at
-        or state not in {"OPEN", "CLOSED"}
-        or (
-            state_reason is not None
-            and state_reason not in {
-                "COMPLETED",
-                "NOT_PLANNED",
-                "DUPLICATE",
-                "REOPENED",
-            }
-        )
+        or not valid_state_reason
     ):
         raise GitHubCliTrackerError(f"{path} has invalid issue state")
     labels = _parse_labels(value["labels"], f"{path}.labels")
@@ -934,7 +932,7 @@ def _parse_issue(value: Any, repository: str, path: str) -> TrackerTask:
         issue_node_id=issue_node_id,
         updated_at=updated_at,
         state_reason=(
-            None if state_reason is None else str(state_reason).lower()
+            None if state_reason in {None, ""} else str(state_reason).lower()
         ),
     )
 

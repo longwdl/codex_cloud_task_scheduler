@@ -70,6 +70,27 @@ def pull_request(
 
 
 class GitHubCliTrackerTests(unittest.TestCase):
+    def test_open_issue_empty_state_reason_is_normalized_but_closed_requires_reason(self) -> None:
+        open_issue = issue()
+        open_issue["stateReason"] = ""
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            side_effect=[result(open_issue), json_lines_result()],
+        ):
+            observed = GitHubCliTracker(gh_path=GH).get_task(REPOSITORY, "12")
+        self.assertIsNotNone(observed)
+        assert observed is not None
+        self.assertTrue(observed.is_open)
+        self.assertIsNone(observed.state_reason)
+
+        closed_issue = dict(open_issue, state="CLOSED")
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            return_value=result(closed_issue),
+        ):
+            with self.assertRaisesRegex(GitHubCliTrackerError, "invalid issue state"):
+                GitHubCliTracker(gh_path=GH).get_task(REPOSITORY, "12")
+
     def test_exact_pull_request_and_issue_closure_are_verified(self) -> None:
         branch = "codex/issue-12-abcdef123456"
         open_pr = pull_request(branch=branch)
