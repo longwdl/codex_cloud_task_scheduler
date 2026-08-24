@@ -214,6 +214,9 @@ and operational-handoff receipts, Control/Runner release identity, schema-v2 Run
 references and their apply receipt, current planner status/unit digests, Runner tombstones and
 absences, GitHub, and Slack. It rebuilds isolated empty Control and Runner application filesystems
 without replacing either online environment.
+Permanent Runner tombstones created by isolated canaries may outlive and legitimately exceed the
+online Control WorkItem set; DR accepts them only as separately counted, fully terminal orphan
+evidence and never as an unexplained live registry.
 
 Release activation is Runner-first and Control-second, guarded by inactive service/locks, exact
 archive digest, both-host tests, prior links, database backup, and a permanent transaction receipt.

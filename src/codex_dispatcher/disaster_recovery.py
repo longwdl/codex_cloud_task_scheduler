@@ -105,6 +105,7 @@ class DisasterRecoveryResult:
     work_item_count: int
     runner_archive_count: int
     runner_absence_count: int
+    runner_orphan_terminal_count: int
     github_issue_count: int
     github_pr_count: int
     slack_receipt_count: int
@@ -136,6 +137,7 @@ class DisasterRecoveryResult:
             "work_item_count": self.work_item_count,
             "runner_archive_count": self.runner_archive_count,
             "runner_absence_count": self.runner_absence_count,
+            "runner_orphan_terminal_count": self.runner_orphan_terminal_count,
             "github_issue_count": self.github_issue_count,
             "github_pr_count": self.github_pr_count,
             "slack_receipt_count": self.slack_receipt_count,
@@ -351,7 +353,7 @@ def run_schema18_disaster_recovery_drill(
             if restored.schema_migration_versions() != _EXPECTED_DATABASE_SCHEMA:
                 raise DisasterRecoveryError("restored database is not exact schema 20")
             work_items = restored.list_work_items()
-            archive_count, absence_count = _verify_runner_snapshot(
+            archive_count, absence_count, orphan_terminal_count = _verify_runner_snapshot(
                 restored, runner_snapshot
             )
             github_issue_count, github_pr_count = _reconcile_github(
@@ -398,6 +400,7 @@ def run_schema18_disaster_recovery_drill(
             work_item_count=len(work_items),
             runner_archive_count=archive_count,
             runner_absence_count=absence_count,
+            runner_orphan_terminal_count=orphan_terminal_count,
             github_issue_count=github_issue_count,
             github_pr_count=github_pr_count,
             slack_receipt_count=slack_count,
@@ -423,7 +426,7 @@ def run_schema18_disaster_recovery_drill(
 
 def _verify_runner_snapshot(
     store: StateStore, snapshot: dict[str, object]
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     registry_ids = _string_set(snapshot.get("registry_work_item_ids"), "registry ids")
     archive_rows = _indexed_rows(snapshot.get("archives"), "Runner archives")
     absence_rows = _indexed_rows(snapshot.get("absences"), "Runner absences")
@@ -432,7 +435,13 @@ def _verify_runner_snapshot(
         record.work_item_id: record
         for record in store.list_work_item_absence_reconciliations()
     }
-    expected_registry = work_item_ids - set(absences)
+    archive_ids = set(archive_rows)
+    absence_ids = set(absence_rows)
+    if archive_ids & absence_ids:
+        raise DisasterRecoveryError("Runner terminal evidence sets overlap")
+    orphan_archive_ids = archive_ids - work_item_ids
+    orphan_absence_ids = absence_ids - work_item_ids
+    expected_registry = (work_item_ids - set(absences)) | orphan_archive_ids
     if registry_ids != expected_registry:
         raise DisasterRecoveryError("Runner registry set differs from restored SQLite")
 
@@ -441,7 +450,7 @@ def _verify_runner_snapshot(
         for record in store.list_work_item_archives()
         if record.status is WorkItemArchiveStatus.ARCHIVED
     }
-    if set(archive_rows) != set(archives):
+    if archive_ids & work_item_ids != set(archives):
         raise DisasterRecoveryError("Runner archive set differs from restored SQLite")
     for work_item_id, record in archives.items():
         assert record.response_json is not None
@@ -456,7 +465,7 @@ def _verify_runner_snapshot(
         ):
             raise DisasterRecoveryError("Runner archive tombstone conflicts with SQLite")
 
-    if set(absence_rows) != set(absences):
+    if absence_ids & work_item_ids != set(absences):
         raise DisasterRecoveryError("Runner absence set differs from restored SQLite")
     for work_item_id, record in absences.items():
         row = absence_rows[work_item_id]
@@ -465,7 +474,7 @@ def _verify_runner_snapshot(
             or row.get("evidence_sha256") != record.evidence_sha256
         ):
             raise DisasterRecoveryError("Runner absence receipt conflicts with SQLite")
-    return len(archives), len(absences)
+    return len(archives), len(absences), len(orphan_archive_ids | orphan_absence_ids)
 
 
 def _reconcile_github(store: StateStore, tracker: Tracker) -> tuple[int, int]:

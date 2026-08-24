@@ -126,7 +126,8 @@ Manually run backup and restore-drill services before enabling timers. Require m
 integrity `ok`, zero foreign-key violations, exact migration ledger, and removal of the temporary
 restore. Confirm dispatcher/health/backup/restore timers and Runner capacity timer are enabled and
 active only after the release handoff is observed. Also require the Runner reclamation-plan timer
-to be enabled/active, then record the exact operational boundary with:
+to be enabled/active. Run its service once after the release receipt commits, then re-run lifecycle
+health so both postdate and bind that receipt. Record the exact operational boundary with:
 
 ```bash
 sudo /opt/codex-dispatcher/current/scripts/codex-dispatcher-release-handoff-v1 \

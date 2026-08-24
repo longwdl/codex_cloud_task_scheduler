@@ -208,6 +208,10 @@ enables the dispatcher timer. It separately starts and verifies one backup befor
 backup timer. Start and verify one restore drill before enabling its weekly timer. Enable the four
 operational timers before manually starting the health service,
 because its systemd assertion intentionally treats a disabled timer as unhealthy.
+After the release receipt reaches `handoff_required`, manually run the Runner reclamation planner
+once more. The release transaction's own planner run intentionally precedes final receipt commit;
+the operational handoff requires a status observed after that durable boundary. Re-run health after
+the post-receipt planner so its Slack evidence binds the same exact plan.
 
 After all observations pass, create the separate immutable operational receipt:
 

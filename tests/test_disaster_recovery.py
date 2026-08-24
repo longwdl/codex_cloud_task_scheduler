@@ -40,6 +40,7 @@ HEAD = "d" * 40
 CHANNEL = "C0BR2D0MS8Y"
 MESSAGE_TS = "1700000000.000001"
 IMAGE = "ghcr.io/longwdl/codex-cloud-task-scheduler-runner@sha256:" + "f" * 64
+ORPHAN_WORK_ITEM = "wi_" + "e" * 24
 
 
 def _canonical(payload: dict[str, object]) -> str:
@@ -332,7 +333,7 @@ class DisasterRecoveryTests(unittest.TestCase):
             "schema_version": 2,
             "kind": "runner_recovery_snapshot",
             "current_release_commit": COMMIT,
-            "registry_work_item_ids": [item.work_item_id],
+            "registry_work_item_ids": [item.work_item_id, ORPHAN_WORK_ITEM],
             "archives": [
                 {
                     "work_item_id": item.work_item_id,
@@ -341,7 +342,15 @@ class DisasterRecoveryTests(unittest.TestCase):
                     "archived_at": "2026-08-23T01:01:00+00:00",
                     "storage_kind": "bounded_image",
                     "file_sha256": "e" * 64,
-                }
+                },
+                {
+                    "work_item_id": ORPHAN_WORK_ITEM,
+                    "expected_head_sha": "9" * 40,
+                    "reclaimed_bytes": 1024,
+                    "archived_at": "2026-08-22T00:00:00+00:00",
+                    "storage_kind": "fuse_ext4_image",
+                    "file_sha256": "8" * 64,
+                },
             ],
             "absences": [],
             "release_references": references,
@@ -440,6 +449,7 @@ class DisasterRecoveryTests(unittest.TestCase):
             ))
             self.assertEqual(1, result.work_item_count)
             self.assertEqual(1, result.runner_archive_count)
+            self.assertEqual(1, result.runner_orphan_terminal_count)
             self.assertEqual(1, result.github_issue_count)
             self.assertEqual(1, result.github_pr_count)
             self.assertEqual(1, result.slack_receipt_count)

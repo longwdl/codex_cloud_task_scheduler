@@ -94,6 +94,13 @@ mode-protected `receipt.json`. A failure writes `failed-receipt.json`; retain it
 backup, and remove only that exact recovery directory after investigation. Do not retry by reusing
 the same recovery directory.
 
+Runner terminal evidence may include canary or historical WorkItems that were intentionally never
+inserted into the online Control database. Such an extra registry is accepted only when the same ID
+has a complete permanent archive tombstone; an extra absence must preserve registry-absence
+semantics. The receipt reports these separately as `runner_orphan_terminal_count`. Any unexplained
+registry, overlapping archive/absence evidence, or mismatch for a Control WorkItem still fails
+closed.
+
 ## Empty Control Host recovery commands
 
 The drill exercises these application steps under `empty-control-host/`. On a genuinely new Linux
@@ -190,7 +197,8 @@ an immediate ordinary sweep all agree, with the sweep producing no unexpected wr
 ## Runner release and image reference inventory
 
 After every successful release sweep, backup, restore drill, health check, and timer activation,
-record the operational boundary without rewriting the transaction receipt:
+run one post-receipt Runner planner service and re-run health, then record the operational boundary
+without rewriting the transaction receipt:
 
 ```bash
 sudo /opt/codex-dispatcher/current/scripts/codex-dispatcher-release-handoff-v1 \
