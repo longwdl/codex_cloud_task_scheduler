@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from hashlib import sha256
 import json
 import os
 import platform
@@ -95,14 +96,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     disaster_recovery = subparsers.add_parser(
         "schema18-disaster-recovery",
-        help="Restore schema 18 in isolation and reconcile exact external receipts.",
+        help="Restore an independent bundle in isolation and reconcile external receipts.",
     )
     disaster_recovery.add_argument("--config", required=True, type=Path)
     disaster_recovery.add_argument("--recovery-root", required=True, type=Path)
-    disaster_recovery.add_argument("--control-release", required=True, type=Path)
-    disaster_recovery.add_argument("--release-receipt", required=True, type=Path)
-    disaster_recovery.add_argument("--handoff-receipt", required=True, type=Path)
-    disaster_recovery.add_argument("--runner-snapshot", required=True, type=Path)
+    disaster_recovery.add_argument("--bundle", required=True, type=Path)
     disaster_recovery.add_argument(
         "--execute-isolated",
         action="store_true",
@@ -110,6 +108,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Required acknowledgement of local isolated writes and provider read-backs.",
     )
     disaster_recovery.add_argument(
+        "--json", action="store_true", help="Emit machine-readable output."
+    )
+
+    disaster_bundle = subparsers.add_parser(
+        "disaster-recovery-bundle-create",
+        help="Create one self-contained, hash-bound two-host recovery bundle.",
+    )
+    disaster_bundle.add_argument("--config", required=True, type=Path)
+    disaster_bundle.add_argument("--bundle-root", required=True, type=Path)
+    disaster_bundle.add_argument("--control-release", required=True, type=Path)
+    disaster_bundle.add_argument("--release-receipt", required=True, type=Path)
+    disaster_bundle.add_argument("--handoff-receipt", required=True, type=Path)
+    disaster_bundle.add_argument("--runner-snapshot", required=True, type=Path)
+    disaster_bundle.add_argument(
+        "--provenance-database", action="append", default=[], type=Path
+    )
+    disaster_bundle.add_argument(
+        "--system-slack-receipt", action="append", default=[], type=Path
+    )
+    disaster_bundle.add_argument("--create", action="store_true", required=True)
+    disaster_bundle.add_argument(
         "--json", action="store_true", help="Emit machine-readable output."
     )
 
@@ -533,14 +552,62 @@ def _slack_bot_token() -> str | None:
     return None
 
 
-def _schema18_disaster_recovery(
+def _disaster_recovery_bundle_create(
     *,
     config_path: Path,
-    recovery_root: Path,
+    bundle_root: Path,
     control_release: Path,
     release_receipt: Path,
     handoff_receipt: Path,
     runner_snapshot_path: Path,
+    provenance_databases: tuple[Path, ...],
+    system_slack_receipts: tuple[Path, ...],
+) -> tuple[int, dict[str, object]]:
+    try:
+        from codex_dispatcher.disaster_recovery import create_disaster_recovery_bundle
+        from codex_dispatcher.ssh_runtime import (
+            load_protected_ssh_config,
+            validate_runtime_state_path,
+        )
+
+        config = load_protected_ssh_config(config_path)
+        validate_runtime_state_path(config.scheduler.database_path)
+        bundle = create_disaster_recovery_bundle(
+            database_path=config.scheduler.database_path,
+            backup_directory=config.scheduler.database_path.parent / "backups",
+            bundle_root=bundle_root,
+            control_release_path=control_release,
+            control_config_path=config_path,
+            release_receipt_path=release_receipt,
+            handoff_receipt_path=handoff_receipt,
+            runner_snapshot_path=runner_snapshot_path,
+            provenance_database_paths=provenance_databases,
+            system_slack_receipt_paths=system_slack_receipts,
+        )
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        return 1, {
+            "ok": False,
+            "disaster_recovery_bundle": True,
+            "error": str(exc),
+        }
+    return 0, {
+        "ok": True,
+        "disaster_recovery_bundle": True,
+        "bundle_root": str(bundle.root),
+        "manifest_sha256": bundle.manifest_sha256,
+        "release_commit": bundle.release_commit,
+        "source_backup_sha256": sha256(bundle.source_backup.read_bytes()).hexdigest(),
+        "provenance_database_count": len(bundle.provenance_databases),
+        "system_slack_receipt_count": len(bundle.system_slack_receipts),
+        "online_state_modified": False,
+    }
+
+
+def _schema18_disaster_recovery(
+    *,
+    config_path: Path,
+    recovery_root: Path,
+    bundle_root: Path,
 ) -> tuple[int, dict[str, object]]:
     from codex_dispatcher.redaction import redact_text
 
@@ -557,7 +624,7 @@ def _schema18_disaster_recovery(
         }
     try:
         from codex_dispatcher.disaster_recovery import (
-            load_runner_recovery_snapshot,
+            load_disaster_recovery_bundle,
             run_schema18_disaster_recovery_drill,
         )
         from codex_dispatcher.slack_web_api import SlackWebApiPublisher
@@ -581,14 +648,8 @@ def _schema18_disaster_recovery(
                 timeout_seconds=config.slack_runtime.request_timeout_seconds,
             )
         result = run_schema18_disaster_recovery_drill(
-            database_path=config.scheduler.database_path,
-            backup_directory=config.scheduler.database_path.parent / "backups",
+            bundle=load_disaster_recovery_bundle(bundle_root),
             recovery_root=recovery_root,
-            control_release_path=control_release,
-            control_config_path=config_path,
-            release_receipt_path=release_receipt,
-            handoff_receipt_path=handoff_receipt,
-            runner_snapshot=load_runner_recovery_snapshot(runner_snapshot_path),
             tracker=GitHubCliTracker(
                 gh_path=runtime.gh_path,
                 token=github_token,
@@ -1043,10 +1104,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         code, payload = _schema18_disaster_recovery(
             config_path=args.config,
             recovery_root=args.recovery_root,
+            bundle_root=args.bundle,
+        )
+        _emit(payload, args.json)
+        return code
+    if args.command == "disaster-recovery-bundle-create":
+        code, payload = _disaster_recovery_bundle_create(
+            config_path=args.config,
+            bundle_root=args.bundle_root,
             control_release=args.control_release,
             release_receipt=args.release_receipt,
             handoff_receipt=args.handoff_receipt,
             runner_snapshot_path=args.runner_snapshot,
+            provenance_databases=tuple(args.provenance_database),
+            system_slack_receipts=tuple(args.system_slack_receipt),
         )
         _emit(payload, args.json)
         return code

@@ -31,8 +31,10 @@ network call, telemetry path, migration, or external write requires an explicit 
   WorkItem Slack delivery uses `issue_channel_id`, health alert delivery uses `system_channel_id`.
 - `work_item_lifecycle.py`, `terminal_retention.py`, `terminal_storage.py`: disposition, archive,
   absence, and branch cleanup.
-- `control_host_backup.py`, `disaster_recovery.py`, `release_handoff.py`: backup, two-host recovery,
-  and immutable operational release evidence.
+- `control_host_backup.py`, `disaster_recovery.py`, `release_handoff.py`: backup, independent
+  two-host recovery bundle/drill, and immutable operational release evidence.
+- `control_host_reclamation.py`: exact read-only Control release/recovery-artifact planning; it has
+  no deletion entry point.
 - `runner_asset_reclamation.py`, `runner_release_references.py`, `reclamation_canary.py`: exact
   asset planning, transactional references, and isolated threshold/system-channel proof.
 - `lifecycle_health.py`, `runner_reclamation_status.py`, `github_api_metrics.py`: unattended health

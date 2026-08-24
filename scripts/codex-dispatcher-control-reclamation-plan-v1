@@ -1,0 +1,20 @@
+#!/bin/sh
+
+set -eu
+umask 077
+
+if [ "$#" -ne 1 ] || [ "$1" != "--write-plan" ]; then
+    printf '%s\n' 'codex-dispatcher-control-reclamation-plan-v1: --write-plan is required' >&2
+    exit 2
+fi
+
+export HOME=/var/lib/codex-dispatcher/home
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+export PATH=/opt/codex-python/current/bin:/usr/bin:/bin
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONNOUSERSITE=1
+export PYTHONPATH=/opt/codex-dispatcher/current/src
+
+exec /opt/codex-python/current/bin/python3 -P -s -m \
+    codex_dispatcher.control_host_reclamation --write-plan

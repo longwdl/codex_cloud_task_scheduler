@@ -11,14 +11,19 @@ from codex_dispatcher.control_host_backup import create_state_backup
 from codex_dispatcher.disaster_recovery import (
     _reconcile_github,
     collect_runner_recovery_snapshot,
+    create_disaster_recovery_bundle,
     DisasterRecoveryError,
     run_schema18_disaster_recovery_drill,
 )
 from codex_dispatcher.runner_protocol import RunnerOperation, RunnerRequest
+from codex_dispatcher.health_alert_delivery import HealthAlertDeliveryCoordinator
+from codex_dispatcher.lifecycle_health import LifecycleAlert
+from codex_dispatcher.reclamation_canary import run_local_reclamation_canary
 from codex_dispatcher.runner_reclamation_status import build_runner_reclamation_status
 from codex_dispatcher.runner_transport import RunnerArchiveReply, RunnerArchiveState
 from codex_dispatcher.slack_reporting import (
     SlackDeliveryReceipt,
+    SlackOutboundMessage,
     SlackReportKind,
     build_slack_report,
 )
@@ -40,7 +45,15 @@ HEAD = "d" * 40
 CHANNEL = "C0BR2D0MS8Y"
 MESSAGE_TS = "1700000000.000001"
 IMAGE = "ghcr.io/longwdl/codex-cloud-task-scheduler-runner@sha256:" + "f" * 64
-ORPHAN_WORK_ITEM = "wi_" + "e" * 24
+ORPHAN_ITEM = WorkItem.new(
+    repository="owner/canary",
+    issue_number=7,
+    issue_node_id="I_kwDOCanary7",
+    base_branch="main",
+    base_sha="8" * 40,
+    at="2026-08-22T00:00:00+00:00",
+)
+ORPHAN_WORK_ITEM = ORPHAN_ITEM.work_item_id
 
 
 def _canonical(payload: dict[str, object]) -> str:
@@ -63,6 +76,29 @@ class _SlackVerifier:
     def verify_receipt(self, receipt: SlackDeliveryReceipt) -> SlackDeliveryReceipt:
         self.receipts.append(receipt)
         return receipt
+
+
+class _SlackPublisher:
+    def __init__(self) -> None:
+        self.count = 0
+
+    def publish(self, report: SlackOutboundMessage) -> SlackDeliveryReceipt:
+        self.count += 1
+        message_ts = f"1700000100.{self.count:06d}"
+        thread_ts = report.thread_ts or message_ts
+        query = (
+            ""
+            if report.thread_ts is None
+            else f"?thread_ts={thread_ts}&cid={report.channel_id}"
+        )
+        return SlackDeliveryReceipt(
+            report.deduplication_key,
+            report.channel_id,
+            message_ts,
+            thread_ts,
+            f"https://fixture.slack.com/archives/{report.channel_id}/"
+            f"p{message_ts.replace('.', '')}{query}",
+        )
 
 
 class DisasterRecoveryTests(unittest.TestCase):
@@ -162,7 +198,7 @@ class DisasterRecoveryTests(unittest.TestCase):
             )
 
             self.assertEqual(COMMIT, snapshot["current_release_commit"])
-            self.assertEqual([], snapshot["registry_work_item_ids"])
+            self.assertEqual([], snapshot["registry"])
 
     def _fixture(self, root: Path) -> dict[str, object]:
         database = root / "state.db"
@@ -241,12 +277,26 @@ class DisasterRecoveryTests(unittest.TestCase):
                     permalink,
                 ),
             )
+            coordinator = HealthAlertDeliveryCoordinator(
+                store=store,
+                publisher=_SlackPublisher(),
+                channel_id="C0BS3LPG43G",
+            )
+            coordinator.reconcile(
+                (LifecycleAlert("runner_reclamation_plan_ready", plan_sha256="1" * 64),),
+                checked_at="2026-08-23T01:10:00Z",
+                alerts_truncated=False,
+            )
+            coordinator.reconcile(
+                (), checked_at="2026-08-23T01:11:00Z", alerts_truncated=False
+            )
         create_state_backup(database, backups, now=NOW)
 
         release = root / "releases" / COMMIT
         for relative in (
             "scripts/codex-dispatcher-v1",
             "scripts/codex-dispatcher-backup-v1",
+            "scripts/codex-dispatcher-control-reclamation-plan-v1",
             "scripts/codex-dispatcher-release-handoff-v1",
             "scripts/codex-dispatcher-restore-drill-v1",
             "scripts/codex-runner-maintenance-v1",
@@ -330,10 +380,21 @@ class DisasterRecoveryTests(unittest.TestCase):
             ).encode()
         ).hexdigest()
         runner_snapshot = {
-            "schema_version": 2,
+            "schema_version": 3,
             "kind": "runner_recovery_snapshot",
             "current_release_commit": COMMIT,
-            "registry_work_item_ids": [item.work_item_id, ORPHAN_WORK_ITEM],
+            "registry": [
+                {
+                    "work_item_id": item.work_item_id,
+                    "repository": item.repository,
+                    "issue_number": item.issue_number,
+                },
+                {
+                    "work_item_id": ORPHAN_ITEM.work_item_id,
+                    "repository": ORPHAN_ITEM.repository,
+                    "issue_number": ORPHAN_ITEM.issue_number,
+                },
+            ],
             "archives": [
                 {
                     "work_item_id": item.work_item_id,
@@ -387,6 +448,26 @@ class DisasterRecoveryTests(unittest.TestCase):
         handoff_payload["evidence_sha256"] = _canonical(handoff_payload)
         handoff = root / "handoff-receipt.json"
         handoff.write_text(json.dumps(handoff_payload), encoding="utf-8")
+        runner_snapshot_path = root / "runner-snapshot.json"
+        _write_canonical(runner_snapshot_path, runner_snapshot)
+        provenance = root / "provenance.db"
+        with StateStore(provenance) as store:
+            store.migrate()
+            store.create_work_item(ORPHAN_ITEM)
+            store.record_published_sha(
+                ORPHAN_ITEM.work_item_id,
+                previous_sha=ORPHAN_ITEM.base_sha,
+                head_sha="9" * 40,
+            )
+        system_receipt = root / "system-canary-receipt.json"
+        _write_canonical(
+            system_receipt,
+            run_local_reclamation_canary(
+                fixture_id="rc_" + "3" * 32,
+                system_channel_id="C0BS3LPG43G",
+                issue_channel_id=CHANNEL,
+            ),
+        )
         tracker = FakeTracker()
         tracker.tasks["1"] = TrackerTask(
             repository="owner/repo",
@@ -418,9 +499,29 @@ class DisasterRecoveryTests(unittest.TestCase):
             "handoff": handoff,
             "config": config,
             "runner_snapshot": runner_snapshot,
+            "runner_snapshot_path": runner_snapshot_path,
+            "provenance": provenance,
+            "system_receipt": system_receipt,
             "tracker": tracker,
             "item": item,
         }
+
+    def _bundle(
+        self, root: Path, fixture: dict[str, object], *, name: str = "bundle"
+    ):
+        return create_disaster_recovery_bundle(
+            database_path=fixture["database"],  # type: ignore[arg-type]
+            backup_directory=fixture["backups"],  # type: ignore[arg-type]
+            bundle_root=root / name,
+            control_release_path=fixture["release"],  # type: ignore[arg-type]
+            control_config_path=fixture["config"],  # type: ignore[arg-type]
+            release_receipt_path=fixture["receipt"],  # type: ignore[arg-type]
+            handoff_receipt_path=fixture["handoff"],  # type: ignore[arg-type]
+            runner_snapshot_path=fixture["runner_snapshot_path"],  # type: ignore[arg-type]
+            provenance_database_paths=(fixture["provenance"],),  # type: ignore[arg-type]
+            system_slack_receipt_paths=(fixture["system_receipt"],),  # type: ignore[arg-type]
+            now=NOW.replace(hour=13),
+        )
 
     def test_full_schema18_drill_restores_reconciles_and_rebuilds_empty_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -428,16 +529,11 @@ class DisasterRecoveryTests(unittest.TestCase):
             fixture = self._fixture(root)
             verifier = _SlackVerifier()
             recovery = root / "recovery"
+            bundle = self._bundle(root, fixture)
 
             result = run_schema18_disaster_recovery_drill(
-                database_path=fixture["database"],  # type: ignore[arg-type]
-                backup_directory=fixture["backups"],  # type: ignore[arg-type]
+                bundle=bundle,
                 recovery_root=recovery,
-                control_release_path=fixture["release"],  # type: ignore[arg-type]
-                control_config_path=fixture["config"],  # type: ignore[arg-type]
-                release_receipt_path=fixture["receipt"],  # type: ignore[arg-type]
-                handoff_receipt_path=fixture["handoff"],  # type: ignore[arg-type]
-                runner_snapshot=fixture["runner_snapshot"],  # type: ignore[arg-type]
                 tracker=fixture["tracker"],  # type: ignore[arg-type]
                 slack_verifier=verifier,
                 now=NOW.replace(hour=13),
@@ -452,8 +548,10 @@ class DisasterRecoveryTests(unittest.TestCase):
             self.assertEqual(1, result.runner_orphan_terminal_count)
             self.assertEqual(1, result.github_issue_count)
             self.assertEqual(1, result.github_pr_count)
-            self.assertEqual(1, result.slack_receipt_count)
-            self.assertEqual(1, len(verifier.receipts))
+            self.assertEqual(5, result.slack_receipt_count)
+            self.assertEqual(1, result.work_item_slack_receipt_count)
+            self.assertEqual(4, result.system_slack_receipt_count)
+            self.assertEqual(5, len(verifier.receipts))
             rebuilt = (
                 recovery
                 / "empty-control-host/var/lib/codex-dispatcher/state.db"
@@ -481,20 +579,18 @@ class DisasterRecoveryTests(unittest.TestCase):
             archives = snapshot["archives"]
             assert isinstance(archives, list) and isinstance(archives[0], dict)
             archives[0]["reclaimed_bytes"] = 1
+            _write_canonical(
+                fixture["runner_snapshot_path"], snapshot  # type: ignore[arg-type]
+            )
+            bundle = self._bundle(root, fixture, name="drifted-bundle")
             recovery = root / "failed-recovery"
 
             with self.assertRaisesRegex(
                 DisasterRecoveryError, "archive tombstone conflicts"
             ):
                 run_schema18_disaster_recovery_drill(
-                    database_path=fixture["database"],  # type: ignore[arg-type]
-                    backup_directory=fixture["backups"],  # type: ignore[arg-type]
+                    bundle=bundle,
                     recovery_root=recovery,
-                    control_release_path=fixture["release"],  # type: ignore[arg-type]
-                    control_config_path=fixture["config"],  # type: ignore[arg-type]
-                    release_receipt_path=fixture["receipt"],  # type: ignore[arg-type]
-                    handoff_receipt_path=fixture["handoff"],  # type: ignore[arg-type]
-                    runner_snapshot=snapshot,
                     tracker=fixture["tracker"],  # type: ignore[arg-type]
                     slack_verifier=_SlackVerifier(),
                     now=NOW,

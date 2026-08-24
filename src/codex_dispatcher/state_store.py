@@ -3941,6 +3941,15 @@ class StateStore:
         ).fetchone()
         return self._row_to_health_alert_delivery(row) if row is not None else None
 
+    def list_health_alert_deliveries(self) -> tuple[HealthAlertDelivery, ...]:
+        """Return the complete immutable system-channel delivery ledger."""
+        return tuple(
+            self._row_to_health_alert_delivery(row)
+            for row in self._connection.execute(
+                "SELECT * FROM health_alert_deliveries ORDER BY delivery_key"
+            )
+        )
+
     def prepare_health_alert_delivery(
         self,
         report: SlackOutboundMessage,

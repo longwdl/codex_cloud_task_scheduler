@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import stat
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -38,11 +39,13 @@ from codex_dispatcher.work_item_lifecycle import (
 from codex_dispatcher.work_items import WorkItemState, validate_work_item_id
 
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
+_BUNDLE_SCHEMA_VERSION = 1
 _EXPECTED_DATABASE_SCHEMA = tuple(range(1, 21))
 _RELEASE_FILES = (
     "scripts/codex-dispatcher-v1",
     "scripts/codex-dispatcher-backup-v1",
+    "scripts/codex-dispatcher-control-reclamation-plan-v1",
     "scripts/codex-dispatcher-release-handoff-v1",
     "scripts/codex-dispatcher-restore-drill-v1",
     "scripts/codex-runner-maintenance-v1",
@@ -72,6 +75,7 @@ _RUNNER_PLANNER_UNITS = (
 )
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _IMAGE_RE = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
+_BACKUP_NAME_RE = re.compile(r"state-([0-9]{8}T[0-9]{6}\.[0-9]{6}Z)\.db")
 
 
 class DisasterRecoveryError(RuntimeError):
@@ -80,6 +84,22 @@ class DisasterRecoveryError(RuntimeError):
 
 class SlackReceiptVerifier(Protocol):
     def verify_receipt(self, receipt: SlackDeliveryReceipt) -> SlackDeliveryReceipt: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DisasterRecoveryBundle:
+    root: Path
+    manifest_sha256: str
+    release_commit: str
+    source_backup_at: str
+    source_backup: Path
+    control_release: Path
+    control_config: Path
+    release_receipt: Path
+    handoff_receipt: Path
+    runner_snapshot: Path
+    provenance_databases: tuple[Path, ...]
+    system_slack_receipts: tuple[Path, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +128,8 @@ class DisasterRecoveryResult:
     runner_orphan_terminal_count: int
     github_issue_count: int
     github_pr_count: int
+    work_item_slack_receipt_count: int
+    system_slack_receipt_count: int
     slack_receipt_count: int
     rto_milliseconds: int
 
@@ -140,6 +162,8 @@ class DisasterRecoveryResult:
             "runner_orphan_terminal_count": self.runner_orphan_terminal_count,
             "github_issue_count": self.github_issue_count,
             "github_pr_count": self.github_pr_count,
+            "work_item_slack_receipt_count": self.work_item_slack_receipt_count,
+            "system_slack_receipt_count": self.system_slack_receipt_count,
             "slack_receipt_count": self.slack_receipt_count,
             "rto_milliseconds": self.rto_milliseconds,
             "rto_scope": (
@@ -200,12 +224,26 @@ def collect_runner_recovery_snapshot(
         work_items_root / ".absences", trusted_owner_uid=trusted_owner_uid
     )
 
-    registry_ids: list[str] = []
+    registry_rows: list[dict[str, object]] = []
     for path, payload, _ in registry:
         work_item_id = validate_work_item_id(payload.get("work_item_id"))
-        if path.stem != work_item_id:
+        repository = payload.get("repository")
+        issue_number = payload.get("issue_number")
+        if (
+            path.stem != work_item_id
+            or not isinstance(repository, str)
+            or "/" not in repository
+            or type(issue_number) is not int
+            or issue_number <= 0
+        ):
             raise DisasterRecoveryError("Runner registry filename conflicts with identity")
-        registry_ids.append(work_item_id)
+        registry_rows.append(
+            {
+                "work_item_id": work_item_id,
+                "repository": repository,
+                "issue_number": issue_number,
+            }
+        )
 
     archive_rows: list[dict[str, object]] = []
     for path, payload, digest in archives:
@@ -271,7 +309,7 @@ def collect_runner_recovery_snapshot(
         "schema_version": _SCHEMA_VERSION,
         "kind": "runner_recovery_snapshot",
         "current_release_commit": current_release_commit,
-        "registry_work_item_ids": sorted(registry_ids),
+        "registry": sorted(registry_rows, key=lambda row: str(row["work_item_id"])),
         "archives": sorted(archive_rows, key=lambda row: str(row["work_item_id"])),
         "absences": sorted(absence_rows, key=lambda row: str(row["work_item_id"])),
         "release_references": references,
@@ -293,16 +331,286 @@ def load_runner_recovery_snapshot(path: Path) -> dict[str, object]:
     return payload
 
 
-def run_schema18_disaster_recovery_drill(
+def create_disaster_recovery_bundle(
     *,
     database_path: Path,
     backup_directory: Path,
-    recovery_root: Path,
+    bundle_root: Path,
     control_release_path: Path,
     control_config_path: Path,
     release_receipt_path: Path,
     handoff_receipt_path: Path,
-    runner_snapshot: dict[str, object],
+    runner_snapshot_path: Path,
+    provenance_database_paths: tuple[Path, ...] = (),
+    system_slack_receipt_paths: tuple[Path, ...] = (),
+    now: datetime | None = None,
+) -> DisasterRecoveryBundle:
+    """Create one self-contained, hash-bound bundle for loss of both Linux hosts."""
+    moment = datetime.now(timezone.utc) if now is None else now
+    if not isinstance(moment, datetime) or moment.tzinfo is None:
+        raise ValueError("bundle timestamp must be timezone-aware")
+    moment = moment.astimezone(timezone.utc)
+    restore_evidence = drill_latest_state_backup(database_path, backup_directory, now=moment)
+    release = _read_release_receipt(release_receipt_path)
+    release_commit = _validate_commit(release.get("release_commit"), "release_commit")
+    if control_release_path.name != release_commit:
+        raise DisasterRecoveryError("Control release path conflicts with receipt")
+    _read_handoff_receipt(handoff_receipt_path, release_commit)
+    _validate_release_tree(control_release_path)
+    _validate_protected_file(control_config_path, "Control config", maximum=256 * 1024)
+    snapshot = load_runner_recovery_snapshot(runner_snapshot_path)
+    if _validate_runner_snapshot(snapshot) != release_commit:
+        raise DisasterRecoveryError("Control and Runner release commits differ")
+    _prepare_new_recovery_root(bundle_root)
+    try:
+        state_target = bundle_root / "state.db"
+        with StateStore(restore_evidence.source_path, read_only=True) as source:
+            source.backup(state_target)
+        os.chmod(state_target, 0o600, follow_symlinks=False)
+
+        release_target = bundle_root / "release"
+        shutil.copytree(control_release_path, release_target, symlinks=False)
+        config_target = bundle_root / "control-config.toml"
+        release_receipt_target = bundle_root / "release-receipt.json"
+        handoff_target = bundle_root / "handoff-receipt.json"
+        snapshot_target = bundle_root / "runner-snapshot.json"
+        for source, target in (
+            (control_config_path, config_target),
+            (release_receipt_path, release_receipt_target),
+            (handoff_receipt_path, handoff_target),
+            (runner_snapshot_path, snapshot_target),
+        ):
+            shutil.copy2(source, target, follow_symlinks=False)
+            os.chmod(target, 0o600, follow_symlinks=False)
+
+        provenance_root = bundle_root / "provenance-databases"
+        provenance_root.mkdir(mode=0o700)
+        provenance_targets: list[Path] = []
+        for index, source_path in enumerate(provenance_database_paths):
+            target = provenance_root / f"source-{index:02d}.db"
+            with StateStore(source_path, read_only=True) as source:
+                if source.integrity_check() != "ok" or source.foreign_key_violation_count():
+                    raise DisasterRecoveryError("provenance database is not integral")
+                if source.schema_migration_versions() != _EXPECTED_DATABASE_SCHEMA:
+                    raise DisasterRecoveryError("provenance database is not exact schema 20")
+                source.backup(target)
+            os.chmod(target, 0o600, follow_symlinks=False)
+            provenance_targets.append(target)
+
+        system_root = bundle_root / "system-slack-receipts"
+        system_root.mkdir(mode=0o700)
+        system_targets: list[Path] = []
+        for index, source_path in enumerate(system_slack_receipt_paths):
+            target = system_root / f"receipt-{index:02d}.json"
+            _read_json_file(source_path, "system Slack receipt", maximum=512 * 1024)
+            shutil.copy2(source_path, target, follow_symlinks=False)
+            os.chmod(target, 0o600, follow_symlinks=False)
+            system_targets.append(target)
+
+        artifacts: list[dict[str, object]] = []
+        for path in sorted(bundle_root.rglob("*")):
+            if path.is_dir():
+                continue
+            relative = path.relative_to(bundle_root).as_posix()
+            artifacts.append(
+                {
+                    "path": relative,
+                    "size_bytes": path.stat(follow_symlinks=False).st_size,
+                    "sha256": _sha256_file(path),
+                }
+            )
+        manifest: dict[str, object] = {
+            "schema_version": _BUNDLE_SCHEMA_VERSION,
+            "kind": "codex_dispatcher_disaster_recovery_bundle",
+            "release_commit": release_commit,
+            "created_at": moment.isoformat().replace("+00:00", "Z"),
+            "source_backup_at": _backup_timestamp_from_name(
+                restore_evidence.source_path.name
+            ).isoformat().replace("+00:00", "Z"),
+            "contains_protected_control_config": True,
+            "online_state_modified": False,
+            "artifacts": artifacts,
+            "provenance_databases": [
+                path.relative_to(bundle_root).as_posix() for path in provenance_targets
+            ],
+            "system_slack_receipts": [
+                path.relative_to(bundle_root).as_posix() for path in system_targets
+            ],
+        }
+        manifest["evidence_sha256"] = _canonical_sha256(manifest)
+        _write_json_atomic(bundle_root / "manifest.json", manifest)
+        _fsync_directory(bundle_root)
+        return load_disaster_recovery_bundle(bundle_root)
+    except BaseException:
+        failed = bundle_root / "failed-receipt.json"
+        if bundle_root.is_dir() and not failed.exists():
+            try:
+                _write_json_atomic(
+                    failed,
+                    {
+                        "schema_version": _BUNDLE_SCHEMA_VERSION,
+                        "kind": "codex_dispatcher_disaster_recovery_bundle",
+                        "status": "failed",
+                        "online_state_modified": False,
+                    },
+                )
+            except OSError:
+                pass
+        raise
+
+
+def load_disaster_recovery_bundle(root: Path) -> DisasterRecoveryBundle:
+    """Validate every bundle byte without consulting either original Linux host."""
+    _protected_directory(root, "disaster recovery bundle")
+    manifest_path = root / "manifest.json"
+    manifest = _read_json_file(
+        manifest_path, "disaster recovery bundle manifest", maximum=2 * 1024 * 1024
+    )
+    evidence = manifest.get("evidence_sha256")
+    body = dict(manifest)
+    body.pop("evidence_sha256", None)
+    artifacts = manifest.get("artifacts")
+    provenance_values = manifest.get("provenance_databases")
+    system_values = manifest.get("system_slack_receipts")
+    if (
+        manifest.get("schema_version") != _BUNDLE_SCHEMA_VERSION
+        or manifest.get("kind") != "codex_dispatcher_disaster_recovery_bundle"
+        or manifest.get("contains_protected_control_config") is not True
+        or manifest.get("online_state_modified") is not False
+        or not isinstance(evidence, str)
+        or evidence != _canonical_sha256(body)
+        or not isinstance(artifacts, list)
+        or not isinstance(provenance_values, list)
+        or not isinstance(system_values, list)
+    ):
+        raise DisasterRecoveryError("disaster recovery bundle manifest is invalid")
+    expected_paths: set[str] = set()
+    for row in artifacts:
+        if not isinstance(row, dict):
+            raise DisasterRecoveryError("disaster recovery bundle artifact is invalid")
+        relative = row.get("path")
+        digest = row.get("sha256")
+        size = row.get("size_bytes")
+        if (
+            not isinstance(relative, str)
+            or not relative
+            or relative.startswith("/")
+            or ".." in Path(relative).parts
+            or relative in expected_paths
+            or not isinstance(digest, str)
+            or _SHA256_RE.fullmatch(digest) is None
+            or type(size) is not int
+            or size < 0
+        ):
+            raise DisasterRecoveryError("disaster recovery bundle artifact is invalid")
+        path = root / relative
+        metadata = path.stat(follow_symlinks=False)
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid not in {0, os.geteuid()}
+            or metadata.st_mode & 0o022
+            or metadata.st_nlink != 1
+            or metadata.st_size != size
+            or _sha256_file(path) != digest
+        ):
+            raise DisasterRecoveryError("disaster recovery bundle artifact digest conflicts")
+        expected_paths.add(relative)
+    actual_paths = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and path != manifest_path
+    }
+    if actual_paths != expected_paths:
+        raise DisasterRecoveryError("disaster recovery bundle contains unknown artifacts")
+
+    release_commit = _validate_commit(manifest.get("release_commit"), "release_commit")
+    backup_timestamp = manifest.get("source_backup_at")
+    if not isinstance(backup_timestamp, str):
+        raise DisasterRecoveryError("disaster recovery bundle backup timestamp is invalid")
+    try:
+        parsed_backup_timestamp = datetime.fromisoformat(
+            backup_timestamp.replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise DisasterRecoveryError(
+            "disaster recovery bundle backup timestamp is invalid"
+        ) from exc
+    if parsed_backup_timestamp.tzinfo is None:
+        raise DisasterRecoveryError("disaster recovery bundle backup timestamp lacks timezone")
+    source_backup_at = parsed_backup_timestamp.astimezone(timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
+    provenance = _bundle_path_list(root, provenance_values, expected_paths)
+    system = _bundle_path_list(root, system_values, expected_paths)
+    bundle = DisasterRecoveryBundle(
+        root=root,
+        manifest_sha256=_sha256_file(manifest_path),
+        release_commit=release_commit,
+        source_backup_at=source_backup_at,
+        source_backup=root / "state.db",
+        control_release=root / "release",
+        control_config=root / "control-config.toml",
+        release_receipt=root / "release-receipt.json",
+        handoff_receipt=root / "handoff-receipt.json",
+        runner_snapshot=root / "runner-snapshot.json",
+        provenance_databases=provenance,
+        system_slack_receipts=system,
+    )
+    for required in (
+        bundle.source_backup,
+        bundle.control_config,
+        bundle.release_receipt,
+        bundle.handoff_receipt,
+        bundle.runner_snapshot,
+    ):
+        if required.relative_to(root).as_posix() not in expected_paths:
+            raise DisasterRecoveryError("disaster recovery bundle is incomplete")
+    _validate_release_tree(bundle.control_release)
+    with tempfile.TemporaryDirectory() as raw:
+        validation_copy = Path(raw) / "state.db"
+        shutil.copy2(bundle.source_backup, validation_copy, follow_symlinks=False)
+        with StateStore(validation_copy, read_only=True) as store:
+            if (
+                store.integrity_check() != "ok"
+                or store.foreign_key_violation_count()
+                or store.schema_migration_versions() != _EXPECTED_DATABASE_SCHEMA
+            ):
+                raise DisasterRecoveryError("bundled Control database is invalid")
+    return bundle
+
+
+def _bundle_path_list(
+    root: Path, values: list[object], expected_paths: set[str]
+) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for value in values:
+        if (
+            not isinstance(value, str)
+            or value not in expected_paths
+            or value.startswith("/")
+            or ".." in Path(value).parts
+        ):
+            raise DisasterRecoveryError("disaster recovery bundle path list is invalid")
+        paths.append(root / value)
+    if len(paths) != len(set(paths)):
+        raise DisasterRecoveryError("disaster recovery bundle path list is duplicated")
+    return tuple(paths)
+
+
+def _backup_timestamp_from_name(name: str) -> datetime:
+    match = _BACKUP_NAME_RE.fullmatch(name)
+    if match is None:
+        raise DisasterRecoveryError("source backup has a noncanonical name")
+    return datetime.strptime(match.group(1), "%Y%m%dT%H%M%S.%fZ").replace(
+        tzinfo=timezone.utc
+    )
+
+
+def run_schema18_disaster_recovery_drill(
+    *,
+    bundle: DisasterRecoveryBundle,
+    recovery_root: Path,
     tracker: Tracker,
     slack_verifier: SlackReceiptVerifier | None,
     now: datetime | None = None,
@@ -315,25 +623,27 @@ def run_schema18_disaster_recovery_drill(
     _prepare_new_recovery_root(recovery_root)
     receipt_path = recovery_root / "receipt.json"
     try:
-        restore_evidence = drill_latest_state_backup(
-            database_path, backup_directory, now=moment
-        )
+        verified_bundle = load_disaster_recovery_bundle(bundle.root)
+        if verified_bundle != bundle:
+            raise DisasterRecoveryError("disaster recovery bundle changed after loading")
         restored_database = recovery_root / "restored-state.db"
-        with StateStore(restore_evidence.source_path, read_only=True) as source:
-            source.backup(restored_database)
+        shutil.copy2(bundle.source_backup, restored_database, follow_symlinks=False)
         os.chmod(restored_database, 0o600, follow_symlinks=False)
         _fsync_file(restored_database)
 
-        release = _read_release_receipt(release_receipt_path)
+        release = _read_release_receipt(bundle.release_receipt)
         release_commit = _validate_commit(release["release_commit"], "release_commit")
-        handoff = _read_handoff_receipt(handoff_receipt_path, release_commit)
-        release_receipt_sha256 = _sha256_file(release_receipt_path)
+        handoff = _read_handoff_receipt(bundle.handoff_receipt, release_commit)
+        release_receipt_sha256 = _sha256_file(bundle.release_receipt)
         if handoff.get("release_receipt_sha256") != release_receipt_sha256:
             raise DisasterRecoveryError("handoff receipt release digest conflicts")
-        if control_release_path.name != release_commit:
+        if bundle.release_commit != release_commit:
+            raise DisasterRecoveryError("bundle release identity conflicts")
+        if bundle.control_release.name != "release":
             raise DisasterRecoveryError("Control release path conflicts with receipt")
-        _validate_release_tree(control_release_path)
-        _validate_protected_file(control_config_path, "Control config", maximum=256 * 1024)
+        _validate_release_tree(bundle.control_release)
+        _validate_protected_file(bundle.control_config, "Control config", maximum=256 * 1024)
+        runner_snapshot = load_runner_recovery_snapshot(bundle.runner_snapshot)
         runner_commit = _validate_runner_snapshot(runner_snapshot)
         if runner_commit != release_commit:
             raise DisasterRecoveryError("Control and Runner release commits differ")
@@ -354,33 +664,49 @@ def run_schema18_disaster_recovery_drill(
                 raise DisasterRecoveryError("restored database is not exact schema 20")
             work_items = restored.list_work_items()
             archive_count, absence_count, orphan_terminal_count = _verify_runner_snapshot(
-                restored, runner_snapshot
+                restored, runner_snapshot, bundle.provenance_databases
             )
             github_issue_count, github_pr_count = _reconcile_github(
                 restored, tracker
             )
-            slack_count = _reconcile_slack(restored, slack_verifier)
+            work_item_slack_count, system_database_slack_count = _reconcile_slack(
+                restored, slack_verifier
+            )
+            system_external_slack_count = _reconcile_system_slack_receipts(
+                bundle.system_slack_receipts, slack_verifier
+            )
+            system_slack_count = system_database_slack_count + system_external_slack_count
 
         rebuild_manifest, runner_rebuild_manifest = _rebuild_empty_hosts(
             recovery_root=recovery_root,
-            release_path=control_release_path,
+            release_path=bundle.control_release,
             release_commit=release_commit,
             restored_database=restored_database,
-            control_config=control_config_path,
-            release_receipt=release_receipt_path,
-            handoff_receipt=handoff_receipt_path,
+            control_config=bundle.control_config,
+            release_receipt=bundle.release_receipt,
+            handoff_receipt=bundle.handoff_receipt,
             runner_snapshot=runner_snapshot,
         )
         rto_milliseconds = max(0, (time.monotonic_ns() - started) // 1_000_000)
         result = DisasterRecoveryResult(
             recovery_root=recovery_root,
             receipt_path=receipt_path,
-            source_backup=restore_evidence.source_path,
-            source_backup_sha256=_sha256_file(restore_evidence.source_path),
-            source_age_seconds=restore_evidence.source_age_seconds,
+            source_backup=bundle.source_backup,
+            source_backup_sha256=_sha256_file(bundle.source_backup),
+            source_age_seconds=max(
+                0,
+                int(
+                    (
+                        moment
+                        - datetime.fromisoformat(
+                            bundle.source_backup_at.replace("Z", "+00:00")
+                        )
+                    ).total_seconds()
+                ),
+            ),
             release_commit=release_commit,
             release_receipt_sha256=release_receipt_sha256,
-            handoff_receipt_sha256=_sha256_file(handoff_receipt_path),
+            handoff_receipt_sha256=_sha256_file(bundle.handoff_receipt),
             runner_snapshot_sha256=_canonical_sha256(runner_snapshot),
             runner_references_sha256=str(
                 runner_snapshot["release_references_sha256"]
@@ -391,7 +717,7 @@ def run_schema18_disaster_recovery_drill(
             runner_reclamation_status_sha256=str(
                 runner_snapshot["reclamation_status_sha256"]
             ),
-            control_config_sha256=_sha256_file(control_config_path),
+            control_config_sha256=_sha256_file(bundle.control_config),
             previous_control_commit=previous_control,
             previous_runner_commit=previous_runner,
             restored_database_sha256=_sha256_file(restored_database),
@@ -403,7 +729,9 @@ def run_schema18_disaster_recovery_drill(
             runner_orphan_terminal_count=orphan_terminal_count,
             github_issue_count=github_issue_count,
             github_pr_count=github_pr_count,
-            slack_receipt_count=slack_count,
+            work_item_slack_receipt_count=work_item_slack_count,
+            system_slack_receipt_count=system_slack_count,
+            slack_receipt_count=work_item_slack_count + system_slack_count,
             rto_milliseconds=rto_milliseconds,
         )
         _write_json_atomic(receipt_path, result.to_mapping())
@@ -425,9 +753,12 @@ def run_schema18_disaster_recovery_drill(
 
 
 def _verify_runner_snapshot(
-    store: StateStore, snapshot: dict[str, object]
+    store: StateStore,
+    snapshot: dict[str, object],
+    provenance_database_paths: tuple[Path, ...],
 ) -> tuple[int, int, int]:
-    registry_ids = _string_set(snapshot.get("registry_work_item_ids"), "registry ids")
+    registry_rows = _indexed_rows(snapshot.get("registry"), "Runner registry")
+    registry_ids = set(registry_rows)
     archive_rows = _indexed_rows(snapshot.get("archives"), "Runner archives")
     absence_rows = _indexed_rows(snapshot.get("absences"), "Runner absences")
     work_item_ids = {item.work_item_id for item in store.list_work_items()}
@@ -441,9 +772,28 @@ def _verify_runner_snapshot(
         raise DisasterRecoveryError("Runner terminal evidence sets overlap")
     orphan_archive_ids = archive_ids - work_item_ids
     orphan_absence_ids = absence_ids - work_item_ids
+    orphan_ids = orphan_archive_ids | orphan_absence_ids
     expected_registry = (work_item_ids - set(absences)) | orphan_archive_ids
     if registry_ids != expected_registry:
         raise DisasterRecoveryError("Runner registry set differs from restored SQLite")
+
+    provenance = _provenance_work_items(provenance_database_paths)
+    if set(provenance) != orphan_ids:
+        raise DisasterRecoveryError(
+            "Runner-only terminal evidence lacks exact canary database provenance"
+        )
+    for work_item_id in orphan_ids:
+        source = provenance[work_item_id]
+        terminal = archive_rows.get(work_item_id) or absence_rows.get(work_item_id)
+        assert terminal is not None
+        if source.last_published_sha != terminal.get("expected_head_sha"):
+            raise DisasterRecoveryError("Runner-only terminal head conflicts with provenance")
+        registry = registry_rows.get(work_item_id)
+        if registry is not None and (
+            registry.get("repository") != source.repository
+            or registry.get("issue_number") != source.issue_number
+        ):
+            raise DisasterRecoveryError("Runner-only registry conflicts with provenance")
 
     archives = {
         record.work_item_id: record
@@ -474,7 +824,28 @@ def _verify_runner_snapshot(
             or row.get("evidence_sha256") != record.evidence_sha256
         ):
             raise DisasterRecoveryError("Runner absence receipt conflicts with SQLite")
-    return len(archives), len(absences), len(orphan_archive_ids | orphan_absence_ids)
+    return len(archives), len(absences), len(orphan_ids)
+
+
+def _provenance_work_items(paths: tuple[Path, ...]) -> dict[str, Any]:
+    rows: dict[str, Any] = {}
+    with tempfile.TemporaryDirectory() as raw:
+        temporary = Path(raw)
+        for index, path in enumerate(paths):
+            source_copy = temporary / f"source-{index:02d}.db"
+            shutil.copy2(path, source_copy, follow_symlinks=False)
+            with StateStore(source_copy, read_only=True) as source:
+                if (
+                    source.integrity_check() != "ok"
+                    or source.foreign_key_violation_count()
+                    or source.schema_migration_versions() != _EXPECTED_DATABASE_SCHEMA
+                ):
+                    raise DisasterRecoveryError("Runner provenance database is invalid")
+                for work_item in source.list_work_items():
+                    if work_item.work_item_id in rows:
+                        raise DisasterRecoveryError("Runner provenance identity is duplicated")
+                    rows[work_item.work_item_id] = work_item
+    return rows
 
 
 def _reconcile_github(store: StateStore, tracker: Tracker) -> tuple[int, int]:
@@ -571,13 +942,12 @@ def _reconcile_github(store: StateStore, tracker: Tracker) -> tuple[int, int]:
 
 def _reconcile_slack(
     store: StateStore, verifier: SlackReceiptVerifier | None
-) -> int:
+) -> tuple[int, int]:
     deliveries = store.list_slack_deliveries()
-    if not deliveries:
-        return 0
-    if verifier is None:
+    health_deliveries = store.list_health_alert_deliveries()
+    if (deliveries or health_deliveries) and verifier is None:
         raise DisasterRecoveryError("Slack receipts exist but no verifier is configured")
-    count = 0
+    work_item_count = 0
     for delivery in deliveries:
         if (
             delivery.state is not SlackDeliveryState.DELIVERED
@@ -599,8 +969,100 @@ def _reconcile_slack(
         )
         if verifier.verify_receipt(receipt) != receipt:
             raise DisasterRecoveryError("Slack receipt verifier returned conflicting evidence")
-        count += 1
+        work_item_count += 1
+    system_count = 0
+    for delivery in health_deliveries:
+        if (
+            delivery.state is not SlackDeliveryState.DELIVERED
+            or delivery.message_ts is None
+            or delivery.permalink is None
+        ):
+            raise DisasterRecoveryError("system Slack outbox contains an unfinished delivery")
+        thread_ts = delivery.message_ts if delivery.thread_ts is None else delivery.thread_ts
+        receipt = SlackDeliveryReceipt(
+            delivery.delivery_key,
+            delivery.channel_id,
+            delivery.message_ts,
+            thread_ts,
+            delivery.permalink,
+        )
+        assert verifier is not None
+        if verifier.verify_receipt(receipt) != receipt:
+            raise DisasterRecoveryError(
+                "system Slack receipt verifier returned conflicting evidence"
+            )
+        system_count += 1
+    return work_item_count, system_count
+
+
+def _reconcile_system_slack_receipts(
+    paths: tuple[Path, ...], verifier: SlackReceiptVerifier | None
+) -> int:
+    if paths and verifier is None:
+        raise DisasterRecoveryError("external system Slack receipts lack a verifier")
+    count = 0
+    for path in paths:
+        payload = _read_json_file(path, "external system Slack receipt", maximum=512 * 1024)
+        evidence = payload.get("evidence_sha256")
+        body = dict(payload)
+        body.pop("evidence_sha256", None)
+        channel = payload.get("system_channel_id")
+        issue_channel = payload.get("issue_channel_id")
+        alert = payload.get("alert")
+        recovery = payload.get("recovery")
+        if (
+            payload.get("schema_version") != 1
+            or payload.get("kind") != "runner_reclamation_projection_canary"
+            or payload.get("status") != "passed"
+            or payload.get("issue_channel_writes") != 0
+            or payload.get("online_state_modified") is not False
+            or payload.get("authorizes_apply") is not False
+            or payload.get("asset_deletions") != 0
+            or not isinstance(channel, str)
+            or not isinstance(issue_channel, str)
+            or channel == issue_channel
+            or not isinstance(alert, dict)
+            or not isinstance(recovery, dict)
+            or evidence != _canonical_sha256(body)
+        ):
+            raise DisasterRecoveryError("external system Slack receipt is invalid")
+        alert_receipt = _slack_receipt_from_mapping(alert, channel, root=True)
+        recovery_receipt = _slack_receipt_from_mapping(
+            recovery, channel, root=False, expected_thread=alert_receipt.message_ts
+        )
+        assert verifier is not None
+        for receipt in (alert_receipt, recovery_receipt):
+            if verifier.verify_receipt(receipt) != receipt:
+                raise DisasterRecoveryError(
+                    "external system Slack verifier returned conflicting evidence"
+                )
+            count += 1
     return count
+
+
+def _slack_receipt_from_mapping(
+    payload: dict[str, object],
+    channel_id: str,
+    *,
+    root: bool,
+    expected_thread: str | None = None,
+) -> SlackDeliveryReceipt:
+    key = payload.get("delivery_key")
+    message_ts = payload.get("message_ts")
+    permalink = payload.get("permalink")
+    thread_ts = message_ts if root else payload.get("thread_ts")
+    if (
+        not all(isinstance(value, str) for value in (key, message_ts, permalink, thread_ts))
+        or (expected_thread is not None and thread_ts != expected_thread)
+    ):
+        raise DisasterRecoveryError("external system Slack receipt is incomplete")
+    assert (
+        isinstance(key, str)
+        and isinstance(message_ts, str)
+        and isinstance(permalink, str)
+        and isinstance(thread_ts, str)
+    )
+    return SlackDeliveryReceipt(key, channel_id, message_ts, thread_ts, permalink)
 
 
 def _task_state_for_work_item(state: WorkItemState) -> TaskState:
@@ -810,6 +1272,17 @@ def _validate_runner_snapshot(snapshot: dict[str, object]) -> str:
     reference_receipt = snapshot.get("release_reference_receipt")
     status_payload = snapshot.get("reclamation_status")
     unit_sha = snapshot.get("planner_unit_sha256")
+    registry = _indexed_rows(snapshot.get("registry"), "Runner registry")
+    _indexed_rows(snapshot.get("archives"), "Runner archives")
+    _indexed_rows(snapshot.get("absences"), "Runner absences")
+    if any(
+        not isinstance(row.get("repository"), str)
+        or "/" not in str(row.get("repository"))
+        or type(row.get("issue_number")) is not int
+        or int(row["issue_number"]) <= 0
+        for row in registry.values()
+    ):
+        raise DisasterRecoveryError("Runner registry evidence is invalid")
     if not all(
         isinstance(value, dict)
         for value in (references, reference_receipt, status_payload, unit_sha)
@@ -1081,6 +1554,14 @@ def _write_bytes_atomic(path: Path, raw: bytes) -> None:
 
 def _fsync_file(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(descriptor)
     finally:

@@ -209,14 +209,18 @@ a WorkItem thread or the Issue channel.
 
 Backups use SQLite Online Backup, mode `0600`, integrity validation, atomic publication, and bounded
 rotation. Restore drills use an isolated temporary database and verify integrity, foreign keys, and
-the exact migration ledger. The full disaster-recovery drill additionally reconciles the release
-and operational-handoff receipts, Control/Runner release identity, schema-v2 Runner release/image
-references and their apply receipt, current planner status/unit digests, Runner tombstones and
-absences, GitHub, and Slack. It rebuilds isolated empty Control and Runner application filesystems
-without replacing either online environment.
-Permanent Runner tombstones created by isolated canaries may outlive and legitimately exceed the
-online Control WorkItem set; DR accepts them only as separately counted, fully terminal orphan
-evidence and never as an unexplained live registry.
+the exact migration ledger. Full DR consumes one self-contained manifest-bound bundle rather than
+live files from either Linux host. The bundle contains the exact database, release tree, protected
+Control configuration, release/handoff receipts, schema-v3 Runner snapshot, isolated-canary
+provenance databases, and external system-Slack receipts. A protected copy is exported off both
+Linux hosts so simultaneous Control/Runner loss does not remove the recovery input.
+
+The drill verifies every bundle byte before rebuilding isolated empty Control and Runner roots. It
+then reconciles schema-v2 release/image references, planner status/unit digests, Runner tombstones,
+GitHub, WorkItem Slack, the production system-health outbox, and external reclamation-canary
+alert/recovery receipts. Permanent Runner tombstones outside the online Control WorkItem set are
+accepted only when an included schema-20 canary database binds the same WorkItem, repository,
+Issue, and terminal HEAD. A tombstone alone is never provenance.
 
 Release activation is Runner-first and Control-second, guarded by inactive service/locks, exact
 archive digest, both-host tests, prior links, database backup, and a permanent transaction receipt.

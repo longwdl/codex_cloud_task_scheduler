@@ -10,8 +10,8 @@ operation and must never follow automatically from a plan.
 
 ## Measured recovery boundary
 
-The receipt's `rto_milliseconds` measures one exact interval: selection of the newest validated
-backup through isolated schema-20 restore, release and operational-handoff receipt validation,
+The receipt's `rto_milliseconds` measures one exact interval: complete offline bundle validation
+through isolated schema-20 restore, release and operational-handoff receipt validation,
 Control/Runner version agreement, Runner registry/archive/absence and schema-v2 reference
 reconciliation, GitHub Issue/PR/branch read-back, Slack permalink read-back, and reconstruction of
 empty Control and Runner application filesystem roots. The receipt records the backup age as the
@@ -20,7 +20,7 @@ observed recovery point.
 This is not a claim about VM procurement, OS installation, DNS, package mirrors, secret-manager
 availability, or operator approval latency. Those infrastructure intervals are explicitly marked
 unmeasured. The isolated empty roots do not replace either live `current` symlink and never start a
-service. They contain the exact release, secret-free Control config, systemd units, restored
+service. They contain the exact release, protected Control config, systemd units, restored
 database, permanent handoff/release receipts, Runner reference ledger/apply receipt, and strict
 planner status needed to prove both application reconstruction paths.
 
@@ -34,12 +34,16 @@ Preconditions:
 - require the newest retained backup to be mode `0600`, schema 20, integral, and free of foreign-key
   violations;
 - require no unfinished Slack outbox row;
-- place copied inputs in a `codex-dispatcher`-owned mode-`0700` directory and never print secrets.
+- place copied inputs and the bundle in `codex-dispatcher`-owned mode-`0700` directories and never
+  print the protected configuration or provider credentials;
+- include each isolated Control database that owns a Runner-only terminal WorkItem and the permanent
+  reclamation-canary receipt whose two messages must be read back from the system channel.
 
-On the Runner, collect one bounded schema-v2 recovery snapshot as root. It includes WorkItem
+On the Runner, collect one bounded schema-v3 recovery snapshot as root. It includes WorkItem
 registry/tombstones, the exact current/rollback release and image ledger, its immutable apply
-receipt, the latest planner status, and installed planner-unit hashes. Replace the commit with the
-exact value returned by `readlink /srv/codex-runner/current`:
+receipt, the latest planner status, installed planner-unit hashes, and explicit repository/Issue
+identity for every registry. Replace the commit with the exact value returned by
+`readlink /srv/codex-runner/current`:
 
 ```bash
 sudo /srv/codex-runner/bin/codex-runner-maintenance-v1 \
@@ -52,6 +56,7 @@ Copy that JSON to the Control Host, then prepare immutable inputs without changi
 ```bash
 sudo install -d -o codex-dispatcher -g codex-dispatcher -m 0700 \
   /var/lib/codex-dispatcher/disaster-recovery-inputs \
+  /var/lib/codex-dispatcher/disaster-recovery-bundles \
   /var/lib/codex-dispatcher/disaster-recovery-drills
 sudo install -o codex-dispatcher -g codex-dispatcher -m 0600 \
   /var/tmp/runner-recovery-<40-hex-current-commit>.json \
@@ -64,9 +69,45 @@ sudo install -o codex-dispatcher -g codex-dispatcher -m 0600 \
   /var/lib/codex-dispatcher/disaster-recovery-inputs/handoff-<40-hex-current-commit>.json
 ```
 
-Run the isolated drill through a transient service so the existing protected environment file is
-read without copying or displaying its tokens. `<UTC-run-id>` must name a directory that does not
-already exist:
+Create one new bundle through a transient service. The bundle includes the protected Control
+configuration, so its directory and every non-release artifact remain mode `0700`/`0600`. The
+source canary database below is the pre-discard schema-20 backup that owns the three higher-value
+WorkItems; replace paths only with exact reviewed equivalents:
+
+```bash
+sudo systemd-run --wait --collect --pipe \
+  --property=User=codex-dispatcher --property=Group=codex-dispatcher \
+  --property=WorkingDirectory=/var/lib/codex-dispatcher \
+  --setenv=HOME=/var/lib/codex-dispatcher/home \
+  --setenv=PYTHONPATH=/opt/codex-dispatcher/current/src \
+  --setenv=PYTHONDONTWRITEBYTECODE=1 --setenv=PYTHONNOUSERSITE=1 \
+  /opt/codex-python/current/bin/python3 -P -s -m codex_dispatcher \
+  disaster-recovery-bundle-create \
+  --config /etc/codex-dispatcher/config.toml \
+  --bundle-root /var/lib/codex-dispatcher/disaster-recovery-bundles/<UTC-bundle-id> \
+  --control-release /opt/codex-dispatcher/releases/<40-hex-current-commit> \
+  --release-receipt /var/lib/codex-dispatcher/disaster-recovery-inputs/release-<40-hex-current-commit>.json \
+  --handoff-receipt /var/lib/codex-dispatcher/disaster-recovery-inputs/handoff-<40-hex-current-commit>.json \
+  --runner-snapshot /var/lib/codex-dispatcher/disaster-recovery-inputs/runner-<40-hex-current-commit>.json \
+  --provenance-database /var/lib/codex-dispatcher/higher-value-canary/backups/state-pre-discard-20260824T040611Z.db \
+  --system-slack-receipt /var/lib/codex-dispatcher/reclamation-canaries/<fixture-id>/receipt.json \
+  --create --json
+```
+
+Export the completed bundle to storage outside both Linux hosts. This command runs from the trusted
+operator workstation, transfers opaque bytes, and does not display the protected config:
+
+```bash
+install -d -m 0700 <off-host-bundle-parent>
+ssh s2 sudo tar -C /var/lib/codex-dispatcher/disaster-recovery-bundles \
+  -cf - <UTC-bundle-id> | tar -C <off-host-bundle-parent> -xf -
+chmod -R go-rwx <off-host-bundle-parent>/<UTC-bundle-id>
+```
+
+For a real drill, copy the off-host bundle back into a new protected Control path and validate that
+copy. Do not reuse the on-host source bundle as evidence of independent recovery. Run the drill
+through a transient service so the protected environment file is read without displaying tokens.
+`<UTC-run-id>` must name a directory that does not already exist:
 
 ```bash
 sudo systemd-run --wait --collect --pipe \
@@ -80,10 +121,7 @@ sudo systemd-run --wait --collect --pipe \
   schema18-disaster-recovery \
   --config /etc/codex-dispatcher/config.toml \
   --recovery-root /var/lib/codex-dispatcher/disaster-recovery-drills/<UTC-run-id> \
-  --control-release /opt/codex-dispatcher/releases/<40-hex-current-commit> \
-  --release-receipt /var/lib/codex-dispatcher/disaster-recovery-inputs/release-<40-hex-current-commit>.json \
-  --handoff-receipt /var/lib/codex-dispatcher/disaster-recovery-inputs/handoff-<40-hex-current-commit>.json \
-  --runner-snapshot /var/lib/codex-dispatcher/disaster-recovery-inputs/runner-<40-hex-current-commit>.json \
+  --bundle /var/lib/codex-dispatcher/disaster-recovery-bundles/<reimported-bundle-id> \
   --execute-isolated --json
 ```
 
@@ -94,12 +132,12 @@ mode-protected `receipt.json`. A failure writes `failed-receipt.json`; retain it
 backup, and remove only that exact recovery directory after investigation. Do not retry by reusing
 the same recovery directory.
 
-Runner terminal evidence may include canary or historical WorkItems that were intentionally never
-inserted into the online Control database. Such an extra registry is accepted only when the same ID
-has a complete permanent archive tombstone; an extra absence must preserve registry-absence
-semantics. The receipt reports these separately as `runner_orphan_terminal_count`. Any unexplained
-registry, overlapping archive/absence evidence, or mismatch for a Control WorkItem still fails
-closed.
+Runner terminal evidence may include canary WorkItems that were intentionally never inserted into
+the online Control database. Such an identity is accepted only when an included, integral schema-20
+canary database binds the same WorkItem, repository, Issue, and published terminal HEAD. The receipt
+reports these separately as `runner_orphan_terminal_count`. A tombstone without that database
+provenance, an extra provenance row, an overlapping archive/absence, or a mismatch for an online
+Control WorkItem fails closed.
 
 ## Empty Control Host recovery commands
 
@@ -193,6 +231,25 @@ If recovery requires replacing online state, use a validated backup and the full
 reconciliation workflow above; a binary or symlink rollback alone cannot resolve conflicting
 durable evidence. Re-enable the timer only after `status`, lifecycle health, Runner read-back, and
 an immediate ordinary sweep all agree, with the sweep producing no unexpected write.
+
+## Control Host exact reclamation plan
+
+Control Host planning has no apply command. It hashes each candidate and writes one immutable,
+non-authorizing plan. The current and immediate rollback releases, current release receipt, newest
+successful DR root for the current release, and current-release DR inputs are protected. Candidates
+are limited to exact old release trees, older/failed DR roots, superseded DR inputs, and unprotected
+uploaded release archives. Permanent release/handoff/reclamation receipts are not candidates.
+
+```bash
+sudo install -d -o root -g root -m 0700 \
+  /var/lib/codex-dispatcher/control-reclamation-plans
+sudo /opt/codex-dispatcher/current/scripts/codex-dispatcher-control-reclamation-plan-v1 \
+  --write-plan
+```
+
+Require `authorizes_apply=false`. Any later deletion implementation needs a separate review and
+approval, must re-hash every target, and must produce a permanent receipt. Never translate this plan
+into `rm` globs or broad filesystem cleanup.
 
 ## Runner release and image reference inventory
 

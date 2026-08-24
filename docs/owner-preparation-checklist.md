@@ -34,6 +34,8 @@ Create and protect:
 /etc/codex-dispatcher/runner_ed25519             root:root 0600
 /var/lib/codex-dispatcher/                       service owner, not group/world writable
 /var/lib/codex-dispatcher/backups/               service owner 0700
+/var/lib/codex-dispatcher/disaster-recovery-bundles/ service owner 0700
+/var/lib/codex-dispatcher/control-reclamation-plans/ root:root 0700
 /run/codex-dispatcher/dispatcher.lock            service runtime path
 ```
 
@@ -177,6 +179,9 @@ are separate authorization checkpoints. Do not combine them into the first happy
 - Review health alerts, GitHub API budget/cursor age, backup age, restore-drill receipts, Runner
   capacity, follow-up backlog, archive/branch backlog, and timer state.
 - Generate exact release/image reclamation plans before space becomes urgent; never use broad prune.
+- Keep `/var/lib/codex-dispatcher/disaster-recovery-bundles` and
+  `/var/lib/codex-dispatcher/control-reclamation-plans` mode `0700`; export each accepted DR bundle
+  to protected storage outside both Linux hosts.
 - Preserve current and immediate rollback releases plus every referenced image/receipt.
 - Keep terminal Issues open when they are used as durable audit anchors.
 - Add live evidence only for a new boundary or provider behavior, not for routine idle sweeps.

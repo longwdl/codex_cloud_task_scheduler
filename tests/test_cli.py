@@ -437,14 +437,8 @@ class CliTests(unittest.TestCase):
                     "/etc/codex-dispatcher/config.toml",
                     "--recovery-root",
                     "/var/lib/codex-dispatcher/disaster-recovery/x",
-                    "--control-release",
-                    "/opt/codex-dispatcher/releases/" + "a" * 40,
-                    "--release-receipt",
-                    "/var/lib/codex-dispatcher/recovery-input/receipt.json",
-                    "--handoff-receipt",
-                    "/var/lib/codex-dispatcher/recovery-input/handoff.json",
-                    "--runner-snapshot",
-                    "/var/lib/codex-dispatcher/recovery-input/runner.json",
+                    "--bundle",
+                    "/var/lib/codex-dispatcher/disaster-recovery-bundles/current",
                 ]
             )
 
@@ -479,8 +473,8 @@ class CliTests(unittest.TestCase):
             ),
             patch("codex_dispatcher.ssh_runtime.validate_runtime_state_path"),
             patch(
-                "codex_dispatcher.disaster_recovery.load_runner_recovery_snapshot",
-                return_value={"kind": "runner_recovery_snapshot"},
+                "codex_dispatcher.disaster_recovery.load_disaster_recovery_bundle",
+                return_value=SimpleNamespace(root=Path("/bundle")),
             ),
             patch(
                 "codex_dispatcher.disaster_recovery.run_schema18_disaster_recovery_drill",
@@ -495,14 +489,8 @@ class CliTests(unittest.TestCase):
                     "/etc/codex-dispatcher/config.toml",
                     "--recovery-root",
                     "/var/lib/codex-dispatcher/disaster-recovery/x",
-                    "--control-release",
-                    "/opt/codex-dispatcher/releases/" + "a" * 40,
-                    "--release-receipt",
-                    "/var/lib/codex-dispatcher/recovery-input/receipt.json",
-                    "--handoff-receipt",
-                    "/var/lib/codex-dispatcher/recovery-input/handoff.json",
-                    "--runner-snapshot",
-                    "/var/lib/codex-dispatcher/recovery-input/runner.json",
+                    "--bundle",
+                    "/var/lib/codex-dispatcher/disaster-recovery-bundles/current",
                     "--execute-isolated",
                     "--json",
                 ]

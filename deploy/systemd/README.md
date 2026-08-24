@@ -71,7 +71,8 @@ Before touching systemd, stage one root-owned release and validate it offline:
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 PYTHONPATH=src python3 -m compileall -q src tests
 sh -n scripts/codex-dispatcher-v1 scripts/codex-dispatcher-health-v1 \
-  scripts/codex-dispatcher-restore-drill-v1
+  scripts/codex-dispatcher-restore-drill-v1 \
+  scripts/codex-dispatcher-control-reclamation-plan-v1
 systemd-analyze verify \
   deploy/systemd/codex-dispatcher.service \
   deploy/systemd/codex-dispatcher.timer \
