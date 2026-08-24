@@ -57,8 +57,6 @@ _RELEASE_FILES = (
     "deploy/systemd/codex-dispatcher-health.timer",
     "deploy/systemd/codex-dispatcher-restore-drill.service",
     "deploy/systemd/codex-dispatcher-restore-drill.timer",
-    "deploy/systemd/codex-dispatcher-control-reclamation.service",
-    "deploy/systemd/codex-dispatcher-control-reclamation.timer",
     "deploy/runner/codex-runner-reclamation-plan.service",
     "deploy/runner/codex-runner-reclamation-plan.timer",
 )
