@@ -14,6 +14,7 @@ from codex_dispatcher.control_sweep import (
     SourceSnapshotProvider,
     SshControlSweep,
 )
+from codex_dispatcher.config import RepositoryAdmissionConfig
 from codex_dispatcher.dispatcher_lock import (
     DispatcherLockUnavailable,
     DispatcherProcessLock,
@@ -21,6 +22,13 @@ from codex_dispatcher.dispatcher_lock import (
 from codex_dispatcher.git_publisher import GitPublicationInterrupted
 from codex_dispatcher.github_delivery import GitHubDeliveryCoordinator
 from codex_dispatcher.publisher import VerifiedBundle
+from codex_dispatcher.repository_admission import (
+    HIGHER_VALUE_CANARY_REPOSITORY,
+    HigherValueCanaryTarget,
+    RepositoryClass,
+    RepositoryRecoveryProfile,
+    RepositoryTargetReadbackProfile,
+)
 from codex_dispatcher.runner_protocol import (
     NEXT_PROTOCOL_VERSION,
     RunnerOperation,
@@ -612,6 +620,70 @@ class SshControlSweepTests(unittest.TestCase):
         self.assertFalse(any(call.method == "claim" for call in tracker.calls))
         self.assertIsNone(
             self.store.get_work_item_by_issue(task.repository, task.issue_number)
+        )
+
+    def test_higher_value_canary_base_drift_fails_before_claim(self) -> None:
+        base = make_config(global_max_active=1)
+        config = replace(
+            base,
+            repositories=(
+                replace(
+                    base.repositories[0],
+                    slug=HIGHER_VALUE_CANARY_REPOSITORY,
+                    allowed_paths=("canary/target.txt",),
+                    repository_class=RepositoryClass.HIGHER_VALUE,
+                ),
+            ),
+            repository_admission=RepositoryAdmissionConfig(
+                frozenset({RepositoryRecoveryProfile.HIGHER_VALUE_LIVE_V1}),
+                frozenset({RepositoryTargetReadbackProfile.HIGHER_VALUE_EXACT_V1}),
+            ),
+        )
+        task = replace(
+            _ready_task(77),
+            repository=HIGHER_VALUE_CANARY_REPOSITORY,
+            body=_ready_task(77).body.replace(
+                "- src/codex_dispatcher\n- tests", "- canary/target.txt"
+            ),
+            issue_node_id="I_kwDOHigherValue77",
+        )
+        target = HigherValueCanaryTarget(
+            task.repository,
+            task.issue_number,
+            task.issue_node_id or "missing",
+            "f" * 40,
+        )
+        tracker = FakeTracker()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        dispatch = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=OfflineTurnOrchestrator(
+                store=self.store,
+                transport=self.transport,
+                bundle_verifier=self.verifier,
+            ),
+            higher_value_canary_target=target,
+        )
+        sweep = SshControlSweep(
+            config=config,
+            store=self.store,
+            tracker=tracker,
+            dispatch=dispatch,
+            source=_RecordingSource(),
+            process_lock=DispatcherProcessLock(self.lock_path),
+            higher_value_canary_target=target,
+        )
+
+        with self.assertRaisesRegex(ValueError, "base SHA changed"):
+            sweep.run_once()
+
+        self.assertFalse(any(call.method == "claim" for call in tracker.calls))
+        self.assertIsNone(
+            self.store.get_repository_claim_policy(
+                target.repository, target.issue_number
+            )
         )
         self.assertEqual([], self.transport.calls)
 

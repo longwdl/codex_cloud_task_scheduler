@@ -84,6 +84,9 @@ Fixture target is the remote Linux Codex CLI executor, and the implementation no
   rollback-reference protection, immutable plans, pre-delete reinspection, and permanent receipts;
 - a dedicated exact-target Fixture canary for terminal-branch delete receipt loss and absence
   reconciliation without lowering the runtime retention policy.
+- a manual-only, exact Issue/node/base-SHA higher-value canary path for the isolated
+  `codex-dispatcher-fixture-2` repository; ordinary higher-value admission remains hard false while
+  the attack and recovery matrix in `docs/higher-value-canary.md` is incomplete.
 
 The Runner path has now been exercised against the private Fixture through the real pinned SSH
 transport and Codex CLI 0.147.0 using ChatGPT login. A migrated Issue binding completed PREPARE,

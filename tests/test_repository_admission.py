@@ -3,11 +3,14 @@ from __future__ import annotations
 import unittest
 
 from codex_dispatcher.repository_admission import (
+    HIGHER_VALUE_CANARY_REPOSITORY,
     REPOSITORY_ADMISSION_MATRIX,
     REPOSITORY_ADMISSION_MATRIX_SHA256,
+    HigherValueCanaryTarget,
     RepositoryClass,
     RepositoryRecoveryProfile,
     RepositoryTargetReadbackProfile,
+    build_higher_value_canary_policy_identity,
     build_repository_policy_identity,
     evaluate_repository_admission,
 )
@@ -92,3 +95,48 @@ class RepositoryAdmissionTests(unittest.TestCase):
         self.assertNotEqual(first.policy_sha256, second.policy_sha256)
         self.assertEqual("fixture-live-v1", first.recovery_profile.value)
         self.assertEqual("fixture-exact-v1", first.target_readback_profile.value)
+
+    def test_manual_canary_policy_is_exact_without_admitting_higher_value(self) -> None:
+        target = HigherValueCanaryTarget(
+            HIGHER_VALUE_CANARY_REPOSITORY,
+            7,
+            "I_kwDOHigherValue7",
+            "a" * 40,
+        )
+
+        policy = build_higher_value_canary_policy_identity(
+            target=target,
+            repository=target.repository,
+            issue_number=target.issue_number,
+            issue_node_id=target.issue_node_id,
+            repository_class=RepositoryClass.HIGHER_VALUE,
+            recovery_profiles=frozenset(
+                {RepositoryRecoveryProfile.HIGHER_VALUE_LIVE_V1}
+            ),
+            target_readback_profiles=frozenset(
+                {RepositoryTargetReadbackProfile.HIGHER_VALUE_EXACT_V1}
+            ),
+        )
+        ordinary = evaluate_repository_admission(
+            RepositoryClass.HIGHER_VALUE,
+            frozenset({RepositoryRecoveryProfile.HIGHER_VALUE_LIVE_V1}),
+            frozenset({RepositoryTargetReadbackProfile.HIGHER_VALUE_EXACT_V1}),
+        )
+
+        self.assertIs(RepositoryClass.HIGHER_VALUE, policy.repository_class)
+        self.assertFalse(ordinary.admitted)
+        self.assertEqual("repository_class_not_admitted", ordinary.code)
+        with self.assertRaisesRegex(ValueError, "Issue identity"):
+            build_higher_value_canary_policy_identity(
+                target=target,
+                repository=target.repository,
+                issue_number=8,
+                issue_node_id=target.issue_node_id,
+                repository_class=RepositoryClass.HIGHER_VALUE,
+                recovery_profiles=frozenset(
+                    {RepositoryRecoveryProfile.HIGHER_VALUE_LIVE_V1}
+                ),
+                target_readback_profiles=frozenset(
+                    {RepositoryTargetReadbackProfile.HIGHER_VALUE_EXACT_V1}
+                ),
+            )

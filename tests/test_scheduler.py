@@ -13,11 +13,17 @@ from codex_dispatcher.config import (
 )
 from codex_dispatcher.domain import Run
 from codex_dispatcher.repository_admission import (
+    HIGHER_VALUE_CANARY_REPOSITORY,
+    HigherValueCanaryTarget,
     RepositoryClass,
     RepositoryRecoveryProfile,
     RepositoryTargetReadbackProfile,
 )
-from codex_dispatcher.scheduler import build_dry_run_plan, build_ssh_dry_run_plan
+from codex_dispatcher.scheduler import (
+    build_dry_run_plan,
+    build_ssh_dry_run_plan,
+    build_ssh_higher_value_canary_plan,
+)
 from codex_dispatcher.testing.fakes import Call, FakeTracker
 from codex_dispatcher.trackers.base import TaskState, TrackerTask
 from tests.test_task_spec import BODY
@@ -208,6 +214,54 @@ class SchedulerTests(unittest.TestCase):
             ["global_capacity", "global_capacity"],
             [item.code for item in plan.rejected],
         )
+
+    def test_manual_canary_planner_cannot_widen_normal_higher_value_admission(self) -> None:
+        base = make_config(global_max_active=1)
+        config = replace(
+            base,
+            repositories=(
+                replace(
+                    base.repositories[0],
+                    slug=HIGHER_VALUE_CANARY_REPOSITORY,
+                    allowed_paths=("canary/target.txt",),
+                    repository_class=RepositoryClass.HIGHER_VALUE,
+                ),
+            ),
+            repository_admission=RepositoryAdmissionConfig(
+                frozenset({RepositoryRecoveryProfile.HIGHER_VALUE_LIVE_V1}),
+                frozenset({RepositoryTargetReadbackProfile.HIGHER_VALUE_EXACT_V1}),
+            ),
+        )
+        task = replace(
+            make_task(7, executor_label="exec:ssh-cli"),
+            repository=HIGHER_VALUE_CANARY_REPOSITORY,
+            body=BODY.replace(
+                "- src/codex_dispatcher\n- tests", "- canary/target.txt"
+            ),
+            issue_node_id="I_kwDOHigherValue7",
+        )
+        target = HigherValueCanaryTarget(
+            task.repository,
+            task.issue_number,
+            task.issue_node_id or "missing",
+            "a" * 40,
+        )
+        tracker = FakeTracker()
+        tracker.ready_tasks = (task, replace(task, issue_number=8, task_id="8"))
+
+        ordinary = build_ssh_dry_run_plan(config, tracker)
+        canary = build_ssh_higher_value_canary_plan(
+            config,
+            tracker,
+            target=target,
+        )
+
+        self.assertEqual((), ordinary.selected)
+        self.assertTrue(
+            all(item.code == "repository_class_not_admitted" for item in ordinary.rejected)
+        )
+        self.assertEqual((task,), canary.selected)
+        self.assertEqual("higher_value_canary_target_mismatch", canary.rejected[0].code)
 
 
 if __name__ == "__main__":

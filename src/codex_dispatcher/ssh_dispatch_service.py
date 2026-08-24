@@ -26,7 +26,10 @@ from codex_dispatcher.git_publisher import (
     GitPublicationRejected,
 )
 from codex_dispatcher.publisher import PublicationError
-from codex_dispatcher.repository_admission import RepositoryPolicyIdentity
+from codex_dispatcher.repository_admission import (
+    HigherValueCanaryTarget,
+    RepositoryPolicyIdentity,
+)
 from codex_dispatcher.repository_evidence import evaluate_repository_target_readback
 from codex_dispatcher.runner_protocol import (
     AcceptanceAssertionStatus,
@@ -38,7 +41,11 @@ from codex_dispatcher.runner_transport import (
     RunnerTransportInterrupted,
     RunnerTransportRejected,
 )
-from codex_dispatcher.scheduler import DryRunPlan, build_ssh_dry_run_plan
+from codex_dispatcher.scheduler import (
+    DryRunPlan,
+    build_ssh_dry_run_plan,
+    build_ssh_higher_value_canary_plan,
+)
 from codex_dispatcher.handoffs import build_publication_evidence
 from codex_dispatcher.prompt_builder import build_canonical_input_snapshot
 from codex_dispatcher.source_bundle import SourceBundle
@@ -91,6 +98,7 @@ class OfflineSshDispatchService:
         store: StateStore,
         orchestrator: OfflineTurnOrchestrator,
         ci_evidence_importer: CiEvidenceImporter | None = None,
+        higher_value_canary_target: HigherValueCanaryTarget | None = None,
     ) -> None:
         if not isinstance(config, Config):
             raise TypeError("config must be a Config")
@@ -100,14 +108,28 @@ class OfflineSshDispatchService:
             raise TypeError(
                 "ci_evidence_importer must provide import_for_head or be None"
             )
+        if higher_value_canary_target is not None and not isinstance(
+            higher_value_canary_target, HigherValueCanaryTarget
+        ):
+            raise TypeError(
+                "higher_value_canary_target must be a HigherValueCanaryTarget or None"
+            )
         self._config = config
         self._store = store
         self._orchestrator = orchestrator
         self._ci_evidence_importer = ci_evidence_importer
+        self._higher_value_canary_target = higher_value_canary_target
         self._repositories = {item.slug: item for item in config.repositories}
 
     def plan_candidates(self, tracker: Tracker) -> DryRunPlan:
         """Perform one SSH candidate sweep using tracker reads only."""
+        if self._higher_value_canary_target is not None:
+            return build_ssh_higher_value_canary_plan(
+                self._config,
+                tracker,
+                target=self._higher_value_canary_target,
+                active_turn_exists=self._store.get_active_turn() is not None,
+            )
         return build_ssh_dry_run_plan(
             self._config,
             tracker,

@@ -10,8 +10,10 @@ from typing import Iterable
 from codex_dispatcher.config import Config, RepositoryConfig
 from codex_dispatcher.domain import Run
 from codex_dispatcher.repository_admission import (
+    HigherValueCanaryTarget,
     RepositoryRecoveryProfile,
     RepositoryTargetReadbackProfile,
+    build_higher_value_canary_policy_identity,
     evaluate_repository_admission,
 )
 from codex_dispatcher.task_spec import TaskSpecError, is_path_allowed, parse_task_spec
@@ -73,6 +75,28 @@ def build_ssh_dry_run_plan(
     )
 
 
+def build_ssh_higher_value_canary_plan(
+    config: Config,
+    tracker: Tracker,
+    *,
+    target: HigherValueCanaryTarget,
+    active_turn_exists: bool = False,
+) -> DryRunPlan:
+    """Plan only one exact manual canary without changing normal admission."""
+    if not isinstance(target, HigherValueCanaryTarget):
+        raise TypeError("target must be a HigherValueCanaryTarget")
+    if type(active_turn_exists) is not bool:
+        raise TypeError("active_turn_exists must be a bool")
+    return _build_dry_run_plan(
+        config,
+        tracker,
+        active_runs=(),
+        executor_label=SSH_CLI_EXECUTOR_LABEL,
+        global_max_active=0 if active_turn_exists else 1,
+        higher_value_canary_target=target,
+    )
+
+
 def _build_dry_run_plan(
     config: Config,
     tracker: Tracker,
@@ -80,6 +104,7 @@ def _build_dry_run_plan(
     active_runs: Iterable[Run],
     executor_label: str,
     global_max_active: int,
+    higher_value_canary_target: HigherValueCanaryTarget | None = None,
 ) -> DryRunPlan:
     active = tuple(run for run in active_runs if run.is_active)
     active_by_repository = Counter(run.repository for run in active)
@@ -104,6 +129,7 @@ def _build_dry_run_plan(
                     if config.repository_admission is None
                     else config.repository_admission.target_readback_profiles
                 ),
+                higher_value_canary_target=higher_value_canary_target,
             )
             if error is not None:
                 rejected.append(Rejection(task.repository, task.issue_number, error))
@@ -149,16 +175,37 @@ def _validate_candidate(
     executor_label: str,
     recovery_profiles: frozenset[RepositoryRecoveryProfile],
     target_readback_profiles: frozenset[RepositoryTargetReadbackProfile],
+    higher_value_canary_target: HigherValueCanaryTarget | None = None,
 ) -> tuple[_Candidate | None, str | None]:
     if task.repository != repository.slug:
         return None, "repository_mismatch"
-    admission = evaluate_repository_admission(
-        repository.repository_class,
-        recovery_profiles,
-        target_readback_profiles,
-    )
-    if not admission.admitted:
-        return None, admission.code
+    if higher_value_canary_target is None:
+        admission = evaluate_repository_admission(
+            repository.repository_class,
+            recovery_profiles,
+            target_readback_profiles,
+        )
+        if not admission.admitted:
+            return None, admission.code
+    else:
+        if not higher_value_canary_target.matches_issue(
+            repository=task.repository,
+            issue_number=task.issue_number,
+            issue_node_id=task.issue_node_id,
+        ):
+            return None, "higher_value_canary_target_mismatch"
+        try:
+            build_higher_value_canary_policy_identity(
+                target=higher_value_canary_target,
+                repository=task.repository,
+                issue_number=task.issue_number,
+                issue_node_id=task.issue_node_id,
+                repository_class=repository.repository_class,
+                recovery_profiles=recovery_profiles,
+                target_readback_profiles=target_readback_profiles,
+            )
+        except ValueError:
+            return None, "higher_value_canary_policy_mismatch"
     if task.state is not TaskState.READY or not task.is_open:
         return None, "not_open_ready"
     status_labels = [label for label in task.labels if label.startswith("agent:")]

@@ -10,7 +10,13 @@ from codex_dispatcher.repository_evidence import (
     RepositoryRecoveryReceipt,
     RepositoryTargetReadbackVerdict,
 )
-from codex_dispatcher.scheduler import DryRunPlan, Rejection, build_ssh_dry_run_plan
+from codex_dispatcher.repository_admission import HigherValueCanaryTarget
+from codex_dispatcher.scheduler import (
+    DryRunPlan,
+    Rejection,
+    build_ssh_dry_run_plan,
+    build_ssh_higher_value_canary_plan,
+)
 from codex_dispatcher.ssh_recovery import (
     SshRecoveryAction,
     SshRecoveryPlan,
@@ -50,6 +56,29 @@ def build_ssh_preflight_plan(
     tracker: Tracker,
 ) -> SshPreflightPlan:
     """Plan recovery first, then at most one new ``exec:ssh-cli`` candidate."""
+    return _build_ssh_preflight_plan(config, store, tracker)
+
+
+def build_ssh_higher_value_canary_preflight_plan(
+    config: Config,
+    store: StateStore,
+    tracker: Tracker,
+    *,
+    target: HigherValueCanaryTarget,
+) -> SshPreflightPlan:
+    """Plan recovery or one exact manually permitted higher-value canary."""
+    if not isinstance(target, HigherValueCanaryTarget):
+        raise TypeError("target must be a HigherValueCanaryTarget")
+    return _build_ssh_preflight_plan(config, store, tracker, target=target)
+
+
+def _build_ssh_preflight_plan(
+    config: Config,
+    store: StateStore,
+    tracker: Tracker,
+    *,
+    target: HigherValueCanaryTarget | None = None,
+) -> SshPreflightPlan:
     if not isinstance(config, Config):
         raise TypeError("config must be a Config")
     if not isinstance(store, StateStore):
@@ -67,11 +96,19 @@ def build_ssh_preflight_plan(
             recovery,
         )
 
-    candidates = build_ssh_dry_run_plan(
-        config,
-        tracker,
-        active_turn_exists=False,
-    )
+    if target is None:
+        candidates = build_ssh_dry_run_plan(
+            config,
+            tracker,
+            active_turn_exists=False,
+        )
+    else:
+        candidates = build_ssh_higher_value_canary_plan(
+            config,
+            tracker,
+            target=target,
+            active_turn_exists=False,
+        )
     return _from_candidates(candidates)
 
 

@@ -11,7 +11,9 @@ from codex_dispatcher.config import Config, RepositoryConfig
 from codex_dispatcher.dispatcher_lock import DispatcherProcessLock
 from codex_dispatcher.github_delivery import GitHubDeliveryCoordinator
 from codex_dispatcher.repository_admission import (
+    HigherValueCanaryTarget,
     RepositoryPolicyIdentity,
+    build_higher_value_canary_policy_identity,
     build_repository_policy_identity,
 )
 from codex_dispatcher.slack_delivery import SlackDeliveryCoordinator
@@ -122,6 +124,7 @@ class SshControlSweep:
         runner_root: str = "/srv/codex-runner/work-items",
         terminal_branch_cleanup_fixture_target: TerminalBranchCleanupFixtureTarget
         | None = None,
+        higher_value_canary_target: HigherValueCanaryTarget | None = None,
     ) -> None:
         if not isinstance(config, Config):
             raise TypeError("config must be a Config")
@@ -139,6 +142,17 @@ class SshControlSweep:
             raise TypeError(
                 "terminal_branch_cleanup_fixture_target must be an exact Fixture target or None"
             )
+        if higher_value_canary_target is not None and not isinstance(
+            higher_value_canary_target, HigherValueCanaryTarget
+        ):
+            raise TypeError(
+                "higher_value_canary_target must be a HigherValueCanaryTarget or None"
+            )
+        if (
+            terminal_branch_cleanup_fixture_target is not None
+            and higher_value_canary_target is not None
+        ):
+            raise ValueError("Fixture cleanup and higher-value canary targets conflict")
         self._config = config
         self._store = store
         self._tracker = tracker
@@ -157,6 +171,7 @@ class SshControlSweep:
         self._terminal_branch_cleanup_fixture_target = (
             terminal_branch_cleanup_fixture_target
         )
+        self._higher_value_canary_target = higher_value_canary_target
 
     def run_once(self, *, turn_id: str | None = None) -> ControlSweepResult:
         """Run recovery first and claim at most one new Issue when state is idle."""
@@ -201,6 +216,7 @@ class SshControlSweep:
                 source_bundle = self._source.current(
                     task.repository, repository.base_branch
                 )
+                self._validate_higher_value_canary_source(task, source_bundle.base_sha)
                 self._store.prepare_repository_claim_policy(
                     self._build_claim_policy(task)
                 )
@@ -648,12 +664,15 @@ class SshControlSweep:
         if recovery.action is SshRecoveryAction.RECOVER_ORPHAN_CLAIM:
             assert recovery.task is not None
             repository = self._repository(recovery.task.repository)
-            self._store.prepare_repository_claim_policy(
-                self._build_claim_policy(recovery.task)
-            )
             bundle = self._source.current(
                 recovery.task.repository,
                 repository.base_branch,
+            )
+            self._validate_higher_value_canary_source(
+                recovery.task, bundle.base_sha
+            )
+            self._store.prepare_repository_claim_policy(
+                self._build_claim_policy(recovery.task)
             )
             return self._prepare_and_run(
                 recovery.task,
@@ -1096,20 +1115,49 @@ class SshControlSweep:
     def _build_claim_policy(self, task: TrackerTask) -> RepositoryPolicyIdentity:
         repository = self._repository(task.repository)
         admission = self._config.repository_admission
+        recovery_profiles = (
+            frozenset() if admission is None else admission.recovery_profiles
+        )
+        target_readback_profiles = (
+            frozenset()
+            if admission is None
+            else admission.target_readback_profiles
+        )
+        if self._higher_value_canary_target is not None:
+            return build_higher_value_canary_policy_identity(
+                target=self._higher_value_canary_target,
+                repository=task.repository,
+                issue_number=task.issue_number,
+                issue_node_id=task.issue_node_id,
+                repository_class=repository.repository_class,
+                recovery_profiles=recovery_profiles,
+                target_readback_profiles=target_readback_profiles,
+            )
         return build_repository_policy_identity(
             repository=task.repository,
             issue_number=task.issue_number,
             issue_node_id=task.issue_node_id,
             repository_class=repository.repository_class,
-            recovery_profiles=(
-                frozenset() if admission is None else admission.recovery_profiles
-            ),
-            target_readback_profiles=(
-                frozenset()
-                if admission is None
-                else admission.target_readback_profiles
-            ),
+            recovery_profiles=recovery_profiles,
+            target_readback_profiles=target_readback_profiles,
         )
+
+    def _validate_higher_value_canary_source(
+        self,
+        task: TrackerTask,
+        base_sha: str,
+    ) -> None:
+        target = self._higher_value_canary_target
+        if target is None:
+            return
+        if not target.matches_issue(
+            repository=task.repository,
+            issue_number=task.issue_number,
+            issue_node_id=task.issue_node_id,
+        ):
+            raise ValueError("higher-value canary Issue identity changed")
+        if base_sha != target.expected_base_sha:
+            raise ValueError("higher-value canary base SHA changed")
 
 
 def _same_issue(first: TrackerTask, second: TrackerTask) -> bool:

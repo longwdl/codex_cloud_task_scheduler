@@ -10,6 +10,7 @@ from hashlib import sha256
 
 
 REPOSITORY_ADMISSION_MATRIX_VERSION = 1
+HIGHER_VALUE_CANARY_REPOSITORY = "longwdl/codex-dispatcher-fixture-2"
 
 
 class RepositoryClass(StrEnum):
@@ -41,6 +42,46 @@ class RepositoryAdmissionDecision:
     admitted: bool
     code: str | None
     requirement: RepositoryAdmissionRequirement
+
+
+@dataclass(frozen=True, slots=True)
+class HigherValueCanaryTarget:
+    """Exact manual-only target that never changes ordinary admission."""
+
+    repository: str
+    issue_number: int
+    issue_node_id: str
+    expected_base_sha: str
+
+    def __post_init__(self) -> None:
+        if self.repository != HIGHER_VALUE_CANARY_REPOSITORY:
+            raise ValueError("higher-value canary repository is not the fixed private target")
+        if type(self.issue_number) is not int or self.issue_number <= 0:
+            raise ValueError("higher-value canary issue_number is invalid")
+        if (
+            not isinstance(self.issue_node_id, str)
+            or not self.issue_node_id
+            or len(self.issue_node_id) > 256
+        ):
+            raise ValueError("higher-value canary issue_node_id is invalid")
+        if (
+            not isinstance(self.expected_base_sha, str)
+            or re.fullmatch(r"[0-9a-f]{40,64}", self.expected_base_sha) is None
+        ):
+            raise ValueError("higher-value canary expected_base_sha is invalid")
+
+    def matches_issue(
+        self,
+        *,
+        repository: str,
+        issue_number: int,
+        issue_node_id: str,
+    ) -> bool:
+        return (
+            repository == self.repository
+            and issue_number == self.issue_number
+            and issue_node_id == self.issue_node_id
+        )
 
 
 REPOSITORY_ADMISSION_MATRIX = (
@@ -233,6 +274,61 @@ def build_repository_policy_identity(
     requirement = decision.requirement
     assert requirement.recovery_profile is not None
     assert requirement.target_readback_profile is not None
+    digest = repository_policy_sha256(
+        repository=repository,
+        issue_number=issue_number,
+        issue_node_id=issue_node_id,
+        repository_class=repository_class,
+        recovery_profile=requirement.recovery_profile,
+        target_readback_profile=requirement.target_readback_profile,
+    )
+    return RepositoryPolicyIdentity(
+        repository,
+        issue_number,
+        issue_node_id,
+        repository_class,
+        requirement.recovery_profile,
+        requirement.target_readback_profile,
+        REPOSITORY_ADMISSION_MATRIX_VERSION,
+        REPOSITORY_ADMISSION_MATRIX_SHA256,
+        digest,
+    )
+
+
+def build_higher_value_canary_policy_identity(
+    *,
+    target: HigherValueCanaryTarget,
+    repository: str,
+    issue_number: int,
+    issue_node_id: str,
+    repository_class: RepositoryClass,
+    recovery_profiles: frozenset[RepositoryRecoveryProfile],
+    target_readback_profiles: frozenset[RepositoryTargetReadbackProfile],
+) -> RepositoryPolicyIdentity:
+    """Build one exact manual canary policy while the normal matrix stays false."""
+    if not isinstance(target, HigherValueCanaryTarget):
+        raise TypeError("target must be a HigherValueCanaryTarget")
+    if not target.matches_issue(
+        repository=repository,
+        issue_number=issue_number,
+        issue_node_id=issue_node_id,
+    ):
+        raise ValueError("higher-value canary Issue identity conflicts with its permit")
+    if repository_class is not RepositoryClass.HIGHER_VALUE:
+        raise ValueError("higher-value canary repository class is invalid")
+    requirement = next(
+        row
+        for row in REPOSITORY_ADMISSION_MATRIX
+        if row.repository_class is RepositoryClass.HIGHER_VALUE
+    )
+    if requirement.admitted_by_this_release:
+        raise ValueError("higher-value canary override is invalid after ordinary admission")
+    assert requirement.recovery_profile is not None
+    assert requirement.target_readback_profile is not None
+    if recovery_profiles != frozenset({requirement.recovery_profile}):
+        raise ValueError("higher-value canary recovery profile is not exact")
+    if target_readback_profiles != frozenset({requirement.target_readback_profile}):
+        raise ValueError("higher-value canary target readback profile is not exact")
     digest = repository_policy_sha256(
         repository=repository,
         issue_number=issue_number,

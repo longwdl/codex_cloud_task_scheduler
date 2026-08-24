@@ -29,6 +29,11 @@ from codex_dispatcher.github_api_metrics import (
     GitHubApiSweepOutcome,
 )
 from codex_dispatcher.github_delivery import GitHubDeliveryCoordinator
+from codex_dispatcher.higher_value_canary import (
+    HigherValueCanaryRejected,
+    validate_higher_value_canary_config,
+)
+from codex_dispatcher.repository_admission import HigherValueCanaryTarget
 from codex_dispatcher.slack_delivery import SlackDeliveryCoordinator
 from codex_dispatcher.slack_web_api import SlackWebApiPublisher
 from codex_dispatcher.source_bundle import GitSourceBundleBuilder
@@ -36,6 +41,7 @@ from codex_dispatcher.ssh_dispatch_service import OfflineSshDispatchService
 from codex_dispatcher.ssh_preflight import (
     SshPreflightPlan,
     SshPreflightStatus,
+    build_ssh_higher_value_canary_preflight_plan,
     build_ssh_preflight_plan,
 )
 from codex_dispatcher.ssh_recovery import (
@@ -222,6 +228,49 @@ def build_ssh_fixture_fault_sweep(
     )
 
 
+def build_ssh_higher_value_canary_sweep(
+    *,
+    config: Config,
+    store: StateStore,
+    github_token: str,
+    target: HigherValueCanaryTarget,
+    slack_token: str | None = None,
+) -> SshControlSweep:
+    """Assemble only the exact manually admitted higher-value canary path."""
+    if not isinstance(store, StateStore):
+        raise TypeError("store must be a StateStore")
+    try:
+        validate_higher_value_canary_config(config, target)
+    except HigherValueCanaryRejected as exc:
+        raise SshRuntimeError(str(exc)) from exc
+    runtime = _require_runtime(config)
+    git_path = _protected_executable(runtime.git_path, "ssh_runtime.git_path")
+    gh_path = _protected_executable(runtime.gh_path, "ssh_runtime.gh_path")
+    ssh_path = _protected_executable(runtime.ssh_path, "ssh_runtime.ssh_path")
+    checks = run_control_host_contract_checks(
+        pins=config.tools,
+        git_path=git_path,
+        gh_path=gh_path,
+        ssh_path=ssh_path,
+    )
+    failed = tuple(check.name for check in checks if not check.ok)
+    if failed:
+        raise SshRuntimeError(
+            f"Control Host tool contract failed: {', '.join(failed)}"
+        )
+    return _assemble_ssh_control_sweep(
+        config=config,
+        store=store,
+        github_token=github_token,
+        runtime=runtime,
+        git_path=git_path,
+        gh_path=gh_path,
+        ssh_path=ssh_path,
+        slack_token=slack_token,
+        higher_value_canary_target=target,
+    )
+
+
 def _assemble_ssh_control_sweep(
     *,
     config: Config,
@@ -235,6 +284,7 @@ def _assemble_ssh_control_sweep(
     fixture_fault_injection: FixtureFaultInjection | None = None,
     terminal_branch_cleanup_fixture_target: TerminalBranchCleanupFixtureTarget
     | None = None,
+    higher_value_canary_target: HigherValueCanaryTarget | None = None,
 ) -> SshControlSweep:
     """Assemble ports using the exact executable paths that were verified."""
 
@@ -308,6 +358,7 @@ def _assemble_ssh_control_sweep(
             token=github_token,
             metrics_collector=github_metrics,
         ),
+        higher_value_canary_target=higher_value_canary_target,
     )
     publisher = GitTaskBranchPublisher(
         git_path=git_path,
@@ -362,6 +413,7 @@ def _assemble_ssh_control_sweep(
         terminal_branch_cleanup_fixture_target=(
             terminal_branch_cleanup_fixture_target
         ),
+        higher_value_canary_target=higher_value_canary_target,
     )
 
 
@@ -624,6 +676,44 @@ def run_ssh_preflight(
     with _temporary_state_snapshot(config.scheduler.database_path) as snapshot:
         store, database_preexisting = snapshot
         plan = build_ssh_preflight_plan(config, store, tracker)
+    return SshPreflightInspection(plan, checks, database_preexisting)
+
+
+def run_ssh_higher_value_canary_preflight(
+    *,
+    config: Config,
+    github_token: str,
+    target: HigherValueCanaryTarget,
+) -> SshPreflightInspection:
+    """Read-only proof for one exact manual canary target and isolated state."""
+    try:
+        validate_higher_value_canary_config(config, target)
+    except HigherValueCanaryRejected as exc:
+        raise SshRuntimeError(str(exc)) from exc
+    runtime = _require_runtime(config)
+    git_path = _protected_executable(runtime.git_path, "ssh_runtime.git_path")
+    gh_path = _protected_executable(runtime.gh_path, "ssh_runtime.gh_path")
+    ssh_path = _protected_executable(runtime.ssh_path, "ssh_runtime.ssh_path")
+    checks = run_control_host_contract_checks(
+        pins=config.tools,
+        git_path=git_path,
+        gh_path=gh_path,
+        ssh_path=ssh_path,
+    )
+    failed = tuple(check.name for check in checks if not check.ok)
+    if failed:
+        raise SshRuntimeError(
+            f"Control Host tool contract failed: {', '.join(failed)}"
+        )
+    tracker = GitHubCliTracker(gh_path=gh_path, token=github_token)
+    with _temporary_state_snapshot(config.scheduler.database_path) as snapshot:
+        store, database_preexisting = snapshot
+        plan = build_ssh_higher_value_canary_preflight_plan(
+            config,
+            store,
+            tracker,
+            target=target,
+        )
     return SshPreflightInspection(plan, checks, database_preexisting)
 
 
