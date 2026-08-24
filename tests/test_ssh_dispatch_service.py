@@ -34,7 +34,7 @@ from codex_dispatcher.testing.fake_runner import (
     FakeTurnFixture,
 )
 from codex_dispatcher.testing.fakes import FakeTracker
-from codex_dispatcher.trackers.base import TaskState
+from codex_dispatcher.trackers.base import TaskState, TrackerComment
 from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator
 from codex_dispatcher.work_items import TurnState, WorkItemState
 from codex_dispatcher.work_item_lifecycle import WorkItemArchiveStatus
@@ -468,6 +468,68 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
         self.assertEqual(TurnState.FINISHED, final.turn.state)
         self.assertEqual(WorkItemState.REVIEW, final.work_item.state)
         self.assertFalse(service.requires_fresh_final_audit(final.turn.turn_id))
+
+        # A later reactivation can add a second no-progress Turn to the live
+        # audit generation. Its durable audit-gap follow-up must rotate to the
+        # requested repair role before same-role no-progress limits are
+        # evaluated.
+        self.store.update_work_item_state(
+            item.work_item_id, WorkItemState.READY
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(
+                session_5, second_repair_head, checkpoint_result()
+            ),
+        )
+        reactivation_comment = TrackerComment(
+            "IC_reactivation",
+            "alice",
+            "/codex-context\nApply the reviewed follow-up",
+            "2026-08-13T02:00:00Z",
+            "2026-08-13T02:00:00Z",
+        )
+        reactivated_audit = service.run_claimed_turn(
+            task,
+            comments=(reactivation_comment,),
+            turn_id="turn_" + "8" * 32,
+        )
+        service.plan_checkpoint_followup(
+            running_task, reactivated_audit.turn.turn_id
+        )
+
+        third_repair_head = "7" * 40
+        third_repair_artifact = b"reactivated-audit-gap-repair"
+        self.verifier.register(
+            VerifiedBundle(
+                bundle_sha256=sha256(third_repair_artifact).hexdigest(),
+                head_sha=third_repair_head,
+                parent_anchor_sha=second_repair_head,
+                changed_paths=("src/codex_dispatcher/parser.py",),
+                commit_count=1,
+                size_bytes=len(third_repair_artifact),
+            )
+        )
+        session_6 = "623e4567-e89b-12d3-a456-426614174000"
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(
+                session_6,
+                third_repair_head,
+                completed_result(),
+                third_repair_artifact,
+            ),
+        )
+        service.run_claimed_turn(
+            running_task,
+            comments=(reactivation_comment,),
+            turn_id="turn_" + "9" * 32,
+        )
+        self.assertEqual("ci_repair", self.transport.calls[-1].session_role)
+        live = self.store.get_live_session_generation(item.work_item_id)
+        self.assertIsNotNone(live)
+        assert live is not None
+        self.assertEqual("audit_gap", live.rotation_reason)
 
     def test_checkpoint_intent_is_durable_recoverable_and_atomically_consumed(self) -> None:
         config = replace(

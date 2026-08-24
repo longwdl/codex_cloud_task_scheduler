@@ -419,7 +419,19 @@ class OfflineSshDispatchService:
                         allow_running=followup_intent is not None,
                     )
 
-                if generation.policy_sha256 != session_runtime.agent_policy_digest:
+                role_change_reason = (
+                    followup_intent.cause.value
+                    if followup_intent is not None
+                    and followup_intent.target_role is not generation.role
+                    else None
+                )
+                if role_change_reason is not None:
+                    # A durable cross-role follow-up is itself the rotation
+                    # decision. Same-role continuation limits, including the
+                    # no-progress guard, do not decide whether that handoff is
+                    # allowed to start.
+                    rotation_reason = role_change_reason
+                elif generation.policy_sha256 != session_runtime.agent_policy_digest:
                     rotation_reason = (
                         "legacy_policy_activation" if is_legacy else "policy_changed"
                     )
@@ -428,11 +440,6 @@ class OfflineSshDispatchService:
                         generation=generation,
                         generation_turns=generation_turns,
                     )
-                if (
-                    followup_intent is not None
-                    and followup_intent.target_role is not generation.role
-                ):
-                    rotation_reason = followup_intent.cause.value
                 if rotation_reason is not None:
                     if len(generations) >= session_runtime.max_session_generations:
                         raise SshDispatchPlanningError(
