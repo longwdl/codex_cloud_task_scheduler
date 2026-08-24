@@ -43,7 +43,7 @@ Control Host 负责：
 - recovery-first planner；
 - GitHub/Slack 适配器和最小凭据；
 - trusted mirror、source staging、quarantine、Publisher staging；
-- SQLite 1–20 migration ledger；
+- SQLite 1–21 migration ledger；
 - WorkItem/Turn/generation/Handoff/follow-up/completion/disposition/archive/branch-cleanup 状态；
 - online backup、restore drill、full DR、health 和 release receipt；
 - 一个全局 Dispatcher lock。
@@ -83,12 +83,18 @@ API、备份/恢复可见状态与 Runner capacity。两个 channel 必须不同
 主要状态：
 
 ```text
-preparing -> ready -> running -> publishing -> review -> completed
-                    \-> needs_input
-                    \-> blocked
+discovered -> preparing -> ready -> running -> review -> completed
+                                  \-> waiting_input
+                                  \-> blocked / paused
 ```
 
-`agent:discard` 不伪装成 completed：它写入独立 immutable disposition，再进入精确 archive eligibility。
+`checkpointing`/`published` 属于 Turn，不是 WorkItem 主状态。完整分层状态机见
+[`state-machine.md`](state-machine.md)。
+
+`agent:discard` 是受信维护者指令，不交给 AI 再解释。控制面先写 immutable discard request，冻结新
+Turn/generation；若已有 Turn 则只通过 STATUS 收敛并拒绝未发布结果。随后精确关闭未合并 PR（如有）、
+写入统一 discarded disposition、以 `not_planned` 关闭 Issue，最后才进入独立 archive eligibility。
+内部 `abandoned`/`superseded` 只表示是否绑定过 PR，不再映射成额外 GitHub 状态。
 `work_items.state` 只是一层主状态，事实还包括 Turns、generation、publication ledger、completion gate、
 disposition、archive、absence 和 branch-cleanup receipt。
 
@@ -122,7 +128,7 @@ Agent `completed` 只是 candidate。进入 review 之前必须满足：
 2. 读取 SQLite 和外部事实，先生成唯一 recovery plan；
 3. 若有 recovery，执行一次并立即 read-back；歧义则 blocked；
 4. recovery idle 后读取一个 ready candidate；
-5. 在 claim 前写入 schema-20 repository policy identity；
+5. 在 claim 前写入 schema-20 repository policy identity；终态写入 schema-21 discard/closure receipt；
 6. 固定 base SHA，生成 exact self-contained bundle；
 7. claim Issue，创建或复用唯一 WorkItem，并 PREPARE Runner；
 8. 创建/恢复 generation，冻结 Turn input，START/RESUME Codex；
@@ -141,7 +147,7 @@ Agent `completed` 只是 candidate。进入 review 之前必须满足：
 2. unknown/executing Turn 的 STATUS；
 3. Publisher branch/PR/comment/Slack receipt；
 4. completion gate、fresh Audit、follow-up intent；
-5. merge completion 或 discard disposition；
+5. merge completion/discard request、精确 PR/Issue closure 和对应 receipt；
 6. WorkItem archive/ARCHIVE_STATUS；
 7. terminal branch cleanup；
 8. 新 Issue。
@@ -161,6 +167,9 @@ Agent `completed` 只是 candidate。进入 review 之前必须满足：
 - completed retention 默认受审值为 7 天；未配置则不自动 archive。
 - terminal branch retention 默认受审值为 30 天，并可设置 rollout cutover，防止配置缩短后扫到历史分支。
 - blocked/needs_input/review/active 不因时间自动删除。
+- completed 在 exact merged PR 对账后由控制面自动关闭 Issue，reason 为 `completed`。
+- discard 由人工设置 `agent:discard`，控制面自动关闭 exact unmerged PR 和 Issue；Issue reason 为
+  `not_planned`。Issue 关闭后仍是审计入口，reopen 不会恢复旧 WorkItem。
 - Runner 先写永久 archive tombstone，再只删除 exact WorkItem image；registry 保留。
 - branch cleanup 必须绑定 repository/Issue/branch/exact head 和 GitHub read-back。
 - release/image reclamation 先生成不授权 apply 的 exact plan，记录 commit/digest/path/bytes/reference inventory；
@@ -219,7 +228,7 @@ release apply 后 timer 保持 stopped，直到人工观察 preflight、一个 w
 
 - daily online backup 不读取网络凭据，验证源库和备份 integrity 后 mode-`0600` 原子公布；
 - 保留最老 migration anchor 和最新七份，任一候选损坏则不轮转；
-- weekly restore drill 在临时数据库验证 integrity、foreign keys、migration 1–20 后删除临时库；
+- weekly restore drill 在临时数据库验证 integrity、foreign keys、migration 1–21 后删除临时库；
 - full DR 在隔离 root 恢复数据库，对账 release receipt、Control/Runner commit、Runner tombstone/absence、
   GitHub、Slack，并演练空 Control application root；不替换在线环境；
 - health 监控 active/blocked Turn、archive/branch backlog、GitHub API metrics/cursor、follow-up intent、
@@ -253,7 +262,7 @@ Live Fixture 只在新故障边界、协议变化、外部 provider 行为变化
 
 保留：
 
-- migration 1–20 文件和 committed schema ledger；
+- migration 1–21 文件和 committed schema ledger；
 - 历史 AgentResult、protocol-v1 receipt、legacy generation、旧 archive storage shape 和 schema-1 Handoff
   的只读灾备解析；
 - 已归档/absence-reconciled WorkItem 的永久证据。

@@ -8,7 +8,9 @@ from typing import Any
 from codex_dispatcher.trackers.base import (
     ClaimResult,
     DraftPullRequestRequest,
+    IssueCloseReason,
     PullRequest,
+    PullRequestState,
     TaskState,
     TrackerComment,
     TrackerTask,
@@ -143,6 +145,35 @@ class FakeTracker(_ConfigurableFake):
             self.tasks[task_id] = outcome
         return outcome  # type: ignore[return-value]
 
+    def close_task(
+        self,
+        repository: str,
+        task_id: str,
+        *,
+        expected_issue_node_id: str,
+        reason: IssueCloseReason,
+    ) -> TrackerTask:
+        self._record(
+            "close_task",
+            repository,
+            task_id,
+            expected_issue_node_id,
+            reason,
+        )
+        task = self.tasks.get(task_id)
+        if (
+            task is None
+            or task.repository != repository
+            or task.issue_node_id != expected_issue_node_id
+        ):
+            raise ValueError("Issue identity does not match the close request")
+        default = replace(task, is_open=False, state_reason=reason.value)
+        outcome = self._outcome("close_task", default)
+        if "close_task" not in self._results:
+            assert isinstance(outcome, TrackerTask)
+            self.tasks[task_id] = outcome
+        return outcome  # type: ignore[return-value]
+
     def upsert_run_comment(self, repository: str, task_id: str, marker: str, body: str) -> None:
         self._record("upsert_run_comment", repository, task_id, marker, body)
         self._outcome("upsert_run_comment", None)
@@ -152,6 +183,37 @@ class FakeTracker(_ConfigurableFake):
         return self._outcome(
             "find_pr_by_branch", self.pull_requests.get((repository, branch_name))
         )  # type: ignore[return-value]
+
+    def close_pull_request(
+        self,
+        repository: str,
+        branch_name: str,
+        *,
+        expected_number: int,
+        expected_head_sha: str,
+    ) -> PullRequest:
+        self._record(
+            "close_pull_request",
+            repository,
+            branch_name,
+            expected_number,
+            expected_head_sha,
+        )
+        key = (repository, branch_name)
+        pull_request = self.pull_requests.get(key)
+        if (
+            pull_request is None
+            or pull_request.number != expected_number
+            or pull_request.head_sha != expected_head_sha
+            or pull_request.state is PullRequestState.MERGED
+        ):
+            raise ValueError("Pull Request identity does not match the close request")
+        default = replace(pull_request, state=PullRequestState.CLOSED)
+        outcome = self._outcome("close_pull_request", default)
+        if "close_pull_request" not in self._results:
+            assert isinstance(outcome, PullRequest)
+            self.pull_requests[key] = outcome
+        return outcome  # type: ignore[return-value]
 
     def get_branch_head(self, repository: str, branch_name: str) -> str | None:
         self._record("get_branch_head", repository, branch_name)

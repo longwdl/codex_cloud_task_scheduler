@@ -20,7 +20,7 @@ on the Control Host.
 - Repository admission is an explicit class/profile matrix. The ordinary runtime currently admits
   only the reviewed Fixture profile. Higher-value admission remains hard false; its separate manual
   canary cannot widen normal admission.
-- SQLite migrations 1 through 20 are the durable ledger. Historical result and generation shapes
+- SQLite migrations 1 through 21 are the durable ledger. Historical result and generation shapes
   remain readable only where disaster recovery needs them; no current workflow creates old-format
   rows.
 
@@ -44,7 +44,8 @@ quarantine, Publisher, SQLite, backups, health checks, and release receipts. The
 self-contained exact-base bundle and metadata-bound requests. It has no GitHub write credential,
 no host Docker socket inside the Turn container, and no access to another WorkItem.
 
-See [Architecture](docs/architecture.md) for invariants and
+See [Architecture](docs/architecture.md) for invariants, the
+[state machine](docs/state-machine.md) for terminal completion/discard behavior, and
 [Implementation, deployment, and acceptance](docs/implementation-deployment-test-plan.md) for the
 operational sequence.
 
@@ -64,9 +65,10 @@ operational sequence.
    pushing and creating or recovering one Draft PR.
 8. The completion gate imports exact-HEAD Actions evidence, evaluates structured acceptance
    criteria, and requires a fresh Audit generation when configured.
-9. A passed WorkItem enters `review`. Only an exact maintainer merge may project `completed`;
-   `agent:discard` records an immutable disposition instead.
-10. Retention may archive only an eligible completed/discarded WorkItem through an exact Runner
+9. A passed WorkItem enters `review`. An exact merged PR projects `agent:completed` and closes the
+   Issue as `completed`. A trusted maintainer `agent:discard` event freezes new work, closes any
+   exact unmerged PR, records the discard, and closes the Issue as `not_planned`.
+10. Closed Issues remain audit indexes. Retention may archive only an eligible completed/discarded WorkItem through an exact Runner
     tombstone. Branch cleanup and release/image reclamation use separate exact receipts.
 
 Ambiguous START, STATUS, publication, GitHub, Slack, archive, or external identity never causes a
@@ -108,6 +110,7 @@ git diff --check
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [State machine](docs/state-machine.md)
 - [Development](docs/development.md)
 - [Implementation, deployment, and acceptance](docs/implementation-deployment-test-plan.md)
 - [Owner preparation checklist](docs/owner-preparation-checklist.md)

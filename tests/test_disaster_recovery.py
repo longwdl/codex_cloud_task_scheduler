@@ -39,6 +39,10 @@ from codex_dispatcher.trackers.base import (
     TrackerTask,
 )
 from codex_dispatcher.work_items import WorkItem, WorkItemState
+from codex_dispatcher.work_item_lifecycle import (
+    TerminalGithubClosureKind,
+    TerminalGithubClosureOutcome,
+)
 
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
@@ -105,6 +109,55 @@ class _SlackPublisher:
 
 
 class DisasterRecoveryTests(unittest.TestCase):
+    def test_discarded_issue_reconciliation_requires_closed_not_planned_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            item = WorkItem.new(
+                repository="owner/repo",
+                issue_number=10,
+                issue_node_id="I_kwDOFixture10",
+                base_branch="main",
+                base_sha="a" * 40,
+                at="2026-08-23T00:00:00+00:00",
+            )
+            tracker = FakeTracker()
+            tracker.tasks["10"] = TrackerTask(
+                repository=item.repository,
+                task_id="10",
+                issue_number=10,
+                title="discarded fixture",
+                body="fixture",
+                state=TaskState.DISCARD,
+                labels=("agent:discard",),
+                created_at="2026-08-23T00:00:00Z",
+                ready_approved_by=None,
+                issue_node_id=item.issue_node_id,
+                is_open=False,
+                state_reason="not_planned",
+            )
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                store.create_work_item(item)
+                store.prepare_work_item_discard_request(
+                    item.work_item_id,
+                    expected_head_sha=item.base_sha,
+                    pr_number=None,
+                    requested_by="owner",
+                    request_event_id="1001",
+                    requested_at="2026-08-23T00:01:00+00:00",
+                )
+                store.record_discarded_work_item(item.work_item_id)
+                store.prepare_terminal_github_closure(
+                    item.work_item_id,
+                    kind=TerminalGithubClosureKind.DISCARDED_ISSUE,
+                )
+                store.complete_terminal_github_closure(
+                    item.work_item_id,
+                    kind=TerminalGithubClosureKind.DISCARDED_ISSUE,
+                    outcome=TerminalGithubClosureOutcome.CLOSED,
+                )
+
+                self.assertEqual((1, 0), _reconcile_github(store, tracker))
+
     def test_unpublished_branch_may_remain_at_exact_persisted_base(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             item = WorkItem.new(
@@ -236,6 +289,15 @@ class DisasterRecoveryTests(unittest.TestCase):
                 WorkItemState.COMPLETED,
             ):
                 store.update_work_item_state(item.work_item_id, state)
+            store.prepare_terminal_github_closure(
+                item.work_item_id,
+                kind=TerminalGithubClosureKind.COMPLETED_ISSUE,
+            )
+            store.complete_terminal_github_closure(
+                item.work_item_id,
+                kind=TerminalGithubClosureKind.COMPLETED_ISSUE,
+                outcome=TerminalGithubClosureOutcome.CLOSED,
+            )
             archive_request = RunnerRequest(
                 RunnerOperation.ARCHIVE,
                 item.work_item_id,
@@ -483,6 +545,8 @@ class DisasterRecoveryTests(unittest.TestCase):
             created_at="2026-08-23T00:00:00Z",
             ready_approved_by=None,
             issue_node_id=item.issue_node_id,
+            is_open=False,
+            state_reason="completed",
         )
         tracker.pull_requests[(item.repository, item.task_branch)] = PullRequest(
             number=2,
@@ -551,7 +615,7 @@ class DisasterRecoveryTests(unittest.TestCase):
             )
 
             self.assertEqual(COMMIT, result.release_commit)
-            self.assertEqual(tuple(range(1, 21)), tuple(
+            self.assertEqual(tuple(range(1, 22)), tuple(
                 json.loads(result.receipt_path.read_text())["database_schema_migrations"]
             ))
             self.assertEqual(1, result.work_item_count)
@@ -569,7 +633,7 @@ class DisasterRecoveryTests(unittest.TestCase):
             )
             with StateStore(rebuilt, read_only=True) as store:
                 self.assertEqual("ok", store.integrity_check())
-                self.assertEqual(tuple(range(1, 21)), store.schema_migration_versions())
+                self.assertEqual(tuple(range(1, 22)), store.schema_migration_versions())
             self.assertTrue((recovery / "empty-control-host-manifest.json").is_file())
             self.assertTrue((recovery / "empty-runner-host-manifest.json").is_file())
             self.assertTrue(

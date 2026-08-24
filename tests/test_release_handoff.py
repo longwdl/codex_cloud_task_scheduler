@@ -136,7 +136,7 @@ class _Commands:
                     "source_path": str(self.backup),
                     "integrity": "ok",
                     "foreign_key_violations": 0,
-                    "schema_migrations": list(range(1, 21)),
+                    "schema_migrations": list(range(1, 22)),
                     "temporary_restore_removed": True,
                 }
             else:

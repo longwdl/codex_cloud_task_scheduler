@@ -1,7 +1,7 @@
 # Current-schema disaster recovery and exact Runner asset reclamation
 
 The command retains its historical `schema18-disaster-recovery` name, but the current release
-requires the exact schema-20 migration set (1 through 20).
+requires the exact schema-21 migration set (1 through 21).
 
 This runbook has two independent workflows. The disaster-recovery drill may write only below a new
 isolated recovery directory and may perform GitHub and Slack reads. Reclamation planning is
@@ -11,7 +11,7 @@ operation and must never follow automatically from a plan.
 ## Measured recovery boundary
 
 The receipt's `rto_milliseconds` measures one exact interval: complete offline bundle validation
-through isolated schema-20 restore, release and operational-handoff receipt validation,
+through isolated schema-21 restore, release and operational-handoff receipt validation,
 Control/Runner version agreement, Runner registry/archive/absence and schema-v2 reference
 reconciliation, GitHub Issue/PR/branch read-back, Slack permalink read-back, and reconstruction of
 empty Control and Runner application filesystem roots. The receipt records the backup age as the
@@ -31,7 +31,7 @@ Preconditions:
 - leave the current Control and Runner environments in place;
 - require a committed schema-v2 release receipt for the exact current commit;
 - require a permanent operational handoff receipt for that release;
-- require the newest retained backup to be mode `0600`, schema 20, integral, and free of foreign-key
+- require the newest retained backup to be mode `0600`, schema 21, integral, and free of foreign-key
   violations;
 - require no unfinished Slack outbox row;
 - place copied inputs and the bundle in `codex-dispatcher`-owned mode-`0700` directories and never
@@ -71,7 +71,7 @@ sudo install -o codex-dispatcher -g codex-dispatcher -m 0600 \
 
 Create one new bundle through a transient service. The bundle includes the protected Control
 configuration, so its directory and every non-release artifact remain mode `0700`/`0600`. The
-source canary database below is the pre-discard schema-20 backup that owns the three higher-value
+source canary database below is the retained schema-21 backup that owns the three higher-value
 WorkItems; replace paths only with exact reviewed equivalents:
 
 ```bash
@@ -135,7 +135,7 @@ backup, and remove only that exact recovery directory after investigation. Do no
 the same recovery directory.
 
 Runner terminal evidence may include canary WorkItems that were intentionally never inserted into
-the online Control database. Such an identity is accepted only when an included, integral schema-20
+the online Control database. Such an identity is accepted only when an included, integral schema-21
 canary database binds the same WorkItem, repository, Issue, and published terminal HEAD. The receipt
 reports these separately as `runner_orphan_terminal_count`. A tombstone without that database
 provenance, an extra provenance row, an overlapping archive/absence, or a mismatch for an online

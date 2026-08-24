@@ -59,7 +59,7 @@ CONTROL_SERVICES = (
 )
 RUNNER_TIMER = "codex-runner-reclamation-plan.timer"
 RUNNER_SERVICE = "codex-runner-reclamation-plan.service"
-EXPECTED_SCHEMA = tuple(range(1, 21))
+EXPECTED_SCHEMA = tuple(range(1, 22))
 
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")

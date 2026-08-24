@@ -43,12 +43,16 @@ from codex_dispatcher.terminal_storage import (
     effective_terminal_storage_state,
 )
 from codex_dispatcher.terminal_retention import TerminalBranchCleanupState
-from codex_dispatcher.work_item_lifecycle import WorkItemArchiveStatus
+from codex_dispatcher.work_item_lifecycle import (
+    TerminalGithubClosureState,
+    WorkItemArchiveStatus,
+)
 from codex_dispatcher.work_items import WorkItem, WorkItemState
 
 
 MAX_BLOCKED_AGE_SECONDS = 24 * 60 * 60
 MAX_ARCHIVE_PENDING_AGE_SECONDS = 15 * 60
+MAX_TERMINAL_GITHUB_PENDING_AGE_SECONDS = 15 * 60
 MAX_PLANNED_FOLLOWUP_AGE_SECONDS = 15 * 60
 ACTIVE_TURN_GRACE_SECONDS = 5 * 60
 MAX_REPORTED_ALERTS = 50
@@ -106,6 +110,10 @@ class LifecycleHealthSnapshot:
     planned_followups: int
     cross_role_followups: int
     no_progress_exhaustions: int
+    discard_requests: int
+    pending_terminal_github_closures: int
+    blocked_terminal_github_closures: int
+    completed_terminal_github_closures: int
     pending_archives: int
     ambiguous_archives: int
     blocked_archives: int
@@ -145,6 +153,10 @@ class LifecycleHealthSnapshot:
             "planned_followups": self.planned_followups,
             "cross_role_followups": self.cross_role_followups,
             "no_progress_exhaustions": self.no_progress_exhaustions,
+            "discard_requests": self.discard_requests,
+            "pending_terminal_github_closures": self.pending_terminal_github_closures,
+            "blocked_terminal_github_closures": self.blocked_terminal_github_closures,
+            "completed_terminal_github_closures": self.completed_terminal_github_closures,
             "pending_archives": self.pending_archives,
             "ambiguous_archives": self.ambiguous_archives,
             "blocked_archives": self.blocked_archives,
@@ -215,6 +227,11 @@ def inspect_lifecycle_health(
         disposition.work_item_id: disposition
         for disposition in store.list_work_item_dispositions()
     }
+    discard_requests = {
+        request.work_item_id: request
+        for request in store.list_work_item_discard_requests()
+    }
+    terminal_github_closures = store.list_terminal_github_closures()
     archives = {
         archive.work_item_id: archive for archive in store.list_work_item_archives()
     }
@@ -239,6 +256,9 @@ def inspect_lifecycle_health(
     planned_followups = 0
     cross_role_followups = 0
     no_progress_exhaustions = 0
+    pending_terminal_github_closures = 0
+    blocked_terminal_github_closures = 0
+    completed_terminal_github_closures = 0
     pending_archives = 0
     ambiguous_archives = 0
     blocked_archives = 0
@@ -314,10 +334,41 @@ def inspect_lifecycle_health(
                     )
                 )
 
+    work_items_by_id = {item.work_item_id: item for item in work_items}
+    for closure in terminal_github_closures:
+        work_item = work_items_by_id.get(closure.work_item_id)
+        if work_item is None:
+            alerts.append(
+                LifecycleAlert(
+                    "terminal_github_closure_work_item_missing",
+                    work_item_id=closure.work_item_id,
+                )
+            )
+            continue
+        closure_age = _age_seconds(moment, closure.updated_at)
+        if closure.state is TerminalGithubClosureState.PREPARED:
+            pending_terminal_github_closures += 1
+            if closure_age > MAX_TERMINAL_GITHUB_PENDING_AGE_SECONDS:
+                alerts.append(
+                    _item_alert(
+                        "terminal_github_closure_pending_too_long",
+                        work_item,
+                        closure_age,
+                    )
+                )
+        elif closure.state is TerminalGithubClosureState.BLOCKED:
+            blocked_terminal_github_closures += 1
+            alerts.append(
+                _item_alert("terminal_github_closure_blocked", work_item, closure_age)
+            )
+        else:
+            completed_terminal_github_closures += 1
+
     for work_item in work_items:
         archive = archives.get(work_item.work_item_id)
         absence = absences.get(work_item.work_item_id)
         disposition = dispositions.get(work_item.work_item_id)
+        discard_request = discard_requests.get(work_item.work_item_id)
         abandonment = abandonments_by_work_item.get(work_item.work_item_id)
         branch_cleanup = store.get_terminal_branch_cleanup(work_item.work_item_id)
         effective_storage = effective_terminal_storage_state(archive, absence)
@@ -333,6 +384,26 @@ def inspect_lifecycle_health(
                 and archive.status is WorkItemArchiveStatus.ARCHIVED
             )
         )
+
+        if (
+            discard_request is not None
+            and disposition is None
+            and work_item.state is not WorkItemState.COMPLETED
+        ):
+            request_age = _age_seconds(moment, discard_request.created_at)
+            request_deadline = max(
+                MAX_TERMINAL_GITHUB_PENDING_AGE_SECONDS,
+                config.ssh_runtime.operation_timeout_seconds
+                + ACTIVE_TURN_GRACE_SECONDS,
+            )
+            if request_age > request_deadline:
+                alerts.append(
+                    _item_alert(
+                        "work_item_discard_request_pending_too_long",
+                        work_item,
+                        request_age,
+                    )
+                )
 
         followups = store.list_work_item_followups(work_item.work_item_id)
         for followup in followups:
@@ -525,6 +596,10 @@ def inspect_lifecycle_health(
         planned_followups=planned_followups,
         cross_role_followups=cross_role_followups,
         no_progress_exhaustions=no_progress_exhaustions,
+        discard_requests=len(discard_requests),
+        pending_terminal_github_closures=pending_terminal_github_closures,
+        blocked_terminal_github_closures=blocked_terminal_github_closures,
+        completed_terminal_github_closures=completed_terminal_github_closures,
         pending_archives=pending_archives,
         ambiguous_archives=ambiguous_archives,
         blocked_archives=blocked_archives,

@@ -845,6 +845,10 @@ class OfflineSshDispatchService:
         ):
             return self._orchestrator.reject_publication(turn_id)
 
+    def reject_discarded_turn_result(self, turn_id: str) -> TurnProgress:
+        """Terminalize an unpublished or already-recorded result after discard intent."""
+        return self._orchestrator.reject_publication(turn_id)
+
     def evaluate_completion_gate(
         self, task: TrackerTask, turn_id: str
     ) -> TurnProgress:

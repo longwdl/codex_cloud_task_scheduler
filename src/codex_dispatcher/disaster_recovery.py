@@ -33,15 +33,16 @@ from codex_dispatcher.trackers.base import (
     Tracker,
 )
 from codex_dispatcher.work_item_lifecycle import (
+    TerminalGithubClosureKind,
+    TerminalGithubClosureState,
     WorkItemArchiveStatus,
-    WorkItemDispositionKind,
 )
 from codex_dispatcher.work_items import WorkItemState, validate_work_item_id
 
 
 _SCHEMA_VERSION = 3
 _BUNDLE_SCHEMA_VERSION = 1
-_EXPECTED_DATABASE_SCHEMA = tuple(range(1, 21))
+_EXPECTED_DATABASE_SCHEMA = tuple(range(1, 22))
 _RELEASE_FILES = (
     "scripts/codex-dispatcher-v1",
     "scripts/codex-dispatcher-backup-v1",
@@ -167,7 +168,7 @@ class DisasterRecoveryResult:
             "slack_receipt_count": self.slack_receipt_count,
             "rto_milliseconds": self.rto_milliseconds,
             "rto_scope": (
-                "complete independent-bundle validation through isolated schema-20 "
+                "complete independent-bundle validation through isolated schema-21 "
                 "restore, Control and Runner application-filesystem rebuilds, and "
                 "exact Runner/GitHub/Slack read-back"
             ),
@@ -391,7 +392,7 @@ def create_disaster_recovery_bundle(
                 if source.integrity_check() != "ok" or source.foreign_key_violation_count():
                     raise DisasterRecoveryError("provenance database is not integral")
                 if source.schema_migration_versions() != _EXPECTED_DATABASE_SCHEMA:
-                    raise DisasterRecoveryError("provenance database is not exact schema 20")
+                    raise DisasterRecoveryError("provenance database is not exact schema 21")
                 source.backup(target)
             os.chmod(target, 0o600, follow_symlinks=False)
             provenance_targets.append(target)
@@ -634,7 +635,7 @@ def run_schema18_disaster_recovery_drill(
     slack_verifier: SlackReceiptVerifier | None,
     now: datetime | None = None,
 ) -> DisasterRecoveryResult:
-    """Restore and reconcile one exact schema-20 snapshot without touching live state."""
+    """Restore and reconcile one exact schema-21 snapshot without touching live state."""
     started = time.monotonic_ns()
     moment = datetime.now(timezone.utc) if now is None else now
     if not isinstance(moment, datetime) or moment.tzinfo is None:
@@ -680,7 +681,7 @@ def run_schema18_disaster_recovery_drill(
             if restored.foreign_key_violation_count():
                 raise DisasterRecoveryError("restored database has foreign-key violations")
             if restored.schema_migration_versions() != _EXPECTED_DATABASE_SCHEMA:
-                raise DisasterRecoveryError("restored database is not exact schema 20")
+                raise DisasterRecoveryError("restored database is not exact schema 21")
             work_items = restored.list_work_items()
             archive_count, absence_count, orphan_terminal_count = _verify_runner_snapshot(
                 restored, runner_snapshot, bundle.provenance_databases
@@ -873,6 +874,10 @@ def _reconcile_github(store: StateStore, tracker: Tracker) -> tuple[int, int]:
     dispositions = {
         record.work_item_id: record for record in store.list_work_item_dispositions()
     }
+    discard_requests = {
+        record.work_item_id: record
+        for record in store.list_work_item_discard_requests()
+    }
     runner_reclaimed = {
         record.work_item_id
         for record in store.list_work_item_archives()
@@ -888,30 +893,68 @@ def _reconcile_github(store: StateStore, tracker: Tracker) -> tuple[int, int]:
             or task.repository != work_item.repository
             or task.issue_number != work_item.issue_number
             or task.issue_node_id != work_item.issue_node_id
-            or not task.is_open
         ):
             raise DisasterRecoveryError("GitHub Issue identity conflicts with SQLite")
         disposition = dispositions.get(work_item.work_item_id)
-        expected_state = (
-            TaskState.DISCARD
-            if disposition is not None
-            else _task_state_for_work_item(work_item.state)
-        )
+        discard_request = discard_requests.get(work_item.work_item_id)
+        if disposition is not None:
+            expected_state = TaskState.DISCARD
+        elif work_item.state is WorkItemState.COMPLETED:
+            expected_state = TaskState.COMPLETED
+        elif discard_request is not None:
+            expected_state = TaskState.DISCARD
+        else:
+            expected_state = _task_state_for_work_item(work_item.state)
         if task.state is not expected_state:
             raise DisasterRecoveryError("GitHub Issue state conflicts with SQLite")
+        terminal_issue_kind = None
+        expected_close_reason = None
+        if disposition is not None:
+            terminal_issue_kind = TerminalGithubClosureKind.DISCARDED_ISSUE
+            expected_close_reason = "not_planned"
+        elif work_item.state is WorkItemState.COMPLETED:
+            terminal_issue_kind = TerminalGithubClosureKind.COMPLETED_ISSUE
+            expected_close_reason = "completed"
+        if terminal_issue_kind is None:
+            if not task.is_open or task.state_reason is not None:
+                raise DisasterRecoveryError(
+                    "nonterminal GitHub Issue is unexpectedly closed"
+                )
+        else:
+            closure = store.get_terminal_github_closure(
+                work_item.work_item_id, terminal_issue_kind
+            )
+            if (
+                closure is None
+                or closure.state is not TerminalGithubClosureState.COMPLETED
+                or task.is_open
+                or task.state_reason != expected_close_reason
+            ):
+                raise DisasterRecoveryError(
+                    "terminal GitHub Issue closure conflicts with SQLite"
+                )
         issue_count += 1
 
         pull_request = tracker.find_pr_by_branch(
             work_item.repository, work_item.task_branch
         )
-        if work_item.pr_number is None:
+        expected_pr_number = (
+            discard_request.pr_number
+            if discard_request is not None
+            else work_item.pr_number
+        )
+        if expected_pr_number is None:
             if pull_request is not None:
                 raise DisasterRecoveryError("unbound GitHub Pull Request exists")
         else:
-            expected_head = work_item.last_published_sha
+            expected_head = (
+                discard_request.expected_head_sha
+                if discard_request is not None
+                else work_item.last_published_sha
+            )
             if (
                 pull_request is None
-                or pull_request.number != work_item.pr_number
+                or pull_request.number != expected_pr_number
                 or pull_request.branch_name != work_item.task_branch
                 or pull_request.head_sha != expected_head
             ):
@@ -919,11 +962,17 @@ def _reconcile_github(store: StateStore, tracker: Tracker) -> tuple[int, int]:
             expected_pr_state = PullRequestState.OPEN
             if work_item.state is WorkItemState.COMPLETED:
                 expected_pr_state = PullRequestState.MERGED
-            elif (
-                disposition is not None
-                and disposition.kind is WorkItemDispositionKind.SUPERSEDED
-            ):
-                expected_pr_state = PullRequestState.CLOSED
+            elif discard_request is not None:
+                pr_closure = store.get_terminal_github_closure(
+                    work_item.work_item_id,
+                    TerminalGithubClosureKind.DISCARDED_PULL_REQUEST,
+                )
+                if pr_closure is not None:
+                    if pr_closure.state is not TerminalGithubClosureState.COMPLETED:
+                        raise DisasterRecoveryError(
+                            "discarded GitHub Pull Request closure is unfinished"
+                        )
+                    expected_pr_state = PullRequestState.CLOSED
             if pull_request.state is not expected_pr_state:
                 raise DisasterRecoveryError("GitHub Pull Request state conflicts with SQLite")
             pr_count += 1

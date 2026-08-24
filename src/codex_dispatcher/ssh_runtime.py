@@ -57,7 +57,11 @@ from codex_dispatcher.trusted_mirror import GitHubMirrorRefresher, TrustedMirror
 from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator
 from codex_dispatcher.turn_abandonment import TurnExecutionAbandonment
 from codex_dispatcher.runner_transport import RunnerTurnReply
-from codex_dispatcher.work_item_lifecycle import WorkItemAbsenceReconciliation
+from codex_dispatcher.work_item_lifecycle import (
+    TerminalGithubClosureKind,
+    TerminalGithubClosureState,
+    WorkItemAbsenceReconciliation,
+)
 from codex_dispatcher.work_items import (
     WorkItemState,
     validate_git_sha,
@@ -558,8 +562,13 @@ def _run_locked_absence_reconciliation(
     issue_number: int,
 ) -> WorkItemAbsenceReconciliation:
     task = tracker.get_task(repository, str(issue_number))
-    if task is None or not task.is_open or task.state is not TaskState.COMPLETED:
-        raise SshRuntimeError("absence reconciliation requires an open completed Issue")
+    if (
+        task is None
+        or task.is_open
+        or task.state is not TaskState.COMPLETED
+        or task.state_reason != "completed"
+    ):
+        raise SshRuntimeError("absence reconciliation requires a closed completed Issue")
     executor_labels = tuple(label for label in task.labels if label.startswith("exec:"))
     if executor_labels != ("exec:ssh-cli",):
         raise SshRuntimeError("absence reconciliation requires exact exec:ssh-cli")
@@ -571,6 +580,17 @@ def _run_locked_absence_reconciliation(
         or work_item.base_branch != repository_base_branch
     ):
         raise SshRuntimeError("absence reconciliation WorkItem is not terminal")
+    issue_closure = store.get_terminal_github_closure(
+        work_item.work_item_id,
+        TerminalGithubClosureKind.COMPLETED_ISSUE,
+    )
+    if (
+        issue_closure is None
+        or issue_closure.state is not TerminalGithubClosureState.COMPLETED
+    ):
+        raise SshRuntimeError(
+            "absence reconciliation requires a completed Issue closure receipt"
+        )
     pull_request = tracker.find_pr_by_branch(repository, work_item.task_branch)
     if (
         pull_request is None

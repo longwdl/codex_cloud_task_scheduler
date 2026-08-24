@@ -8,6 +8,7 @@ from enum import StrEnum
 
 from codex_dispatcher.work_items import (
     validate_git_sha,
+    validate_repository,
     validate_sha256,
     validate_work_item_id,
 )
@@ -21,8 +22,131 @@ class WorkItemArchiveStatus(StrEnum):
 
 
 class WorkItemDispositionKind(StrEnum):
+    """Storage-only shape for pre/post-PR discard evidence.
+
+    The control-plane state is uniformly ``discarded``. These values satisfy the
+    additive schema but do not represent separate operator choices or labels.
+    """
+
     ABANDONED = "abandoned"
     SUPERSEDED = "superseded"
+
+
+class TerminalGithubClosureKind(StrEnum):
+    COMPLETED_ISSUE = "completed_issue"
+    DISCARDED_PULL_REQUEST = "discarded_pull_request"
+    DISCARDED_ISSUE = "discarded_issue"
+
+
+class TerminalGithubClosureState(StrEnum):
+    PREPARED = "prepared"
+    COMPLETED = "completed"
+    BLOCKED = "blocked"
+
+
+class TerminalGithubClosureOutcome(StrEnum):
+    CLOSED = "closed"
+    ALREADY_CLOSED = "already_closed"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkItemDiscardRequest:
+    """Immutable trusted-maintainer request to discard one exact WorkItem."""
+
+    work_item_id: str
+    expected_head_sha: str
+    pr_number: int | None
+    requested_by: str
+    request_event_id: str
+    requested_at: str
+    request_sha256: str
+    created_at: str
+
+    def __post_init__(self) -> None:
+        validate_work_item_id(self.work_item_id)
+        validate_git_sha(self.expected_head_sha, "expected_head_sha")
+        if self.pr_number is not None and (
+            type(self.pr_number) is not int or self.pr_number <= 0
+        ):
+            raise ValueError("discard request Pull Request number is invalid")
+        _bounded_text(self.requested_by, "requested_by", maximum=128)
+        _bounded_text(self.request_event_id, "request_event_id", maximum=128)
+        _aware_datetime(self.requested_at, "requested_at")
+        validate_sha256(self.request_sha256, "request_sha256")
+        _aware_datetime(self.created_at, "created_at")
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalGithubClosure:
+    """Recoverable exact close receipt for one terminal GitHub projection."""
+
+    work_item_id: str
+    kind: TerminalGithubClosureKind
+    repository: str
+    issue_number: int
+    issue_node_id: str
+    pr_number: int | None
+    expected_head_sha: str
+    close_reason: str | None
+    state: TerminalGithubClosureState
+    request_sha256: str
+    outcome: TerminalGithubClosureOutcome | None
+    error_code: str | None
+    completed_at: str | None
+    created_at: str
+    updated_at: str
+
+    def __post_init__(self) -> None:
+        validate_work_item_id(self.work_item_id)
+        if not isinstance(self.kind, TerminalGithubClosureKind):
+            raise ValueError("terminal GitHub closure kind is invalid")
+        validate_repository(self.repository)
+        if type(self.issue_number) is not int or self.issue_number <= 0:
+            raise ValueError("terminal GitHub closure Issue number is invalid")
+        _bounded_text(self.issue_node_id, "issue_node_id", maximum=256)
+        validate_git_sha(self.expected_head_sha, "expected_head_sha")
+        if self.kind is TerminalGithubClosureKind.DISCARDED_PULL_REQUEST:
+            if type(self.pr_number) is not int or self.pr_number <= 0:
+                raise ValueError("Pull Request closure requires a Pull Request")
+            if self.close_reason is not None:
+                raise ValueError("Pull Request closure cannot have an Issue close reason")
+        else:
+            if self.pr_number is not None:
+                raise ValueError("Issue closure cannot bind a Pull Request")
+            expected_reason = (
+                "completed"
+                if self.kind is TerminalGithubClosureKind.COMPLETED_ISSUE
+                else "not_planned"
+            )
+            if self.close_reason != expected_reason:
+                raise ValueError("Issue closure reason conflicts with its terminal kind")
+        if not isinstance(self.state, TerminalGithubClosureState):
+            raise ValueError("terminal GitHub closure state is invalid")
+        validate_sha256(self.request_sha256, "request_sha256")
+        _aware_datetime(self.created_at, "created_at")
+        _aware_datetime(self.updated_at, "updated_at")
+        if self.state is TerminalGithubClosureState.COMPLETED:
+            if (
+                not isinstance(self.outcome, TerminalGithubClosureOutcome)
+                or self.error_code is not None
+                or self.completed_at is None
+            ):
+                raise ValueError("completed terminal GitHub closure is incomplete")
+            _aware_datetime(self.completed_at, "completed_at")
+        elif self.state is TerminalGithubClosureState.BLOCKED:
+            if (
+                self.outcome is not None
+                or not isinstance(self.error_code, str)
+                or not self.error_code
+                or self.completed_at is not None
+            ):
+                raise ValueError("blocked terminal GitHub closure is incomplete")
+            _bounded_text(self.error_code, "error_code", maximum=128)
+        elif any(
+            value is not None
+            for value in (self.outcome, self.error_code, self.completed_at)
+        ):
+            raise ValueError("prepared terminal GitHub closure has terminal evidence")
 
 
 @dataclass(frozen=True, slots=True)

@@ -38,8 +38,12 @@ from codex_dispatcher.work_items import (
     WorkItem,
     WorkItemState,
 )
-from codex_dispatcher.work_item_lifecycle import WorkItemArchiveStatus
-from codex_dispatcher.work_item_lifecycle import WorkItemDispositionKind
+from codex_dispatcher.work_item_lifecycle import (
+    TerminalGithubClosureKind,
+    TerminalGithubClosureOutcome,
+    TerminalGithubClosureState,
+    WorkItemArchiveStatus,
+)
 
 
 SESSION = "123e4567-e89b-12d3-a456-426614174000"
@@ -122,6 +126,160 @@ def migrate_database_through(path: Path, last_version: int) -> None:
 
 
 class WorkItemStateStoreTests(unittest.TestCase):
+    def test_schema21_backfills_existing_disposition_as_discard_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "schema20.db"
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute(
+                    "CREATE TABLE schema_migrations "
+                    "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+                )
+                migration_root = files("codex_dispatcher.migrations")
+                resources = sorted(
+                    (
+                        int(resource.name[:3]),
+                        resource,
+                    )
+                    for resource in migration_root.iterdir()
+                    if resource.name.endswith(".sql")
+                    and resource.name[:3].isdigit()
+                    and int(resource.name[:3]) <= 20
+                )
+                for version, resource in resources:
+                    connection.executescript(resource.read_text(encoding="utf-8"))
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, applied_at) "
+                        "VALUES (?, '2026-08-24T00:00:00+00:00')",
+                        (version,),
+                    )
+                connection.commit()
+
+            item = make_item(26)
+            with StateStore(path) as store:
+                store.create_work_item(item)
+                store._connection.execute(
+                    "INSERT INTO work_item_dispositions "
+                    "(work_item_id, kind, expected_head_sha, pr_number, requested_by, "
+                    "request_event_id, requested_at, reason_code, request_sha256, "
+                    "eligible_at, created_at, updated_at) "
+                    "VALUES (?, 'abandoned', ?, NULL, 'alice', '2601', ?, "
+                    "'operator_agent_discard', ?, ?, ?, ?)",
+                    (
+                        item.work_item_id,
+                        item.base_sha,
+                        "2026-08-24T00:01:00+00:00",
+                        "e" * 64,
+                        "2026-08-24T00:02:00+00:00",
+                        "2026-08-24T00:02:00+00:00",
+                        "2026-08-24T00:02:00+00:00",
+                    ),
+                )
+                store._connection.commit()
+
+            with StateStore(path) as upgraded:
+                upgraded.migrate()
+                request = upgraded.get_work_item_discard_request(item.work_item_id)
+                disposition = upgraded.get_work_item_disposition(item.work_item_id)
+                self.assertIsNotNone(request)
+                self.assertIsNotNone(disposition)
+                assert request is not None and disposition is not None
+                self.assertEqual(disposition.expected_head_sha, request.expected_head_sha)
+                self.assertEqual(disposition.request_sha256, request.request_sha256)
+                self.assertEqual(tuple(range(1, 22)), upgraded.schema_migration_versions())
+                with self.assertRaises(sqlite3.IntegrityError):
+                    upgraded._connection.execute(
+                        "DELETE FROM work_item_discard_requests WHERE work_item_id = ?",
+                        (item.work_item_id,),
+                    )
+
+    def test_discard_request_atomically_cancels_an_unstarted_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                item = make_ready(store, make_item(24))
+                running, turn = store.begin_turn(
+                    item.work_item_id,
+                    issue_revision="revision-1",
+                    prompt_sha256="b" * 64,
+                    input_head_sha=item.base_sha,
+                )
+                request = store.prepare_work_item_discard_request(
+                    item.work_item_id,
+                    expected_head_sha=item.base_sha,
+                    pr_number=None,
+                    requested_by="alice",
+                    request_event_id="2401",
+                    requested_at="2026-08-24T00:00:00+00:00",
+                )
+
+                self.assertEqual(item.work_item_id, request.work_item_id)
+                self.assertIs(
+                    TurnState.BLOCKED,
+                    store.get_turn(turn.turn_id).state,  # type: ignore[union-attr]
+                )
+                self.assertIs(
+                    WorkItemState.BLOCKED,
+                    store.get_work_item(running.work_item_id).state,  # type: ignore[union-attr]
+                )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    store.plan_session_generation(
+                        item.work_item_id,
+                        role=SessionGenerationRole.IMPLEMENTATION,
+                        policy_sha256="c" * 64,
+                    )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    store.record_published_sha(
+                        item.work_item_id,
+                        previous_sha=item.base_sha,
+                        head_sha="d" * 40,
+                    )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    store.update_work_item_state(
+                        item.work_item_id,
+                        WorkItemState.READY,
+                    )
+
+    def test_terminal_github_closure_receipt_is_exact_and_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with StateStore(Path(temp_dir) / "state.db") as store:
+                store.migrate()
+                item = make_item(25)
+                store.create_work_item(item)
+                for state in (
+                    WorkItemState.PREPARING,
+                    WorkItemState.READY,
+                    WorkItemState.RUNNING,
+                    WorkItemState.REVIEW,
+                    WorkItemState.COMPLETED,
+                ):
+                    item = store.update_work_item_state(item.work_item_id, state)
+
+                prepared = store.prepare_terminal_github_closure(
+                    item.work_item_id,
+                    kind=TerminalGithubClosureKind.COMPLETED_ISSUE,
+                )
+                self.assertIs(TerminalGithubClosureState.PREPARED, prepared.state)
+                self.assertEqual("completed", prepared.close_reason)
+                self.assertEqual(
+                    prepared,
+                    store.prepare_terminal_github_closure(
+                        item.work_item_id,
+                        kind=TerminalGithubClosureKind.COMPLETED_ISSUE,
+                    ),
+                )
+                completed = store.complete_terminal_github_closure(
+                    item.work_item_id,
+                    kind=TerminalGithubClosureKind.COMPLETED_ISSUE,
+                    outcome=TerminalGithubClosureOutcome.CLOSED,
+                )
+                self.assertIs(TerminalGithubClosureState.COMPLETED, completed.state)
+                with self.assertRaisesRegex(ValueError, "cannot be blocked"):
+                    store.block_terminal_github_closure(
+                        item.work_item_id,
+                        kind=TerminalGithubClosureKind.COMPLETED_ISSUE,
+                        error_code="late_conflict",
+                    )
+
     def test_migration_13_retires_completed_generation_at_durable_event_time(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "schema-12.db"
@@ -268,15 +426,21 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 store.update_work_item_state(
                     disposed.work_item_id, WorkItemState.BLOCKED
                 )
-                disposition = store.record_work_item_disposition(
+                request = store.prepare_work_item_discard_request(
                     disposed.work_item_id,
-                    kind=WorkItemDispositionKind.ABANDONED,
                     expected_head_sha=disposed.base_sha,
                     pr_number=None,
                     requested_by="alice",
                     request_event_id="12345",
                     requested_at="2026-02-22T00:00:00+00:00",
-                    reason_code="operator_agent_discard",
+                    created_at="2026-02-22T00:01:00+00:00",
+                )
+                self.assertEqual(
+                    request,
+                    store.get_work_item_discard_request(disposed.work_item_id),
+                )
+                disposition = store.record_discarded_work_item(
+                    disposed.work_item_id,
                     updated_at="2026-02-22T00:01:00+00:00",
                 )
                 self.assertEqual("12345", disposition.request_event_id)
@@ -467,7 +631,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 ).fetchall()
                 legacy_runs = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
                 self.assertEqual(
-                [(version,) for version in range(1, 21)],
+                [(version,) for version in range(1, 22)],
                     versions,
                 )
             self.assertEqual(0, legacy_runs)
@@ -536,7 +700,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
                 self.assertEqual(
-                [(version,) for version in range(1, 21)],
+                [(version,) for version in range(1, 22)],
                     versions,
                 )
 

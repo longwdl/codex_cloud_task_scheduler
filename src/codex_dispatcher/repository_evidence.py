@@ -31,7 +31,11 @@ _FIXTURE_RECOVERY_ACTIONS = frozenset(
         "recover_orphan_claim",
         "sync_tracker_state",
         "complete_merged_work_item",
+        "prepare_work_item_discard",
+        "reject_discarded_turn_result",
+        "close_discarded_pull_request",
         "record_work_item_disposition",
+        "close_terminal_issue",
         "archive_disposed_work_item",
         "archive_completed_work_item",
         "reconcile_work_item_archive",
@@ -53,7 +57,11 @@ _HIGHER_VALUE_RECOVERY_ACTIONS = frozenset(
         "start_fresh_final_audit",
         "recover_orphan_claim",
         "sync_tracker_state",
+        "prepare_work_item_discard",
+        "reject_discarded_turn_result",
+        "close_discarded_pull_request",
         "record_work_item_disposition",
+        "close_terminal_issue",
         "archive_disposed_work_item",
         "reconcile_work_item_archive",
     }
@@ -397,7 +405,10 @@ def _ledger_evidence_error(
         "slack_deliveries",
         "actions_completion_gate",
         "runner_terminal_storage",
-    } or ledger_evidence.get("schema_version") != 1:
+        "discard_request",
+        "disposition",
+        "terminal_github_closures",
+    } or ledger_evidence.get("schema_version") != 2:
         return "target_ledger_evidence_invalid"
 
     deliveries = ledger_evidence.get("slack_deliveries")
@@ -449,7 +460,147 @@ def _ledger_evidence_error(
         and absence is not None
     ):
         return "target_runner_terminal_evidence_conflict"
+
+    discard_request = ledger_evidence.get("discard_request")
+    if discard_request is not None and (
+        not isinstance(discard_request, dict)
+        or set(discard_request)
+        != {
+            "work_item_id",
+            "expected_head_sha",
+            "pr_number",
+            "requested_by",
+            "request_event_id",
+            "requested_at",
+            "request_sha256",
+        }
+        or discard_request.get("work_item_id") != work_item.work_item_id
+        or discard_request.get("expected_head_sha") != expected_head
+        or not isinstance(discard_request.get("requested_by"), str)
+        or not isinstance(discard_request.get("request_event_id"), str)
+        or not isinstance(discard_request.get("requested_at"), str)
+        or not _is_sha256(discard_request.get("request_sha256"))
+        or not _optional_positive_int(discard_request.get("pr_number"))
+    ):
+        return "target_discard_request_ledger_invalid"
+
+    disposition = ledger_evidence.get("disposition")
+    if disposition is not None and (
+        discard_request is None
+        or not isinstance(disposition, dict)
+        or set(disposition)
+        != {
+            "work_item_id",
+            "kind",
+            "expected_head_sha",
+            "pr_number",
+            "request_sha256",
+            "reason_code",
+        }
+        or disposition.get("work_item_id") != work_item.work_item_id
+        or disposition.get("expected_head_sha") != expected_head
+        or disposition.get("pr_number") != discard_request.get("pr_number")
+        or disposition.get("request_sha256")
+        != discard_request.get("request_sha256")
+        or disposition.get("kind") not in {"abandoned", "superseded"}
+        or (
+            disposition.get("kind") == "abandoned"
+            and disposition.get("pr_number") is not None
+        )
+        or (
+            disposition.get("kind") == "superseded"
+            and not (
+                type(disposition.get("pr_number")) is int
+                and disposition.get("pr_number") > 0
+            )
+        )
+        or disposition.get("reason_code") != "operator_agent_discard"
+    ):
+        return "target_disposition_ledger_invalid"
+
+    closures = ledger_evidence.get("terminal_github_closures")
+    if not isinstance(closures, list):
+        return "target_terminal_github_ledger_invalid"
+    seen_closure_kinds: set[str] = set()
+    for closure in closures:
+        if (
+            not isinstance(closure, dict)
+            or set(closure)
+            != {
+                "kind",
+                "repository",
+                "issue_number",
+                "issue_node_id",
+                "pr_number",
+                "expected_head_sha",
+                "close_reason",
+                "state",
+                "request_sha256",
+                "outcome",
+                "error_code",
+            }
+            or closure.get("kind")
+            not in {"completed_issue", "discarded_pull_request", "discarded_issue"}
+            or closure.get("kind") in seen_closure_kinds
+            or closure.get("repository") != work_item.repository
+            or closure.get("issue_number") != work_item.issue_number
+            or closure.get("issue_node_id") != work_item.issue_node_id
+            or closure.get("expected_head_sha") != expected_head
+            or closure.get("state") not in {"prepared", "completed", "blocked"}
+            or not _is_sha256(closure.get("request_sha256"))
+        ):
+            return "target_terminal_github_ledger_invalid"
+        kind = str(closure["kind"])
+        seen_closure_kinds.add(kind)
+        state = closure.get("state")
+        if (
+            (state == "prepared" and (
+                closure.get("outcome") is not None
+                or closure.get("error_code") is not None
+            ))
+            or (state == "completed" and (
+                closure.get("outcome") not in {"closed", "already_closed"}
+                or closure.get("error_code") is not None
+            ))
+            or (state == "blocked" and (
+                closure.get("outcome") is not None
+                or not isinstance(closure.get("error_code"), str)
+                or not closure.get("error_code")
+            ))
+        ):
+            return "target_terminal_github_ledger_invalid"
+        if kind == "discarded_pull_request":
+            if (
+                not isinstance(discard_request, dict)
+                or discard_request.get("pr_number") is None
+                or closure.get("pr_number") != discard_request.get("pr_number")
+                or closure.get("close_reason") is not None
+            ):
+                return "target_terminal_github_ledger_invalid"
+        else:
+            if (
+                closure.get("pr_number") is not None
+                or closure.get("close_reason")
+                != ("completed" if kind == "completed_issue" else "not_planned")
+                or (
+                    kind == "completed_issue"
+                    and (
+                        work_item.state.value != "completed"
+                        or disposition is not None
+                    )
+                )
+                or (kind == "discarded_issue" and disposition is None)
+            ):
+                return "target_terminal_github_ledger_invalid"
     return None
+
+
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _optional_positive_int(value: object) -> bool:
+    return value is None or (type(value) is int and value > 0)
 
 
 def _identity_evidence(

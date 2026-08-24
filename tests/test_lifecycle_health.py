@@ -47,6 +47,9 @@ from codex_dispatcher.work_items import (
     WorkItem,
     WorkItemState,
 )
+from codex_dispatcher.work_item_lifecycle import (
+    TerminalGithubClosureKind,
+)
 
 
 HEAD = "b" * 40
@@ -181,6 +184,40 @@ def _insert_followup(
 
 
 class LifecycleHealthTests(unittest.TestCase):
+    def test_blocked_terminal_github_closure_is_visible(self) -> None:
+        now = datetime(2026, 8, 23, tzinfo=timezone.utc)
+        at = now.isoformat()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "state.db"
+            with StateStore(database) as store:
+                store.migrate()
+                _seed_observability(store, at)
+                item = _item(8, at)
+                _complete(store, item, at)
+                store.prepare_terminal_github_closure(
+                    item.work_item_id,
+                    kind=TerminalGithubClosureKind.COMPLETED_ISSUE,
+                    updated_at=at,
+                )
+                store.block_terminal_github_closure(
+                    item.work_item_id,
+                    kind=TerminalGithubClosureKind.COMPLETED_ISSUE,
+                    error_code="terminal_issue_close_unconfirmed",
+                    updated_at=at,
+                )
+                snapshot = inspect_lifecycle_health(
+                    _config(database), store, now=now
+                )
+
+        self.assertFalse(snapshot.ok)
+        self.assertEqual(1, snapshot.blocked_terminal_github_closures)
+        self.assertEqual(0, snapshot.pending_terminal_github_closures)
+        self.assertEqual(0, snapshot.completed_terminal_github_closures)
+        self.assertIn(
+            "terminal_github_closure_blocked",
+            {alert.code for alert in snapshot.alerts},
+        )
+
     def test_followup_health_reports_stale_cross_role_binding_and_no_progress(self) -> None:
         now = datetime(2026, 8, 23, tzinfo=timezone.utc)
         old = "2026-08-22T23:00:00+00:00"

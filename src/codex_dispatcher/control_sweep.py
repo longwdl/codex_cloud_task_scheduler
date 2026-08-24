@@ -37,7 +37,9 @@ from codex_dispatcher.terminal_retention import (
     terminal_branch_request_sha256,
 )
 from codex_dispatcher.trackers.base import (
+    IssueCloseReason,
     PullRequest,
+    PullRequestState,
     TaskState,
     Tracker,
     TrackerComment,
@@ -46,7 +48,11 @@ from codex_dispatcher.trackers.base import (
 from codex_dispatcher.trackers.github_cli import GitHubApiMetrics
 from codex_dispatcher.turn_orchestration import TaskBranchPublisher, TurnProgress
 from codex_dispatcher.work_items import Turn, TurnState, WorkItem, WorkItemState
-from codex_dispatcher.work_item_lifecycle import WorkItemArchiveStatus
+from codex_dispatcher.work_item_lifecycle import (
+    TerminalGithubClosureKind,
+    TerminalGithubClosureOutcome,
+    WorkItemArchiveStatus,
+)
 
 
 class SourceSnapshotProvider(Protocol):
@@ -86,6 +92,9 @@ class ControlSweepStatus(StrEnum):
     BLOCKED = "blocked"
     STATE_SYNCHRONIZED = "state_synchronized"
     COMPLETED = "completed"
+    DISCARD_REQUESTED = "discard_requested"
+    PULL_REQUEST_CLOSED = "pull_request_closed"
+    ISSUE_CLOSED = "issue_closed"
     AWAITING_ARCHIVE = "awaiting_archive"
     ARCHIVED = "archived"
     DISPOSITION_RECORDED = "disposition_recorded"
@@ -355,6 +364,107 @@ class SshControlSweep:
                 recovery,
                 reason=recovery.reason or "recovery_blocked",
             )
+        if recovery.action is SshRecoveryAction.PREPARE_WORK_ITEM_DISCARD:
+            assert recovery.task is not None
+            assert recovery.work_item is not None
+            assert recovery.disposition_requested_by is not None
+            assert recovery.disposition_request_event_id is not None
+            assert recovery.disposition_requested_at is not None
+            request = self._store.prepare_work_item_discard_request(
+                recovery.work_item.work_item_id,
+                expected_head_sha=(
+                    recovery.work_item.last_published_sha
+                    or recovery.work_item.base_sha
+                ),
+                pr_number=recovery.disposition_pr_number,
+                requested_by=recovery.disposition_requested_by,
+                request_event_id=recovery.disposition_request_event_id,
+                requested_at=recovery.disposition_requested_at,
+            )
+            return _plan_result(
+                ControlSweepStatus.DISCARD_REQUESTED,
+                recovery,
+                reason=request.request_sha256,
+            )
+        if recovery.action is SshRecoveryAction.REJECT_DISCARDED_TURN_RESULT:
+            assert recovery.turn is not None
+            progress = self._dispatch.reject_discarded_turn_result(
+                recovery.turn.turn_id
+            )
+            return _plan_result(
+                ControlSweepStatus.DISCARD_REQUESTED,
+                recovery,
+                reason=progress.turn.error_code or "discarded_turn_result_rejected",
+            )
+        if recovery.action is SshRecoveryAction.CLOSE_DISCARDED_PULL_REQUEST:
+            assert recovery.work_item is not None
+            assert recovery.pull_request is not None
+            rechecked = self._plan_recovery()
+            if (
+                rechecked.action is not recovery.action
+                or rechecked.work_item is None
+                or rechecked.work_item.work_item_id
+                != recovery.work_item.work_item_id
+                or rechecked.pull_request is None
+                or rechecked.pull_request.number != recovery.pull_request.number
+                or rechecked.pull_request.head_sha != recovery.pull_request.head_sha
+            ):
+                return _plan_result(
+                    ControlSweepStatus.BLOCKED,
+                    rechecked,
+                    reason=(
+                        rechecked.reason
+                        or "discarded_pull_request_close_candidate_changed"
+                    ),
+                )
+            closure = self._store.prepare_terminal_github_closure(
+                recovery.work_item.work_item_id,
+                kind=TerminalGithubClosureKind.DISCARDED_PULL_REQUEST,
+            )
+            assert closure.pr_number is not None
+            already_closed = (
+                rechecked.pull_request.state is PullRequestState.CLOSED
+            )
+            if not already_closed:
+                self._tracker.close_pull_request(
+                    closure.repository,
+                    recovery.work_item.task_branch,
+                    expected_number=closure.pr_number,
+                    expected_head_sha=closure.expected_head_sha,
+                )
+            observed = self._tracker.find_pr_by_branch(
+                closure.repository,
+                recovery.work_item.task_branch,
+            )
+            if (
+                observed is None
+                or observed.number != closure.pr_number
+                or observed.head_sha != closure.expected_head_sha
+                or observed.state is not PullRequestState.CLOSED
+            ):
+                self._store.block_terminal_github_closure(
+                    recovery.work_item.work_item_id,
+                    kind=TerminalGithubClosureKind.DISCARDED_PULL_REQUEST,
+                    error_code="discarded_pull_request_close_unconfirmed",
+                )
+                return _plan_result(
+                    ControlSweepStatus.BLOCKED,
+                    recovery,
+                    reason="discarded_pull_request_close_unconfirmed",
+                )
+            self._store.complete_terminal_github_closure(
+                recovery.work_item.work_item_id,
+                kind=TerminalGithubClosureKind.DISCARDED_PULL_REQUEST,
+                outcome=(
+                    TerminalGithubClosureOutcome.ALREADY_CLOSED
+                    if already_closed
+                    else TerminalGithubClosureOutcome.CLOSED
+                ),
+            )
+            return _plan_result(
+                ControlSweepStatus.PULL_REQUEST_CLOSED,
+                recovery,
+            )
         if recovery.action is SshRecoveryAction.COMPLETE_MERGED_WORK_ITEM:
             assert recovery.task is not None
             assert recovery.work_item is not None
@@ -383,25 +493,99 @@ class SshControlSweep:
         if recovery.action is SshRecoveryAction.RECORD_WORK_ITEM_DISPOSITION:
             assert recovery.task is not None
             assert recovery.work_item is not None
-            assert recovery.disposition_kind is not None
-            assert recovery.disposition_requested_by is not None
-            assert recovery.disposition_request_event_id is not None
-            assert recovery.disposition_requested_at is not None
-            expected_head_sha = (
-                recovery.work_item.last_published_sha or recovery.work_item.base_sha
-            )
-            self._store.record_work_item_disposition(
-                recovery.work_item.work_item_id,
-                kind=recovery.disposition_kind,
-                expected_head_sha=expected_head_sha,
-                pr_number=recovery.disposition_pr_number,
-                requested_by=recovery.disposition_requested_by,
-                request_event_id=recovery.disposition_request_event_id,
-                requested_at=recovery.disposition_requested_at,
-                reason_code="operator_agent_discard",
+            rechecked = self._plan_recovery()
+            if (
+                rechecked.action is not recovery.action
+                or rechecked.work_item is None
+                or rechecked.work_item.work_item_id
+                != recovery.work_item.work_item_id
+            ):
+                return _plan_result(
+                    ControlSweepStatus.BLOCKED,
+                    rechecked,
+                    reason=(
+                        rechecked.reason or "discard_disposition_candidate_changed"
+                    ),
+                )
+            self._store.record_discarded_work_item(
+                recovery.work_item.work_item_id
             )
             return _plan_result(
                 ControlSweepStatus.DISPOSITION_RECORDED,
+                recovery,
+            )
+        if recovery.action is SshRecoveryAction.CLOSE_TERMINAL_ISSUE:
+            assert recovery.task is not None
+            assert recovery.work_item is not None
+            assert recovery.terminal_closure_kind in {
+                TerminalGithubClosureKind.COMPLETED_ISSUE,
+                TerminalGithubClosureKind.DISCARDED_ISSUE,
+            }
+            kind = recovery.terminal_closure_kind
+            rechecked = self._plan_recovery()
+            if (
+                rechecked.action is not recovery.action
+                or rechecked.work_item is None
+                or rechecked.work_item.work_item_id
+                != recovery.work_item.work_item_id
+                or rechecked.terminal_closure_kind is not kind
+                or rechecked.task is None
+            ):
+                return _plan_result(
+                    ControlSweepStatus.BLOCKED,
+                    rechecked,
+                    reason=(
+                        rechecked.reason or "terminal_issue_close_candidate_changed"
+                    ),
+                )
+            closure = self._store.prepare_terminal_github_closure(
+                recovery.work_item.work_item_id,
+                kind=kind,
+            )
+            reason = (
+                IssueCloseReason.COMPLETED
+                if kind is TerminalGithubClosureKind.COMPLETED_ISSUE
+                else IssueCloseReason.NOT_PLANNED
+            )
+            already_closed = not rechecked.task.is_open
+            if not already_closed:
+                self._tracker.close_task(
+                    closure.repository,
+                    str(closure.issue_number),
+                    expected_issue_node_id=closure.issue_node_id,
+                    reason=reason,
+                )
+            observed = self._tracker.get_task(
+                closure.repository,
+                str(closure.issue_number),
+            )
+            if (
+                observed is None
+                or observed.issue_node_id != closure.issue_node_id
+                or observed.is_open
+                or observed.state_reason != reason.value
+            ):
+                self._store.block_terminal_github_closure(
+                    recovery.work_item.work_item_id,
+                    kind=kind,
+                    error_code="terminal_issue_close_unconfirmed",
+                )
+                return _plan_result(
+                    ControlSweepStatus.BLOCKED,
+                    recovery,
+                    reason="terminal_issue_close_unconfirmed",
+                )
+            self._store.complete_terminal_github_closure(
+                recovery.work_item.work_item_id,
+                kind=kind,
+                outcome=(
+                    TerminalGithubClosureOutcome.ALREADY_CLOSED
+                    if already_closed
+                    else TerminalGithubClosureOutcome.CLOSED
+                ),
+            )
+            return _plan_result(
+                ControlSweepStatus.ISSUE_CLOSED,
                 recovery,
             )
         if recovery.action is SshRecoveryAction.ARCHIVE_COMPLETED_WORK_ITEM:
@@ -829,6 +1013,36 @@ class SshControlSweep:
         task: TrackerTask,
         progress: TurnProgress,
     ) -> ControlSweepResult:
+        discard_request = self._store.get_work_item_discard_request(
+            progress.work_item.work_item_id
+        )
+        if discard_request is not None:
+            if progress.turn.state in {
+                TurnState.CHECKPOINTING,
+                TurnState.PUBLISHED,
+            }:
+                progress = self._dispatch.reject_discarded_turn_result(
+                    progress.turn.turn_id
+                )
+            turn_is_active = progress.turn.state in {
+                TurnState.STARTING,
+                TurnState.RUNNING,
+                TurnState.RECONCILING,
+            }
+            return _task_result(
+                ControlSweepStatus.DISCARD_REQUESTED,
+                task,
+                work_item=progress.work_item,
+                turn_id=progress.turn.turn_id,
+                reason=(
+                    progress.turn.error_code
+                    or (
+                        "discard_request_waiting_for_terminal_turn"
+                        if turn_is_active
+                        else "discard_request_turn_terminal"
+                    )
+                ),
+            )
         if progress.turn.state is TurnState.CHECKPOINTING and self._publisher is not None:
             return self._publish_checkpoint(task, progress.turn.turn_id)
         agent_result = (

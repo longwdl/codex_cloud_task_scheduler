@@ -31,6 +31,11 @@ class PullRequestState(StrEnum):
     MERGED = "merged"
 
 
+class IssueCloseReason(StrEnum):
+    COMPLETED = "completed"
+    NOT_PLANNED = "not_planned"
+
+
 @dataclass(frozen=True, slots=True)
 class TrackerTask:
     """A reviewed tracker item eligible for dispatch or already being tracked."""
@@ -52,6 +57,7 @@ class TrackerTask:
     state_approved_by: str | None = None
     state_approval_event_id: str | None = None
     state_approved_at: str | None = None
+    state_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,9 +132,27 @@ class Tracker(Protocol):
 
     def set_state(self, repository: str, task_id: str, state: TaskState) -> TrackerTask: ...
 
+    def close_task(
+        self,
+        repository: str,
+        task_id: str,
+        *,
+        expected_issue_node_id: str,
+        reason: IssueCloseReason,
+    ) -> TrackerTask: ...
+
     def upsert_run_comment(self, repository: str, task_id: str, marker: str, body: str) -> None: ...
 
     def find_pr_by_branch(self, repository: str, branch_name: str) -> PullRequest | None: ...
+
+    def close_pull_request(
+        self,
+        repository: str,
+        branch_name: str,
+        *,
+        expected_number: int,
+        expected_head_sha: str,
+    ) -> PullRequest: ...
 
     def get_branch_head(self, repository: str, branch_name: str) -> str | None: ...
 

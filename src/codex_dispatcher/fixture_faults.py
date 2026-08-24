@@ -48,6 +48,7 @@ from codex_dispatcher.terminal_retention import (
 from codex_dispatcher.trackers.base import (
     ClaimResult,
     DraftPullRequestRequest,
+    IssueCloseReason,
     PullRequest,
     PullRequestState,
     TaskState,
@@ -959,6 +960,22 @@ class _FixtureFaultTracker:
             )
         return self._delegate.set_state(repository, task_id, state)
 
+    def close_task(
+        self,
+        repository: str,
+        task_id: str,
+        *,
+        expected_issue_node_id: str,
+        reason: IssueCloseReason,
+    ) -> TrackerTask:
+        self._injection.require_target(repository, task_id)
+        return self._delegate.close_task(
+            repository,
+            task_id,
+            expected_issue_node_id=expected_issue_node_id,
+            reason=reason,
+        )
+
     def upsert_run_comment(
         self,
         repository: str,
@@ -1049,6 +1066,22 @@ class _FixtureFaultTracker:
             )
         self._injection.completion_identity_validated = True
         return pull_request
+
+    def close_pull_request(
+        self,
+        repository: str,
+        branch_name: str,
+        *,
+        expected_number: int,
+        expected_head_sha: str,
+    ) -> PullRequest:
+        self._injection.require_repository(repository)
+        return self._delegate.close_pull_request(
+            repository,
+            branch_name,
+            expected_number=expected_number,
+            expected_head_sha=expected_head_sha,
+        )
 
     def get_branch_head(self, repository: str, branch_name: str) -> str | None:
         self._injection.require_repository(repository)

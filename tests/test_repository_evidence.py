@@ -82,10 +82,13 @@ def work_item(policy: RepositoryPolicyIdentity) -> WorkItem:
 
 def empty_recovery_ledgers() -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "slack_deliveries": [],
         "actions_completion_gate": None,
         "runner_terminal_storage": {"archive": None, "absence": None},
+        "discard_request": None,
+        "disposition": None,
+        "terminal_github_closures": [],
     }
 
 

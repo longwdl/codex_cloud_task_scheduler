@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from hashlib import sha256
 
-from codex_dispatcher.config import Config
+from codex_dispatcher.config import Config, RepositoryConfig
 from codex_dispatcher.repository_admission import (
     RepositoryPolicyIdentity,
     build_repository_policy_identity,
@@ -45,7 +45,10 @@ from codex_dispatcher.work_items import (
 )
 from codex_dispatcher.work_items import SessionGenerationRole
 from codex_dispatcher.work_item_lifecycle import (
+    TerminalGithubClosureKind,
+    TerminalGithubClosureState,
     WorkItemArchiveStatus,
+    WorkItemDiscardRequest,
     WorkItemDisposition,
     WorkItemDispositionKind,
 )
@@ -62,7 +65,11 @@ class SshRecoveryAction(StrEnum):
     RECOVER_ORPHAN_CLAIM = "recover_orphan_claim"
     SYNC_TRACKER_STATE = "sync_tracker_state"
     COMPLETE_MERGED_WORK_ITEM = "complete_merged_work_item"
+    PREPARE_WORK_ITEM_DISCARD = "prepare_work_item_discard"
+    REJECT_DISCARDED_TURN_RESULT = "reject_discarded_turn_result"
+    CLOSE_DISCARDED_PULL_REQUEST = "close_discarded_pull_request"
     RECORD_WORK_ITEM_DISPOSITION = "record_work_item_disposition"
+    CLOSE_TERMINAL_ISSUE = "close_terminal_issue"
     ARCHIVE_DISPOSED_WORK_ITEM = "archive_disposed_work_item"
     ARCHIVE_COMPLETED_WORK_ITEM = "archive_completed_work_item"
     RECONCILE_WORK_ITEM_ARCHIVE = "reconcile_work_item_archive"
@@ -80,11 +87,11 @@ class SshRecoveryPlan:
     reason: str | None = None
     pull_request: PullRequest | None = None
     archive_eligible_at: str | None = None
-    disposition_kind: WorkItemDispositionKind | None = None
     disposition_pr_number: int | None = None
     disposition_requested_by: str | None = None
     disposition_request_event_id: str | None = None
     disposition_requested_at: str | None = None
+    terminal_closure_kind: TerminalGithubClosureKind | None = None
     branch_cleanup_eligible_at: str | None = None
     repository_recovery_receipt: RepositoryRecoveryReceipt | None = None
     repository_target_readback_verdict: RepositoryTargetReadbackVerdict | None = None
@@ -156,6 +163,60 @@ def _plan_ssh_recovery_unchecked(
         if error is not None:
             return _blocked(error, task=task, work_item=work_item, turn=active_turn)
         assert task is not None
+        repository = configured[work_item.repository]
+        discard_request = store.get_work_item_discard_request(work_item.work_item_id)
+        if task.state is TaskState.DISCARD:
+            if discard_request is None:
+                return _plan_new_discard_request(
+                    repository,
+                    tracker,
+                    task,
+                    work_item,
+                    turn=active_turn,
+                )
+            discard_error = _discard_request_error(
+                discard_request,
+                task,
+                work_item,
+                repository,
+            )
+            if discard_error is not None:
+                return _blocked(
+                    discard_error,
+                    task=task,
+                    work_item=work_item,
+                    turn=active_turn,
+                )
+            if active_turn.state in {
+                TurnState.CHECKPOINTING,
+                TurnState.PUBLISHED,
+            }:
+                return SshRecoveryPlan(
+                    SshRecoveryAction.REJECT_DISCARDED_TURN_RESULT,
+                    task=task,
+                    work_item=work_item,
+                    turn=active_turn,
+                )
+            if active_turn.state is TurnState.PLANNED:
+                return _blocked(
+                    "discard_requested_planned_turn_not_cancelled",
+                    task=task,
+                    work_item=work_item,
+                    turn=active_turn,
+                )
+            return SshRecoveryPlan(
+                SshRecoveryAction.RECONCILE_ACTIVE_TURN,
+                task=task,
+                work_item=work_item,
+                turn=active_turn,
+            )
+        if discard_request is not None:
+            return _blocked(
+                "discard_request_tracker_state_conflict",
+                task=task,
+                work_item=work_item,
+                turn=active_turn,
+            )
         if task.state not in {TaskState.DISPATCHING, TaskState.RUNNING}:
             return _blocked(
                 "active_turn_tracker_state_conflict",
@@ -420,8 +481,15 @@ def _repository_ledger_evidence(
     gate = None if turn is None else store.get_turn_completion_gate(turn.turn_id)
     archive = store.get_work_item_archive(work_item.work_item_id)
     absence = store.get_work_item_absence_reconciliation(work_item.work_item_id)
+    discard_request = store.get_work_item_discard_request(work_item.work_item_id)
+    disposition = store.get_work_item_disposition(work_item.work_item_id)
+    terminal_closures = tuple(
+        closure
+        for closure in store.list_terminal_github_closures()
+        if closure.work_item_id == work_item.work_item_id
+    )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "slack_deliveries": [
             {
                 "deduplication_key": item.deduplication_key,
@@ -473,6 +541,49 @@ def _repository_ledger_evidence(
                 }
             ),
         },
+        "discard_request": (
+            None
+            if discard_request is None
+            else {
+                "work_item_id": discard_request.work_item_id,
+                "expected_head_sha": discard_request.expected_head_sha,
+                "pr_number": discard_request.pr_number,
+                "requested_by": discard_request.requested_by,
+                "request_event_id": discard_request.request_event_id,
+                "requested_at": discard_request.requested_at,
+                "request_sha256": discard_request.request_sha256,
+            }
+        ),
+        "disposition": (
+            None
+            if disposition is None
+            else {
+                "work_item_id": disposition.work_item_id,
+                "kind": disposition.kind.value,
+                "expected_head_sha": disposition.expected_head_sha,
+                "pr_number": disposition.pr_number,
+                "request_sha256": disposition.request_sha256,
+                "reason_code": disposition.reason_code,
+            }
+        ),
+        "terminal_github_closures": [
+            {
+                "kind": closure.kind.value,
+                "repository": closure.repository,
+                "issue_number": closure.issue_number,
+                "issue_node_id": closure.issue_node_id,
+                "pr_number": closure.pr_number,
+                "expected_head_sha": closure.expected_head_sha,
+                "close_reason": closure.close_reason,
+                "state": closure.state.value,
+                "request_sha256": closure.request_sha256,
+                "outcome": (
+                    None if closure.outcome is None else closure.outcome.value
+                ),
+                "error_code": closure.error_code,
+            }
+            for closure in terminal_closures
+        ],
     }
 
 
@@ -484,6 +595,7 @@ def _plan_work_item_disposition(
     *,
     audit_terminal: bool,
 ) -> SshRecoveryPlan | None:
+    """Plan one uniform discard lifecycle from an audited maintainer label."""
     for disposition in store.list_work_item_dispositions():
         work_item = store.get_work_item(disposition.work_item_id)
         if work_item is None:
@@ -496,129 +608,368 @@ def _plan_work_item_disposition(
             return _blocked(error, task=task, work_item=work_item)
         assert task is not None
         repository = configured[work_item.repository]
-        if (
-            task.state is not TaskState.DISCARD
-            or task.state_approved_by not in repository.maintainers
-            or task.state_approval_event_id is None
-            or task.state_approved_at is None
-        ):
+        if not isinstance(repository, RepositoryConfig):
+            return _blocked("persisted_repository_configuration_invalid")
+        discard_request = store.get_work_item_discard_request(work_item.work_item_id)
+        if discard_request is None:
             return _blocked(
-                "disposed_work_item_tracker_state_conflict",
+                "disposed_work_item_discard_request_missing",
+                task=task,
+                work_item=work_item,
+            )
+        request_error = _discard_request_error(
+            discard_request,
+            task,
+            work_item,
+            repository,
+        )
+        if request_error is not None:
+            return _blocked(
+                request_error,
                 task=task,
                 work_item=work_item,
             )
         pull_request = tracker.find_pr_by_branch(
             work_item.repository, work_item.task_branch
         )
-        disposition_error = _disposed_pull_request_error(
-            disposition, work_item, pull_request
+        pull_request_error = _discard_pull_request_error(
+            discard_request,
+            work_item,
+            pull_request,
         )
-        if disposition_error is not None:
+        if pull_request_error is not None:
             return _blocked(
-                disposition_error,
+                pull_request_error,
                 task=task,
                 work_item=work_item,
                 pull_request=pull_request,
             )
+        if discard_request.pr_number is not None:
+            closure_plan = _plan_discard_pull_request_closure(
+                store,
+                task,
+                work_item,
+                pull_request,
+            )
+            if closure_plan is not None:
+                return closure_plan
+        issue_plan = _plan_terminal_issue_closure(
+            store,
+            task,
+            work_item,
+            TerminalGithubClosureKind.DISCARDED_ISSUE,
+        )
+        if issue_plan is not None:
+            return issue_plan
         archive = _plan_disposed_archive(store, task, work_item, disposition)
         if archive is not None:
             return archive
 
-    undisposed = {
-        item.work_item_id: item
-        for item in store.list_work_items(include_completed=False)
-        if item.state is not WorkItemState.RUNNING
-        and store.get_work_item_disposition(item.work_item_id) is None
-    }
-    if not undisposed:
-        return None
-    for repository in config.repositories:
-        for task in tracker.list_open_tasks(repository.slug, TaskState.DISCARD):
-            executor_labels = tuple(
-                label for label in task.labels if label.startswith("exec:")
-            )
-            if executor_labels != (SSH_CLI_EXECUTOR_LABEL,):
-                continue
-            work_item = store.get_work_item_by_issue(
-                task.repository, task.issue_number
-            )
-            if work_item is None or work_item.work_item_id not in undisposed:
-                continue
-            error = _binding_error(task, work_item, configured)
-            if error is not None:
-                return _blocked(error, task=task, work_item=work_item)
-            if task.state_approved_by not in repository.maintainers:
-                return _blocked(
-                    "work_item_disposition_approval_untrusted",
+    for discard_request in store.list_work_item_discard_requests():
+        if store.get_work_item_disposition(discard_request.work_item_id) is not None:
+            continue
+        work_item = store.get_work_item(discard_request.work_item_id)
+        if work_item is None:
+            return _blocked("discard_requested_work_item_missing")
+        # A merge confirmed at the exact persisted head is the stronger terminal
+        # fact. Keep the immutable request as audit evidence but finish completion.
+        if work_item.state is WorkItemState.COMPLETED:
+            continue
+        task = tracker.get_task(work_item.repository, str(work_item.issue_number))
+        error = _binding_error(task, work_item, configured)
+        if error is not None:
+            return _blocked(error, task=task, work_item=work_item)
+        assert task is not None
+        repository = configured[work_item.repository]
+        if not isinstance(repository, RepositoryConfig):
+            return _blocked("persisted_repository_configuration_invalid")
+        request_error = _discard_request_error(
+            discard_request,
+            task,
+            work_item,
+            repository,
+        )
+        if request_error is not None:
+            return _blocked(request_error, task=task, work_item=work_item)
+        pull_request = tracker.find_pr_by_branch(
+            work_item.repository, work_item.task_branch
+        )
+        pull_request_error = _discard_pull_request_error(
+            discard_request,
+            work_item,
+            pull_request,
+        )
+        if pull_request_error == "merged_pull_request_requires_completion":
+            if work_item.state is WorkItemState.REVIEW and pull_request is not None:
+                return SshRecoveryPlan(
+                    SshRecoveryAction.COMPLETE_MERGED_WORK_ITEM,
                     task=task,
                     work_item=work_item,
+                    pull_request=pull_request,
                 )
-            if (
-                task.state_approval_event_id is None
-                or task.state_approved_at is None
-            ):
-                return _blocked(
-                    "work_item_disposition_evidence_incomplete",
-                    task=task,
-                    work_item=work_item,
-                )
-            if work_item.state in {WorkItemState.COMPLETED, WorkItemState.RUNNING}:
-                return _blocked(
-                    "work_item_disposition_state_conflict",
-                    task=task,
-                    work_item=work_item,
-                )
-            expected_head_sha = work_item.last_published_sha or work_item.base_sha
-            pull_request = tracker.find_pr_by_branch(
-                work_item.repository, work_item.task_branch
-            )
-            if pull_request is None:
-                if work_item.pr_number is not None:
-                    return _blocked(
-                        "work_item_disposition_pull_request_missing",
-                        task=task,
-                        work_item=work_item,
-                    )
-                kind = WorkItemDispositionKind.ABANDONED
-                pr_number = None
-            else:
-                if (
-                    (work_item.pr_number is not None
-                     and pull_request.number != work_item.pr_number)
-                    or pull_request.url
-                    != f"https://github.com/{work_item.repository}/pull/{pull_request.number}"
-                    or pull_request.branch_name != work_item.task_branch
-                    or pull_request.base_branch != work_item.base_branch
-                    or pull_request.is_cross_repository
-                    or pull_request.head_sha != expected_head_sha
-                ):
-                    return _blocked(
-                        "work_item_disposition_pull_request_conflict",
-                        task=task,
-                        work_item=work_item,
-                        pull_request=pull_request,
-                    )
-                if pull_request.state is PullRequestState.MERGED:
-                    return _blocked(
-                        "merged_pull_request_requires_completion",
-                        task=task,
-                        work_item=work_item,
-                        pull_request=pull_request,
-                    )
-                kind = WorkItemDispositionKind.SUPERSEDED
-                pr_number = pull_request.number
-            return SshRecoveryPlan(
-                SshRecoveryAction.RECORD_WORK_ITEM_DISPOSITION,
+        if pull_request_error is not None:
+            return _blocked(
+                pull_request_error,
                 task=task,
                 work_item=work_item,
-                disposition_kind=kind,
-                disposition_pr_number=pr_number,
-                disposition_requested_by=task.state_approved_by,
-                disposition_request_event_id=task.state_approval_event_id,
-                disposition_requested_at=task.state_approved_at,
                 pull_request=pull_request,
             )
+        if discard_request.pr_number is not None:
+            closure_plan = _plan_discard_pull_request_closure(
+                store,
+                task,
+                work_item,
+                pull_request,
+            )
+            if closure_plan is not None:
+                return closure_plan
+        return SshRecoveryPlan(
+            SshRecoveryAction.RECORD_WORK_ITEM_DISPOSITION,
+            task=task,
+            work_item=work_item,
+            disposition_pr_number=discard_request.pr_number,
+            disposition_requested_by=discard_request.requested_by,
+            disposition_request_event_id=discard_request.request_event_id,
+            disposition_requested_at=discard_request.requested_at,
+            pull_request=pull_request,
+        )
+
+    for work_item in store.list_work_items(include_completed=False):
+        if store.get_work_item_disposition(work_item.work_item_id) is not None:
+            continue
+        task = tracker.get_task(work_item.repository, str(work_item.issue_number))
+        if task is None or task.state is not TaskState.DISCARD:
+            continue
+        error = _binding_error(task, work_item, configured)
+        if error is not None:
+            return _blocked(error, task=task, work_item=work_item)
+        repository = configured[work_item.repository]
+        if not isinstance(repository, RepositoryConfig):
+            return _blocked("persisted_repository_configuration_invalid")
+        return _plan_new_discard_request(
+            repository,
+            tracker,
+            task,
+            work_item,
+            turn=None,
+        )
     return None
+
+
+def _plan_new_discard_request(
+    repository: RepositoryConfig,
+    tracker: Tracker,
+    task: TrackerTask,
+    work_item: WorkItem,
+    *,
+    turn: Turn | None,
+) -> SshRecoveryPlan:
+    if task.state_approved_by not in repository.maintainers:
+        return _blocked(
+            "work_item_discard_approval_untrusted",
+            task=task,
+            work_item=work_item,
+            turn=turn,
+        )
+    if task.state_approval_event_id is None or task.state_approved_at is None:
+        return _blocked(
+            "work_item_discard_evidence_incomplete",
+            task=task,
+            work_item=work_item,
+            turn=turn,
+        )
+    if work_item.state is WorkItemState.COMPLETED:
+        return _blocked(
+            "completed_work_item_cannot_be_discarded",
+            task=task,
+            work_item=work_item,
+            turn=turn,
+        )
+    expected_head_sha = work_item.last_published_sha or work_item.base_sha
+    pull_request = tracker.find_pr_by_branch(
+        work_item.repository, work_item.task_branch
+    )
+    if pull_request is None:
+        if work_item.pr_number is not None:
+            return _blocked(
+                "work_item_discard_pull_request_missing",
+                task=task,
+                work_item=work_item,
+                turn=turn,
+            )
+        pr_number = None
+    else:
+        if (
+            (work_item.pr_number is not None
+             and pull_request.number != work_item.pr_number)
+            or pull_request.url
+            != f"https://github.com/{work_item.repository}/pull/{pull_request.number}"
+            or pull_request.branch_name != work_item.task_branch
+            or pull_request.base_branch != work_item.base_branch
+            or pull_request.is_cross_repository
+            or pull_request.head_sha != expected_head_sha
+        ):
+            return _blocked(
+                "work_item_discard_pull_request_conflict",
+                task=task,
+                work_item=work_item,
+                turn=turn,
+                pull_request=pull_request,
+            )
+        if pull_request.state is PullRequestState.MERGED:
+            if work_item.state is WorkItemState.REVIEW and turn is None:
+                return SshRecoveryPlan(
+                    SshRecoveryAction.COMPLETE_MERGED_WORK_ITEM,
+                    task=task,
+                    work_item=work_item,
+                    pull_request=pull_request,
+                )
+            return _blocked(
+                "merged_pull_request_requires_completion",
+                task=task,
+                work_item=work_item,
+                turn=turn,
+                pull_request=pull_request,
+            )
+        pr_number = pull_request.number
+    return SshRecoveryPlan(
+        SshRecoveryAction.PREPARE_WORK_ITEM_DISCARD,
+        task=task,
+        work_item=work_item,
+        turn=turn,
+        disposition_pr_number=pr_number,
+        disposition_requested_by=task.state_approved_by,
+        disposition_request_event_id=task.state_approval_event_id,
+        disposition_requested_at=task.state_approved_at,
+        pull_request=pull_request,
+    )
+
+
+def _discard_request_error(
+    request: WorkItemDiscardRequest,
+    task: TrackerTask,
+    work_item: WorkItem,
+    repository: RepositoryConfig,
+) -> str | None:
+    if task.state is not TaskState.DISCARD:
+        return "discard_request_tracker_state_conflict"
+    if task.state_approved_by not in repository.maintainers:
+        return "discard_request_approval_untrusted"
+    if (
+        task.state_approval_event_id != request.request_event_id
+        or task.state_approved_at != request.requested_at
+        or task.state_approved_by != request.requested_by
+    ):
+        return "discard_request_authorization_conflict"
+    if (work_item.last_published_sha or work_item.base_sha) != request.expected_head_sha:
+        return "discard_request_head_conflict"
+    if work_item.state is WorkItemState.COMPLETED:
+        return "completed_work_item_discard_request_conflict"
+    return None
+
+
+def _discard_pull_request_error(
+    request: WorkItemDiscardRequest,
+    work_item: WorkItem,
+    pull_request: PullRequest | None,
+) -> str | None:
+    if request.pr_number is None:
+        return (
+            None
+            if pull_request is None
+            else "discarded_without_pr_pull_request_appeared"
+        )
+    if pull_request is None:
+        return "discarded_pull_request_missing"
+    if (
+        pull_request.number != request.pr_number
+        or pull_request.url
+        != f"https://github.com/{work_item.repository}/pull/{request.pr_number}"
+        or pull_request.branch_name != work_item.task_branch
+        or pull_request.base_branch != work_item.base_branch
+        or pull_request.is_cross_repository
+        or pull_request.head_sha != request.expected_head_sha
+    ):
+        return "discarded_pull_request_conflict"
+    if pull_request.state is PullRequestState.MERGED:
+        return "merged_pull_request_requires_completion"
+    return None
+
+
+def _plan_discard_pull_request_closure(
+    store: StateStore,
+    task: TrackerTask,
+    work_item: WorkItem,
+    pull_request: PullRequest | None,
+) -> SshRecoveryPlan | None:
+    assert pull_request is not None
+    closure = store.get_terminal_github_closure(
+        work_item.work_item_id,
+        TerminalGithubClosureKind.DISCARDED_PULL_REQUEST,
+    )
+    if closure is not None and closure.state is TerminalGithubClosureState.BLOCKED:
+        return _blocked(
+            closure.error_code or "discarded_pull_request_closure_blocked",
+            task=task,
+            work_item=work_item,
+            pull_request=pull_request,
+        )
+    if closure is not None and closure.state is TerminalGithubClosureState.COMPLETED:
+        if pull_request.state is not PullRequestState.CLOSED:
+            return _blocked(
+                "discarded_pull_request_close_receipt_conflict",
+                task=task,
+                work_item=work_item,
+                pull_request=pull_request,
+            )
+        return None
+    return SshRecoveryPlan(
+        SshRecoveryAction.CLOSE_DISCARDED_PULL_REQUEST,
+        task=task,
+        work_item=work_item,
+        pull_request=pull_request,
+        terminal_closure_kind=TerminalGithubClosureKind.DISCARDED_PULL_REQUEST,
+    )
+
+
+def _plan_terminal_issue_closure(
+    store: StateStore,
+    task: TrackerTask,
+    work_item: WorkItem,
+    kind: TerminalGithubClosureKind,
+) -> SshRecoveryPlan | None:
+    closure = store.get_terminal_github_closure(work_item.work_item_id, kind)
+    expected_reason = (
+        "completed"
+        if kind is TerminalGithubClosureKind.COMPLETED_ISSUE
+        else "not_planned"
+    )
+    if closure is not None and closure.state is TerminalGithubClosureState.BLOCKED:
+        return _blocked(
+            closure.error_code or "terminal_issue_closure_blocked",
+            task=task,
+            work_item=work_item,
+        )
+    if closure is not None and closure.state is TerminalGithubClosureState.COMPLETED:
+        if task.is_open or task.state_reason != expected_reason:
+            return _blocked(
+                "terminal_issue_close_receipt_conflict",
+                task=task,
+                work_item=work_item,
+            )
+        return None
+    if not task.is_open and task.state_reason != expected_reason:
+        return _blocked(
+            "terminal_issue_close_reason_conflict",
+            task=task,
+            work_item=work_item,
+        )
+    return SshRecoveryPlan(
+        SshRecoveryAction.CLOSE_TERMINAL_ISSUE,
+        task=task,
+        work_item=work_item,
+        terminal_closure_kind=kind,
+    )
 
 
 def _disposed_pull_request_error(
@@ -791,6 +1142,7 @@ def _plan_merged_completion(
         if work_item.state is WorkItemState.COMPLETED and task.state not in {
             TaskState.REVIEW,
             TaskState.COMPLETED,
+            TaskState.DISCARD,
         }:
             return _blocked(
                 "completed_work_item_tracker_state_conflict",
@@ -803,6 +1155,7 @@ def _plan_merged_completion(
             TaskState.READY,
             TaskState.REVIEW,
             TaskState.COMPLETED,
+            TaskState.DISCARD,
         }:
             return _blocked(
                 "review_work_item_tracker_state_conflict",
@@ -854,7 +1207,7 @@ def _plan_merged_completion(
                 pull_request=pull_request,
             )
         if work_item.state is WorkItemState.COMPLETED:
-            if task.state is TaskState.REVIEW:
+            if task.state in {TaskState.REVIEW, TaskState.DISCARD}:
                 return SshRecoveryPlan(
                     SshRecoveryAction.SYNC_TRACKER_STATE,
                     task=task,
@@ -862,6 +1215,14 @@ def _plan_merged_completion(
                     desired_task_state=TaskState.COMPLETED,
                     pull_request=pull_request,
                 )
+            issue_plan = _plan_terminal_issue_closure(
+                store,
+                task,
+                work_item,
+                TerminalGithubClosureKind.COMPLETED_ISSUE,
+            )
+            if issue_plan is not None:
+                return issue_plan
             archive = _plan_completed_archive(
                 config,
                 store,
@@ -953,9 +1314,28 @@ def _plan_terminal_branch_cleanup(
         if error is not None:
             return _blocked(error, task=task, work_item=work_item)
         assert task is not None
-        if not task.is_open:
+        terminal_issue_kind = (
+            TerminalGithubClosureKind.DISCARDED_ISSUE
+            if disposition is not None
+            else TerminalGithubClosureKind.COMPLETED_ISSUE
+        )
+        issue_closure = store.get_terminal_github_closure(
+            work_item.work_item_id,
+            terminal_issue_kind,
+        )
+        expected_issue_reason = (
+            "not_planned" if disposition is not None else "completed"
+        )
+        if (
+            task.is_open
+            or task.state_reason != expected_issue_reason
+            or issue_closure is None
+            or issue_closure.state is not TerminalGithubClosureState.COMPLETED
+        ):
             return _blocked(
-                "terminal_issue_must_remain_open", task=task, work_item=work_item
+                "terminal_issue_close_receipt_missing",
+                task=task,
+                work_item=work_item,
             )
         pull_request = tracker.find_pr_by_branch(
             work_item.repository, work_item.task_branch

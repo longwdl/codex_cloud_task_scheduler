@@ -24,6 +24,7 @@ from codex_dispatcher.github_api_metrics import (
 from codex_dispatcher.trackers.base import (
     ClaimResult,
     DraftPullRequestRequest,
+    IssueCloseReason,
     PullRequest,
     PullRequestState,
     TaskState,
@@ -49,7 +50,7 @@ _RUN_COMMENT_PREFIX = "<!-- codex-dispatcher:"
 
 
 _STATUS_LABELS = {f"agent:{state.value}": state for state in TaskState}
-_ISSUE_FIELDS = "id,number,title,body,labels,createdAt,updatedAt,state"
+_ISSUE_FIELDS = "id,number,title,body,labels,createdAt,updatedAt,state,stateReason"
 _PR_FIELDS = (
     "number,url,headRefName,headRefOid,baseRefName,title,isDraft,state,isCrossRepository"
 )
@@ -227,6 +228,56 @@ class GitHubCliTracker:
             raise GitHubCliTrackerError("multiple pull requests use the task branch")
         return parsed[0] if parsed else None
 
+    def close_pull_request(
+        self,
+        repository: str,
+        branch_name: str,
+        *,
+        expected_number: int,
+        expected_head_sha: str,
+    ) -> PullRequest:
+        """Close only the exact unmerged Pull Request bound to a task branch."""
+        repository = _validate_repository(repository)
+        branch_name = validate_branch(branch_name)
+        if type(expected_number) is not int or expected_number <= 0:
+            raise ValueError("expected_number must be a positive integer")
+        expected_head_sha = validate_git_sha(
+            expected_head_sha, "expected_head_sha"
+        )
+        current = self.find_pr_by_branch(repository, branch_name)
+        if (
+            current is None
+            or current.number != expected_number
+            or current.head_sha != expected_head_sha
+        ):
+            raise GitHubCliTrackerError("Pull Request identity changed before closure")
+        if current.state is PullRequestState.MERGED:
+            raise GitHubCliTrackerError("merged Pull Request cannot be discarded")
+        if current.state is PullRequestState.CLOSED:
+            return current
+        self._json_command(
+            (
+                self._gh_path,
+                "api",
+                "--method",
+                "PATCH",
+                "-H",
+                "Accept: application/vnd.github+json",
+                f"/repos/{repository}/pulls/{expected_number}",
+                "-f",
+                "state=closed",
+            )
+        )
+        updated = self.find_pr_by_branch(repository, branch_name)
+        if (
+            updated is None
+            or updated.number != expected_number
+            or updated.head_sha != expected_head_sha
+            or updated.state is not PullRequestState.CLOSED
+        ):
+            raise GitHubCliTrackerError("Pull Request closure verification failed")
+        return updated
+
     def get_branch_head(self, repository: str, branch_name: str) -> str | None:
         """Return the exact task-branch head without treating absence as an error."""
         repository = _validate_repository(repository)
@@ -327,6 +378,56 @@ class GitHubCliTracker:
         updated = self.get_task(repository, task_id)
         if updated is None or updated.state is not state:
             raise GitHubCliTrackerError("state update verification failed")
+        return updated
+
+    def close_task(
+        self,
+        repository: str,
+        task_id: str,
+        *,
+        expected_issue_node_id: str,
+        reason: IssueCloseReason,
+    ) -> TrackerTask:
+        """Close one exact Issue and verify its provider close reason."""
+        repository = _validate_repository(repository)
+        issue_number = _validate_issue_id(task_id)
+        expected_issue_node_id = _validate_bounded_text(
+            expected_issue_node_id,
+            "expected_issue_node_id",
+            maximum=256,
+        )
+        if not isinstance(reason, IssueCloseReason):
+            raise TypeError("reason must be an IssueCloseReason")
+        current = self.get_task(repository, task_id)
+        if current is None or current.issue_node_id != expected_issue_node_id:
+            raise GitHubCliTrackerError("Issue identity changed before closure")
+        if not current.is_open:
+            if current.state_reason != reason.value:
+                raise GitHubCliTrackerError("closed Issue reason conflicts")
+            return current
+        self._json_command(
+            (
+                self._gh_path,
+                "api",
+                "--method",
+                "PATCH",
+                "-H",
+                "Accept: application/vnd.github+json",
+                f"/repos/{repository}/issues/{issue_number}",
+                "-f",
+                "state=closed",
+                "-f",
+                f"state_reason={reason.value}",
+            )
+        )
+        updated = self.get_task(repository, task_id)
+        if (
+            updated is None
+            or updated.issue_node_id != expected_issue_node_id
+            or updated.is_open
+            or updated.state_reason != reason.value
+        ):
+            raise GitHubCliTrackerError("Issue closure verification failed")
         return updated
 
     def upsert_run_comment(
@@ -778,7 +879,8 @@ def _parse_issue(value: Any, repository: str, path: str) -> TrackerTask:
     if not isinstance(value, dict):
         raise GitHubCliTrackerError(f"{path} must be an object")
     expected = {
-        "id", "number", "title", "body", "labels", "createdAt", "updatedAt", "state"
+        "id", "number", "title", "body", "labels", "createdAt", "updatedAt", "state",
+        "stateReason",
     }
     if set(value) != expected:
         raise GitHubCliTrackerError(f"{path} has unexpected JSON fields")
@@ -789,6 +891,7 @@ def _parse_issue(value: Any, repository: str, path: str) -> TrackerTask:
     created_at = value["createdAt"]
     updated_at = value["updatedAt"]
     state = value["state"]
+    state_reason = value["stateReason"]
     if type(number) is not int or number <= 0:
         raise GitHubCliTrackerError(f"{path}.number must be a positive integer")
     if not all(
@@ -802,6 +905,15 @@ def _parse_issue(value: Any, repository: str, path: str) -> TrackerTask:
         or not created_at
         or not updated_at
         or state not in {"OPEN", "CLOSED"}
+        or (
+            state_reason is not None
+            and state_reason not in {
+                "COMPLETED",
+                "NOT_PLANNED",
+                "DUPLICATE",
+                "REOPENED",
+            }
+        )
     ):
         raise GitHubCliTrackerError(f"{path} has invalid issue state")
     labels = _parse_labels(value["labels"], f"{path}.labels")
@@ -821,6 +933,9 @@ def _parse_issue(value: Any, repository: str, path: str) -> TrackerTask:
         is_open=state == "OPEN",
         issue_node_id=issue_node_id,
         updated_at=updated_at,
+        state_reason=(
+            None if state_reason is None else str(state_reason).lower()
+        ),
     )
 
 
@@ -849,6 +964,7 @@ def _with_state_approvers(
             state_approval[1] if state_approval is not None else None
         ),
         state_approved_at=(state_approval[2] if state_approval is not None else None),
+        state_reason=task.state_reason,
     )
 
 

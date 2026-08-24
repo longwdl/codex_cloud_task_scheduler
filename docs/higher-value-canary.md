@@ -29,8 +29,8 @@ persistence. Existing recovery remains bound to the exact WorkItem policy
 ledger and does not broaden new-work admission.
 
 The same manual path may terminalize an exact canary WorkItem after an owner has
-closed its unmerged PR and replaced its single state label with
-`agent:discard`. Recovery may then record the immutable disposition and execute
+replaced its single state label with `agent:discard`. The Control plane records
+the request, closes the exact unmerged PR, closes the Issue as `not_planned`, and may then execute
 `ARCHIVE`/`ARCHIVE_STATUS` for that exact WorkItem. The Runner writes a
 permanent tombstone before it removes the exact bounded image; its registry is
 retained. Higher-value recovery still rejects `delete_terminal_branch`, so PR
@@ -55,10 +55,10 @@ also required. Every run takes an integrity-checked mode-`0600` SQLite backup
 when the isolated database already exists.
 
 For terminal disposition, first read back the Issue node ID, current main SHA,
-PR number/state/head/base, and WorkItem branch. Close only the exact unmerged PR
-without branch deletion, then replace only `agent:review` with
-`agent:discard`. Run the command above repeatedly for the same exact Issue until
-the sequence reports `disposition_recorded` followed by `archived`; a later
+PR number/state/head/base, and WorkItem branch. Replace only `agent:review` with
+`agent:discard`; do not manually close the PR or Issue. Run the command above repeatedly for the
+same exact Issue until the sequence reports `discard_requested`, optional `pull_request_closed`,
+`disposition_recorded`, `issue_closed`, and then `archived`; a later
 idle result is the final idempotency check. Preserve the SQLite recovery
 receipt, target-readback verdict, Control archive row, and Runner registry and
 tombstone. If GitHub identity or HEAD changes, or the PR becomes merged, stop;

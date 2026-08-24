@@ -190,7 +190,9 @@ are separate authorization checkpoints. Do not combine them into the first happy
   to protected storage outside both Linux hosts and record its exact manifest-bound confirmation.
 - Preserve current and immediate rollback releases, their newest successful DR roots/source
   bundles, and every referenced image/receipt.
-- Keep terminal Issues open when they are used as durable audit anchors.
+- Treat terminal Issues as durable audit anchors after the Control plane closes them. Do not reopen
+  them to resume work; create a new reviewed Issue. Apply only `agent:discard` to abandon work and
+  let the Control plane close the exact unmerged PR and Issue with permanent receipts.
 - Add live evidence only for a new boundary or provider behavior, not for routine idle sweeps.
 
 ## 10. Stop conditions

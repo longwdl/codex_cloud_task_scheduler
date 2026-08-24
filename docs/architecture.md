@@ -94,7 +94,8 @@ Before claim, the planner evaluates:
 - TaskSpec acceptance syntax, allowed paths, denied paths, and required checks;
 - global single-Turn capacity and Runner disk admission.
 
-Migration 20 stores the repository policy identity and exact recovery/readback evidence. A new
+Migration 20 stores the repository policy identity and exact recovery/readback evidence. Migration
+21 stores immutable discard requests and exact PR/Issue closure intents and receipts. A new
 WorkItem cannot be claimed without current policy evidence. Historical pre-migration rows remain
 readable for disaster recovery but cannot silently acquire a current policy.
 
@@ -182,9 +183,22 @@ conflicts, and exact no-progress exhaustion.
 
 ## Terminal lifecycle and storage
 
-An exact merged PR at the persisted head may move a WorkItem to `completed`. A maintainer
-`agent:discard` event creates an immutable `abandoned` or `superseded` disposition. Blocked,
-needs-input, review, or active WorkItems are never reclaimed merely because they are old.
+An exact merged PR at the persisted source head may move a WorkItem to `completed`; squash, rebase,
+and merge-commit methods are all accepted because the invariant is PR `headRefOid ==
+last_published_sha`. The Control plane then closes the Issue with reason `completed` and records an
+exact read-back receipt.
+
+A trusted maintainer `agent:discard` label event first creates an immutable discard request and
+prevents new Turns/generations. An unstarted Turn is cancelled; an already-running Turn drains
+through STATUS and any unpublished result is rejected. The Control plane then closes the exact
+unmerged PR when present, records one uniform discarded disposition, and closes the Issue with
+reason `not_planned`. The stored `abandoned`/`superseded` discriminator is only the additive
+storage shape for absence/presence of a PR, not an operator-visible state or label. The exact state
+machine is documented in [state-machine.md](state-machine.md).
+
+Closed Issues remain audit indexes. Reopening a terminal Issue does not resume its WorkItem and is
+treated as an external-state conflict. Blocked, needs-input, review, or active WorkItems are never
+reclaimed merely because they are old.
 
 After configured retention, the Control Host prepares one schema-12 archive request. The Runner
 rechecks clean exact HEAD, terminal Turns, inactive containers, registry identity, mount state, and
@@ -221,7 +235,7 @@ The drill verifies every bundle byte before rebuilding isolated empty Control an
 then reconciles schema-v2 release/image references, planner status/unit digests, Runner tombstones,
 GitHub, WorkItem Slack, the production system-health outbox, and external reclamation-canary
 alert/recovery receipts. Permanent Runner tombstones outside the online Control WorkItem set are
-accepted only when an included schema-20 canary database binds the same WorkItem, repository,
+accepted only when an included schema-21 canary database binds the same WorkItem, repository,
 Issue, and terminal HEAD. A tombstone alone is never provenance.
 
 Release activation is Runner-first and Control-second, guarded by inactive service/locks, exact

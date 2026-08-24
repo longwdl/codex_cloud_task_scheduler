@@ -64,7 +64,10 @@ from codex_dispatcher.trackers.base import (
 )
 from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator, TurnProgress
 from codex_dispatcher.work_items import Turn, TurnState, WorkItemState
-from codex_dispatcher.work_item_lifecycle import WorkItemDispositionKind
+from codex_dispatcher.work_item_lifecycle import (
+    TerminalGithubClosureKind,
+    TerminalGithubClosureState,
+)
 from tests.test_scheduler import make_config
 from tests.test_ssh_dispatch_planning import BASE_SHA, claimed_task
 
@@ -282,6 +285,27 @@ class _LostBranchDeleteReceiptTracker(FakeTracker):
             raise RuntimeError("fixture lost branch deletion receipt")
 
 
+class _LostTerminalCloseReceiptTracker(FakeTracker):
+    def __init__(self, *, pull_request: bool = False, issue: bool = False) -> None:
+        super().__init__()
+        self.interrupt_pull_request_once = pull_request
+        self.interrupt_issue_once = issue
+
+    def close_pull_request(self, *args, **kwargs):
+        observed = super().close_pull_request(*args, **kwargs)
+        if self.interrupt_pull_request_once:
+            self.interrupt_pull_request_once = False
+            raise RuntimeError("fixture lost Pull Request close receipt")
+        return observed
+
+    def close_task(self, *args, **kwargs):
+        observed = super().close_task(*args, **kwargs)
+        if self.interrupt_issue_once:
+            self.interrupt_issue_once = False
+            raise RuntimeError("fixture lost Issue close receipt")
+        return observed
+
+
 class _RecordingPublisher:
     def __init__(self, *, interrupt_once: bool = False) -> None:
         self.calls: list[tuple[bytes, object, object]] = []
@@ -339,6 +363,102 @@ class _InterruptingSlackPublisher:
 
 
 class SshControlSweepTests(unittest.TestCase):
+    def test_trusted_discard_closes_exact_pr_then_issue_without_extra_labels(self) -> None:
+        tracker = _LostTerminalCloseReceiptTracker(pull_request=True)
+        source = _RecordingSource()
+        item = self.dispatch.resolve_and_prepare(
+            claimed_task(),
+            base_sha=BASE_SHA,
+            source_bundle=_bundle(),
+        )
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.RUNNING)
+        head_sha = "d" * 40
+        self.store.record_published_sha(
+            item.work_item_id,
+            previous_sha=BASE_SHA,
+            head_sha=head_sha,
+        )
+        self.transport.set_head(item.work_item_id, head_sha)
+        item = self.store.update_work_item_state(item.work_item_id, WorkItemState.REVIEW)
+        item = self.store.bind_draft_pr(item.work_item_id, 7)
+        tracker.tasks[str(item.issue_number)] = replace(
+            claimed_task(),
+            state=TaskState.DISCARD,
+            labels=("agent:discard", "exec:ssh-cli", "priority:p1"),
+            state_approved_by="alice",
+            state_approval_event_id="7001",
+            state_approved_at="2026-08-24T01:00:00Z",
+        )
+        tracker.pull_requests[(item.repository, item.task_branch)] = PullRequest(
+            7,
+            "https://github.com/owner/repo/pull/7",
+            item.task_branch,
+            "Discard fixture",
+            True,
+            item.base_branch,
+            PullRequestState.OPEN,
+            False,
+            head_sha,
+        )
+        sweep = self._sweep(tracker, source)
+
+        requested = sweep.run_once()
+        with self.assertRaisesRegex(
+            RuntimeError, "lost Pull Request close receipt"
+        ):
+            sweep.run_once()
+        prepared_pr_close = self.store.get_terminal_github_closure(
+            item.work_item_id,
+            TerminalGithubClosureKind.DISCARDED_PULL_REQUEST,
+        )
+        self.assertIsNotNone(prepared_pr_close)
+        assert prepared_pr_close is not None
+        self.assertIs(TerminalGithubClosureState.PREPARED, prepared_pr_close.state)
+        results = (requested,) + tuple(sweep.run_once() for _ in range(5))
+        statuses = tuple(result.status for result in results)
+
+        self.assertEqual(
+            (
+                ControlSweepStatus.DISCARD_REQUESTED,
+                ControlSweepStatus.PULL_REQUEST_CLOSED,
+                ControlSweepStatus.DISPOSITION_RECORDED,
+                ControlSweepStatus.ISSUE_CLOSED,
+                ControlSweepStatus.ARCHIVED,
+                ControlSweepStatus.IDLE,
+            ),
+            statuses,
+            tuple(result.reason for result in results),
+        )
+        task = tracker.tasks[str(item.issue_number)]
+        self.assertFalse(task.is_open)
+        self.assertIs(TaskState.DISCARD, task.state)
+        self.assertEqual("not_planned", task.state_reason)
+        self.assertEqual(
+            ("agent:discard", "exec:ssh-cli", "priority:p1"), task.labels
+        )
+        self.assertIs(
+            PullRequestState.CLOSED,
+            tracker.pull_requests[(item.repository, item.task_branch)].state,
+        )
+        completed_pr_close = self.store.get_terminal_github_closure(
+            item.work_item_id,
+            TerminalGithubClosureKind.DISCARDED_PULL_REQUEST,
+        )
+        self.assertIsNotNone(completed_pr_close)
+        assert completed_pr_close is not None
+        self.assertEqual("already_closed", completed_pr_close.outcome.value)
+        self.assertIsNotNone(
+            self.store.get_work_item_discard_request(item.work_item_id)
+        )
+        self.assertIsNotNone(self.store.get_work_item_disposition(item.work_item_id))
+        issue_closure = self.store.get_terminal_github_closure(
+            item.work_item_id,
+            TerminalGithubClosureKind.DISCARDED_ISSUE,
+        )
+        self.assertIsNotNone(issue_closure)
+        assert issue_closure is not None
+        self.assertIs(TerminalGithubClosureState.COMPLETED, issue_closure.state)
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
@@ -728,7 +848,7 @@ class SshControlSweepTests(unittest.TestCase):
         self.assertEqual([], self.transport.calls)
 
     def test_merged_pr_completes_local_tombstone_before_issue_projection(self) -> None:
-        tracker = FakeTracker()
+        tracker = _LostTerminalCloseReceiptTracker(issue=True)
         task = replace(
             claimed_task(),
             state=TaskState.REVIEW,
@@ -803,8 +923,28 @@ class SshControlSweepTests(unittest.TestCase):
         self.assertEqual([], self.transport.calls)
 
         tracker.calls.clear()
+        with self.assertRaisesRegex(RuntimeError, "lost Issue close receipt"):
+            sweep.run_once()
+        prepared_issue_close = self.store.get_terminal_github_closure(
+            item.work_item_id,
+            TerminalGithubClosureKind.COMPLETED_ISSUE,
+        )
+        self.assertIsNotNone(prepared_issue_close)
+        assert prepared_issue_close is not None
+        self.assertIs(TerminalGithubClosureState.PREPARED, prepared_issue_close.state)
+        closed = sweep.run_once()
         idle = sweep.run_once()
+        self.assertEqual(ControlSweepStatus.ISSUE_CLOSED, closed.status, closed.reason)
         self.assertEqual(ControlSweepStatus.IDLE, idle.status)
+        self.assertFalse(tracker.tasks[task.task_id].is_open)
+        self.assertEqual("completed", tracker.tasks[task.task_id].state_reason)
+        completed_issue_close = self.store.get_terminal_github_closure(
+            item.work_item_id,
+            TerminalGithubClosureKind.COMPLETED_ISSUE,
+        )
+        self.assertIsNotNone(completed_issue_close)
+        assert completed_issue_close is not None
+        self.assertEqual("already_closed", completed_issue_close.outcome.value)
         self.assertFalse(
             any(call.method in {"upsert_run_comment", "set_state"} for call in tracker.calls)
         )
@@ -857,10 +997,12 @@ class SshControlSweepTests(unittest.TestCase):
         self.transport.calls.clear()
         self.transport.interrupt_next(RunnerOperation.ARCHIVE)
 
+        closed = sweep.run_once()
         awaiting = sweep.run_once()
         reconciled = sweep.run_once()
         idle = sweep.run_once()
 
+        self.assertEqual(ControlSweepStatus.ISSUE_CLOSED, closed.status)
         self.assertEqual(ControlSweepStatus.AWAITING_ARCHIVE, awaiting.status)
         self.assertEqual(ControlSweepStatus.ARCHIVED, reconciled.status)
         self.assertEqual(ControlSweepStatus.IDLE, idle.status)
@@ -869,7 +1011,7 @@ class SshControlSweepTests(unittest.TestCase):
             [call.operation for call in self.transport.calls],
         )
 
-    def test_terminal_branch_delete_receipt_loss_reconciles_without_issue_closure(self) -> None:
+    def test_terminal_branch_delete_receipt_loss_reconciles_after_issue_closure(self) -> None:
         tracker = _LostBranchDeleteReceiptTracker()
         task = replace(
             claimed_task(),
@@ -939,11 +1081,14 @@ class SshControlSweepTests(unittest.TestCase):
             terminal_branch_cleanup_fixture_target=target,
         )
 
+        ordinary = self._sweep(tracker, _RecordingSource(), config=config)
+        closed = ordinary.run_once()
+        self.assertEqual(ControlSweepStatus.ISSUE_CLOSED, closed.status)
+
         with self.assertRaisesRegex(RuntimeError, "lost branch"):
             sweep.run_terminal_branch_cleanup_fixture_once()
         prepared = self.store.get_terminal_branch_cleanup(item.work_item_id)
         reconciled = sweep.run_terminal_branch_cleanup_fixture_once()
-        ordinary = self._sweep(tracker, _RecordingSource(), config=config)
         idle = ordinary.run_once()
 
         self.assertIsNotNone(prepared)
@@ -954,10 +1099,11 @@ class SshControlSweepTests(unittest.TestCase):
         self.assertIs(TerminalBranchCleanupState.COMPLETED, cleanup.state)
         self.assertIs(TerminalBranchCleanupOutcome.RECONCILED_ABSENT, cleanup.outcome)
         self.assertEqual(ControlSweepStatus.IDLE, idle.status)
-        self.assertTrue(tracker.tasks[task.task_id].is_open)
+        self.assertFalse(tracker.tasks[task.task_id].is_open)
         self.assertIs(TaskState.COMPLETED, tracker.tasks[task.task_id].state)
+        self.assertEqual("completed", tracker.tasks[task.task_id].state_reason)
 
-    def test_disposed_archive_rechecks_pr_immediately_before_runner_call(self) -> None:
+    def test_discard_pr_close_recheck_yields_to_an_exact_merge(self) -> None:
         class MergeRaceTracker(FakeTracker):
             def __init__(self, before: PullRequest, after: PullRequest) -> None:
                 super().__init__()
@@ -989,15 +1135,13 @@ class SshControlSweepTests(unittest.TestCase):
             item.work_item_id, WorkItemState.REVIEW
         )
         item = self.store.bind_draft_pr(item.work_item_id, 7)
-        self.store.record_work_item_disposition(
+        self.store.prepare_work_item_discard_request(
             item.work_item_id,
-            kind=WorkItemDispositionKind.SUPERSEDED,
             expected_head_sha=head_sha,
             pr_number=7,
             requested_by="alice",
             request_event_id="7001",
             requested_at="2026-08-23T01:00:00Z",
-            reason_code="operator_agent_discard",
         )
         open_pr = PullRequest(
             7,
@@ -1011,7 +1155,8 @@ class SshControlSweepTests(unittest.TestCase):
             head_sha,
         )
         tracker = MergeRaceTracker(
-            open_pr, replace(open_pr, state=PullRequestState.MERGED)
+            open_pr,
+            replace(open_pr, state=PullRequestState.MERGED, is_draft=False),
         )
         tracker.tasks[str(item.issue_number)] = replace(
             claimed_task(),
@@ -1027,9 +1172,22 @@ class SshControlSweepTests(unittest.TestCase):
 
         self.assertEqual(ControlSweepStatus.BLOCKED, result.status)
         self.assertEqual(
-            "disposed_pull_request_merged_after_authorization", result.reason
+            "discarded_pull_request_close_candidate_changed", result.reason
         )
         self.assertEqual([], self.transport.calls)
+        sweep = self._sweep(tracker, source)
+        completed = sweep.run_once()
+        closed = sweep.run_once()
+        self.assertEqual(ControlSweepStatus.COMPLETED, completed.status)
+        self.assertEqual(ControlSweepStatus.ISSUE_CLOSED, closed.status, closed.reason)
+        self.assertIsNone(self.store.get_work_item_disposition(item.work_item_id))
+        self.assertIsNotNone(
+            self.store.get_work_item_discard_request(item.work_item_id)
+        )
+        self.assertIs(TaskState.COMPLETED, tracker.tasks[str(item.issue_number)].state)
+        self.assertEqual(
+            "completed", tracker.tasks[str(item.issue_number)].state_reason
+        )
 
     def test_lost_completion_comment_receipt_retries_projection_only(self) -> None:
         tracker = _InterruptingDeliveryTracker(interrupt_comment_once=True)
@@ -1147,8 +1305,10 @@ class SshControlSweepTests(unittest.TestCase):
             if call.method in {"upsert_run_comment", "set_state"}
         )
 
+        closed = sweep.run_once()
         idle = sweep.run_once()
 
+        self.assertEqual(ControlSweepStatus.ISSUE_CLOSED, closed.status)
         self.assertEqual(ControlSweepStatus.IDLE, idle.status)
         self.assertEqual(
             writes_before,

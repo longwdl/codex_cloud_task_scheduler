@@ -9,6 +9,7 @@ from unittest.mock import patch
 from codex_dispatcher.command_runner import CommandResult
 from codex_dispatcher.trackers.base import (
     DraftPullRequestRequest,
+    IssueCloseReason,
     PullRequestState,
     TaskState,
 )
@@ -40,6 +41,7 @@ def issue(*, number: int = 12, labels: object | None = None) -> dict[str, object
         "createdAt": "2026-08-13T00:00:00Z",
         "updatedAt": "2026-08-13T00:05:00Z",
         "state": "OPEN",
+        "stateReason": None,
     }
 
 
@@ -68,6 +70,52 @@ def pull_request(
 
 
 class GitHubCliTrackerTests(unittest.TestCase):
+    def test_exact_pull_request_and_issue_closure_are_verified(self) -> None:
+        branch = "codex/issue-12-abcdef123456"
+        open_pr = pull_request(branch=branch)
+        closed_pr = pull_request(branch=branch, state="CLOSED")
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            side_effect=[result([open_pr]), result({}), result([closed_pr])],
+        ) as runner:
+            observed_pr = GitHubCliTracker(gh_path=GH).close_pull_request(
+                REPOSITORY,
+                branch,
+                expected_number=7,
+                expected_head_sha="a" * 40,
+            )
+        self.assertIs(PullRequestState.CLOSED, observed_pr.state)
+        self.assertIn(
+            "/repos/owner/repo/pulls/7",
+            runner.call_args_list[1].args[0],
+        )
+
+        completed = issue(
+            labels=[label("agent:completed"), label("exec:ssh-cli")]
+        )
+        closed = dict(completed, state="CLOSED", stateReason="COMPLETED")
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            side_effect=[
+                result(completed),
+                json_lines_result(),
+                result({}),
+                result(closed),
+                json_lines_result(),
+            ],
+        ) as runner:
+            observed_issue = GitHubCliTracker(gh_path=GH).close_task(
+                REPOSITORY,
+                "12",
+                expected_issue_node_id="I_kwDOFixture12",
+                reason=IssueCloseReason.COMPLETED,
+            )
+        self.assertFalse(observed_issue.is_open)
+        self.assertEqual("completed", observed_issue.state_reason)
+        patch_argv = runner.call_args_list[2].args[0]
+        self.assertIn("state=closed", patch_argv)
+        self.assertIn("state_reason=completed", patch_argv)
+
     def test_terminal_branch_reads_and_deletes_only_an_exact_encoded_ref(self) -> None:
         branch = "codex/issue-12-abcdef123456"
         head = "a" * 40

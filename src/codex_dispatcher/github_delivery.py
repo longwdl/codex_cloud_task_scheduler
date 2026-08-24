@@ -150,7 +150,11 @@ class GitHubDeliveryCoordinator:
             or task.issue_number != work_item.issue_number
             or task.task_id != str(work_item.issue_number)
             or task.issue_node_id != work_item.issue_node_id
-            or task.state not in {TaskState.REVIEW, TaskState.COMPLETED}
+            or task.state not in {
+                TaskState.REVIEW,
+                TaskState.COMPLETED,
+                TaskState.DISCARD,
+            }
             or work_item.state is not WorkItemState.COMPLETED
             or work_item.last_published_sha is None
             or work_item.pr_number is None

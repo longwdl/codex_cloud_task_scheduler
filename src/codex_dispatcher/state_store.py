@@ -99,9 +99,14 @@ from codex_dispatcher.work_items import (
     validate_turn_id,
 )
 from codex_dispatcher.work_item_lifecycle import (
+    TerminalGithubClosure,
+    TerminalGithubClosureKind,
+    TerminalGithubClosureOutcome,
+    TerminalGithubClosureState,
     WorkItemAbsenceReconciliation,
     WorkItemArchive,
     WorkItemArchiveStatus,
+    WorkItemDiscardRequest,
     WorkItemDisposition,
     WorkItemDispositionKind,
     validate_archive_error_code,
@@ -526,6 +531,457 @@ class StateStore:
             )
         )
 
+    def get_work_item_discard_request(
+        self, work_item_id: str
+    ) -> WorkItemDiscardRequest | None:
+        row = self._connection.execute(
+            "SELECT * FROM work_item_discard_requests WHERE work_item_id = ?",
+            (work_item_id,),
+        ).fetchone()
+        return self._row_to_work_item_discard_request(row) if row is not None else None
+
+    def list_work_item_discard_requests(self) -> tuple[WorkItemDiscardRequest, ...]:
+        return tuple(
+            self._row_to_work_item_discard_request(row)
+            for row in self._connection.execute(
+                "SELECT * FROM work_item_discard_requests ORDER BY created_at, work_item_id"
+            )
+        )
+
+    def prepare_work_item_discard_request(
+        self,
+        work_item_id: str,
+        *,
+        expected_head_sha: str,
+        pr_number: int | None,
+        requested_by: str,
+        request_event_id: str,
+        requested_at: str,
+        created_at: str | None = None,
+    ) -> WorkItemDiscardRequest:
+        """Freeze one trusted label event before any terminal GitHub write."""
+        now = created_at or utc_now_iso()
+        request_sha256 = sha256(
+            json.dumps(
+                {
+                    "expected_head_sha": expected_head_sha,
+                    "pr_number": pr_number,
+                    "request_event_id": request_event_id,
+                    "requested_at": requested_at,
+                    "requested_by": requested_by,
+                    "work_item_id": work_item_id,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        candidate = WorkItemDiscardRequest(
+            work_item_id=work_item_id,
+            expected_head_sha=expected_head_sha,
+            pr_number=pr_number,
+            requested_by=requested_by,
+            request_event_id=request_event_id,
+            requested_at=requested_at,
+            request_sha256=request_sha256,
+            created_at=now,
+        )
+        with self._transaction() as connection:
+            work_item = self._require_work_item(connection, work_item_id)
+            if work_item.state is WorkItemState.COMPLETED:
+                raise ValueError("completed WorkItems cannot receive a discard request")
+            if connection.execute(
+                "SELECT 1 FROM work_item_dispositions WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone() is not None:
+                raise ValueError("disposed WorkItem already has immutable operator intent")
+            if (work_item.last_published_sha or work_item.base_sha) != expected_head_sha:
+                raise ValueError("discard request HEAD conflicts with the WorkItem checkpoint")
+            if pr_number is None:
+                if work_item.pr_number is not None:
+                    raise ValueError("discard request omits the persisted Pull Request")
+            elif (
+                type(pr_number) is not int
+                or pr_number <= 0
+                or work_item.pr_number not in {None, pr_number}
+            ):
+                raise ValueError("discard request Pull Request conflicts")
+            existing_row = connection.execute(
+                "SELECT * FROM work_item_discard_requests WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone()
+            if existing_row is not None:
+                existing = self._row_to_work_item_discard_request(existing_row)
+                if replace(candidate, created_at=existing.created_at) != existing:
+                    raise ValueError("discard request conflicts with durable operator intent")
+                return existing
+            connection.execute(
+                "INSERT INTO work_item_discard_requests "
+                "(work_item_id, expected_head_sha, pr_number, requested_by, "
+                "request_event_id, requested_at, request_sha256, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    candidate.work_item_id,
+                    candidate.expected_head_sha,
+                    candidate.pr_number,
+                    candidate.requested_by,
+                    candidate.request_event_id,
+                    candidate.requested_at,
+                    candidate.request_sha256,
+                    candidate.created_at,
+                ),
+            )
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "work_item_discard_requested",
+                {
+                    "expected_head_sha": expected_head_sha,
+                    "pr_number": pr_number,
+                    "request_event_id": request_event_id,
+                    "request_sha256": request_sha256,
+                    "requested_at": requested_at,
+                    "requested_by": requested_by,
+                },
+                now,
+            )
+            active_row = connection.execute(
+                "SELECT * FROM turns WHERE work_item_id = ? AND state = 'planned' "
+                "ORDER BY turn_number LIMIT 1",
+                (work_item_id,),
+            ).fetchone()
+            if active_row is not None:
+                turn = self._row_to_turn(active_row)
+                turn = replace(
+                    turn,
+                    error_code="discard_requested_before_start",
+                ).transition_to(TurnState.BLOCKED, at=now)
+                connection.execute(
+                    "UPDATE turns SET state = ?, error_code = ?, finished_at = ?, "
+                    "updated_at = ? WHERE turn_id = ? AND state = 'planned'",
+                    (
+                        turn.state.value,
+                        turn.error_code,
+                        turn.finished_at,
+                        now,
+                        turn.turn_id,
+                    ),
+                )
+                generation_row = connection.execute(
+                    "SELECT session_generations.* FROM session_generations "
+                    "JOIN turn_session_generations USING(session_generation_id) "
+                    "WHERE turn_session_generations.turn_id = ?",
+                    (turn.turn_id,),
+                ).fetchone()
+                if generation_row is not None:
+                    generation = self._row_to_session_generation(generation_row)
+                    if (
+                        generation.state is not SessionGenerationState.PLANNED
+                        or generation.codex_session_id is not None
+                    ):
+                        raise ValueError(
+                            "planned discard Turn has an ambiguous session generation"
+                        )
+                    failed = generation.transition_to(
+                        SessionGenerationState.FAILED, at=now
+                    )
+                    connection.execute(
+                        "UPDATE session_generations SET state = ?, retired_at = ?, "
+                        "updated_at = ? WHERE session_generation_id = ? AND state = 'planned'",
+                        (
+                            failed.state.value,
+                            failed.retired_at,
+                            now,
+                            generation.session_generation_id,
+                        ),
+                    )
+                    self._insert_work_item_event(
+                        connection,
+                        work_item_id,
+                        None,
+                        "session_generation_state_changed",
+                        {
+                            "from": generation.state.value,
+                            "reason": "work_item_discard_requested",
+                            "session_generation_id": generation.session_generation_id,
+                            "to": failed.state.value,
+                        },
+                        now,
+                    )
+                if work_item.state is WorkItemState.RUNNING:
+                    blocked = work_item.transition_to(WorkItemState.BLOCKED, at=now)
+                    connection.execute(
+                        "UPDATE work_items SET state = ?, updated_at = ? "
+                        "WHERE work_item_id = ? AND state = 'running'",
+                        (blocked.state.value, now, work_item_id),
+                    )
+                    self._insert_work_item_event(
+                        connection,
+                        work_item_id,
+                        turn.turn_id,
+                        "work_item_state_changed",
+                        {
+                            "from": work_item.state.value,
+                            "to": blocked.state.value,
+                        },
+                        now,
+                    )
+        result = self.get_work_item_discard_request(work_item_id)
+        assert result is not None
+        return result
+
+    def get_terminal_github_closure(
+        self,
+        work_item_id: str,
+        kind: TerminalGithubClosureKind,
+    ) -> TerminalGithubClosure | None:
+        if not isinstance(kind, TerminalGithubClosureKind):
+            raise TypeError("kind must be a TerminalGithubClosureKind")
+        row = self._connection.execute(
+            "SELECT * FROM terminal_github_closures "
+            "WHERE work_item_id = ? AND kind = ?",
+            (work_item_id, kind.value),
+        ).fetchone()
+        return self._row_to_terminal_github_closure(row) if row is not None else None
+
+    def list_terminal_github_closures(self) -> tuple[TerminalGithubClosure, ...]:
+        return tuple(
+            self._row_to_terminal_github_closure(row)
+            for row in self._connection.execute(
+                "SELECT * FROM terminal_github_closures "
+                "ORDER BY created_at, work_item_id, kind"
+            )
+        )
+
+    def prepare_terminal_github_closure(
+        self,
+        work_item_id: str,
+        *,
+        kind: TerminalGithubClosureKind,
+        updated_at: str | None = None,
+    ) -> TerminalGithubClosure:
+        if not isinstance(kind, TerminalGithubClosureKind):
+            raise TypeError("kind must be a TerminalGithubClosureKind")
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            work_item = self._require_work_item(connection, work_item_id)
+            expected_head_sha = work_item.last_published_sha or work_item.base_sha
+            request = connection.execute(
+                "SELECT * FROM work_item_discard_requests WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone()
+            disposition = connection.execute(
+                "SELECT * FROM work_item_dispositions WHERE work_item_id = ?",
+                (work_item_id,),
+            ).fetchone()
+            if kind is TerminalGithubClosureKind.COMPLETED_ISSUE:
+                if work_item.state is not WorkItemState.COMPLETED or disposition is not None:
+                    raise ValueError("completed Issue closure requires a completed WorkItem")
+                pr_number = None
+                close_reason = "completed"
+            elif kind is TerminalGithubClosureKind.DISCARDED_PULL_REQUEST:
+                if request is None or request["pr_number"] is None:
+                    raise ValueError("discarded Pull Request closure has no request binding")
+                pr_number = int(request["pr_number"])
+                close_reason = None
+                if str(request["expected_head_sha"]) != expected_head_sha:
+                    raise ValueError("discarded Pull Request closure HEAD conflicts")
+            else:
+                if request is None or disposition is None:
+                    raise ValueError("discarded Issue closure requires a disposition")
+                pr_number = None
+                close_reason = "not_planned"
+                if (
+                    str(request["expected_head_sha"]) != expected_head_sha
+                    or str(disposition["expected_head_sha"]) != expected_head_sha
+                ):
+                    raise ValueError("discarded Issue closure HEAD conflicts")
+            request_sha256 = sha256(
+                json.dumps(
+                    {
+                        "close_reason": close_reason,
+                        "expected_head_sha": expected_head_sha,
+                        "issue_node_id": work_item.issue_node_id,
+                        "issue_number": work_item.issue_number,
+                        "kind": kind.value,
+                        "pr_number": pr_number,
+                        "repository": work_item.repository,
+                        "work_item_id": work_item_id,
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            candidate = TerminalGithubClosure(
+                work_item_id=work_item_id,
+                kind=kind,
+                repository=work_item.repository,
+                issue_number=work_item.issue_number,
+                issue_node_id=work_item.issue_node_id,
+                pr_number=pr_number,
+                expected_head_sha=expected_head_sha,
+                close_reason=close_reason,
+                state=TerminalGithubClosureState.PREPARED,
+                request_sha256=request_sha256,
+                outcome=None,
+                error_code=None,
+                completed_at=None,
+                created_at=now,
+                updated_at=now,
+            )
+            existing_row = connection.execute(
+                "SELECT * FROM terminal_github_closures "
+                "WHERE work_item_id = ? AND kind = ?",
+                (work_item_id, kind.value),
+            ).fetchone()
+            if existing_row is not None:
+                existing = self._row_to_terminal_github_closure(existing_row)
+                if (
+                    existing.repository != candidate.repository
+                    or existing.issue_number != candidate.issue_number
+                    or existing.issue_node_id != candidate.issue_node_id
+                    or existing.pr_number != candidate.pr_number
+                    or existing.expected_head_sha != candidate.expected_head_sha
+                    or existing.close_reason != candidate.close_reason
+                    or existing.request_sha256 != candidate.request_sha256
+                ):
+                    raise ValueError("terminal GitHub closure conflicts with durable intent")
+                return existing
+            connection.execute(
+                "INSERT INTO terminal_github_closures "
+                "(work_item_id, kind, repository, issue_number, issue_node_id, "
+                "pr_number, expected_head_sha, close_reason, state, request_sha256, "
+                "outcome, error_code, completed_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)",
+                (
+                    candidate.work_item_id,
+                    candidate.kind.value,
+                    candidate.repository,
+                    candidate.issue_number,
+                    candidate.issue_node_id,
+                    candidate.pr_number,
+                    candidate.expected_head_sha,
+                    candidate.close_reason,
+                    candidate.state.value,
+                    candidate.request_sha256,
+                    candidate.created_at,
+                    candidate.updated_at,
+                ),
+            )
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "terminal_github_closure_prepared",
+                {
+                    "kind": kind.value,
+                    "pr_number": pr_number,
+                    "request_sha256": request_sha256,
+                },
+                now,
+            )
+        result = self.get_terminal_github_closure(work_item_id, kind)
+        assert result is not None
+        return result
+
+    def complete_terminal_github_closure(
+        self,
+        work_item_id: str,
+        *,
+        kind: TerminalGithubClosureKind,
+        outcome: TerminalGithubClosureOutcome,
+        completed_at: str | None = None,
+    ) -> TerminalGithubClosure:
+        if not isinstance(kind, TerminalGithubClosureKind):
+            raise TypeError("kind must be a TerminalGithubClosureKind")
+        if not isinstance(outcome, TerminalGithubClosureOutcome):
+            raise TypeError("outcome must be a TerminalGithubClosureOutcome")
+        now = completed_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM terminal_github_closures "
+                "WHERE work_item_id = ? AND kind = ?",
+                (work_item_id, kind.value),
+            ).fetchone()
+            if row is None:
+                raise ValueError("terminal GitHub closure was not prepared")
+            existing = self._row_to_terminal_github_closure(row)
+            if existing.state is TerminalGithubClosureState.COMPLETED:
+                if existing.outcome is not outcome:
+                    raise ValueError("terminal GitHub closure outcome conflicts")
+                return existing
+            if existing.state is TerminalGithubClosureState.BLOCKED:
+                raise ValueError("blocked terminal GitHub closure is immutable")
+            cursor = connection.execute(
+                "UPDATE terminal_github_closures SET state = 'completed', "
+                "outcome = ?, completed_at = ?, updated_at = ? "
+                "WHERE work_item_id = ? AND kind = ? AND state = 'prepared'",
+                (outcome.value, now, now, work_item_id, kind.value),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("concurrent terminal GitHub closure completion")
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "terminal_github_closure_completed",
+                {"kind": kind.value, "outcome": outcome.value},
+                now,
+            )
+        result = self.get_terminal_github_closure(work_item_id, kind)
+        assert result is not None
+        return result
+
+    def block_terminal_github_closure(
+        self,
+        work_item_id: str,
+        *,
+        kind: TerminalGithubClosureKind,
+        error_code: str,
+        updated_at: str | None = None,
+    ) -> TerminalGithubClosure:
+        if not isinstance(kind, TerminalGithubClosureKind):
+            raise TypeError("kind must be a TerminalGithubClosureKind")
+        if not isinstance(error_code, str) or not error_code or len(error_code) > 128:
+            raise ValueError("terminal GitHub closure error code is invalid")
+        now = updated_at or utc_now_iso()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM terminal_github_closures "
+                "WHERE work_item_id = ? AND kind = ?",
+                (work_item_id, kind.value),
+            ).fetchone()
+            if row is None:
+                raise ValueError("terminal GitHub closure was not prepared")
+            existing = self._row_to_terminal_github_closure(row)
+            if existing.state is TerminalGithubClosureState.BLOCKED:
+                if existing.error_code != error_code:
+                    raise ValueError("terminal GitHub closure error conflicts")
+                return existing
+            if existing.state is TerminalGithubClosureState.COMPLETED:
+                raise ValueError("completed terminal GitHub closure cannot be blocked")
+            cursor = connection.execute(
+                "UPDATE terminal_github_closures SET state = 'blocked', "
+                "error_code = ?, updated_at = ? "
+                "WHERE work_item_id = ? AND kind = ? AND state = 'prepared'",
+                (error_code, now, work_item_id, kind.value),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("concurrent terminal GitHub closure block")
+            self._insert_work_item_event(
+                connection,
+                work_item_id,
+                None,
+                "terminal_github_closure_blocked",
+                {"error_code": error_code, "kind": kind.value},
+                now,
+            )
+        result = self.get_terminal_github_closure(work_item_id, kind)
+        assert result is not None
+        return result
+
     def get_work_item_absence_reconciliation(
         self, work_item_id: str
     ) -> WorkItemAbsenceReconciliation | None:
@@ -649,7 +1105,7 @@ class StateStore:
         assert reconciliation is not None
         return reconciliation
 
-    def record_work_item_disposition(
+    def _record_work_item_disposition(
         self,
         work_item_id: str,
         *,
@@ -667,9 +1123,7 @@ class StateStore:
             json.dumps(
                 {
                     "expected_head_sha": expected_head_sha,
-                    "kind": kind.value,
                     "pr_number": pr_number,
-                    "reason_code": reason_code,
                     "request_event_id": request_event_id,
                     "requested_at": requested_at,
                     "requested_by": requested_by,
@@ -698,8 +1152,6 @@ class StateStore:
             work_item = self._require_work_item(connection, work_item_id)
             if work_item.state is WorkItemState.COMPLETED:
                 raise ValueError("completed WorkItems cannot receive a disposition")
-            if work_item.state is WorkItemState.RUNNING:
-                raise ValueError("running WorkItems cannot receive a disposition")
             if (work_item.last_published_sha or work_item.base_sha) != expected_head_sha:
                 raise ValueError("disposition HEAD conflicts with the WorkItem checkpoint")
             if kind is WorkItemDispositionKind.ABANDONED:
@@ -784,6 +1236,46 @@ class StateStore:
         disposition = self.get_work_item_disposition(work_item_id)
         assert disposition is not None
         return disposition
+
+    def record_discarded_work_item(
+        self,
+        work_item_id: str,
+        *,
+        updated_at: str | None = None,
+    ) -> WorkItemDisposition:
+        """Finalize one uniform discard after any exact PR close receipt."""
+        request = self.get_work_item_discard_request(work_item_id)
+        if request is None:
+            raise ValueError("discarded WorkItem has no durable discard request")
+        if request.pr_number is not None:
+            closure = self.get_terminal_github_closure(
+                work_item_id,
+                TerminalGithubClosureKind.DISCARDED_PULL_REQUEST,
+            )
+            if (
+                closure is None
+                or closure.state is not TerminalGithubClosureState.COMPLETED
+                or closure.pr_number != request.pr_number
+                or closure.expected_head_sha != request.expected_head_sha
+            ):
+                raise ValueError(
+                    "discarded WorkItem Pull Request has no completed close receipt"
+                )
+        return self._record_work_item_disposition(
+            work_item_id,
+            kind=(
+                WorkItemDispositionKind.ABANDONED
+                if request.pr_number is None
+                else WorkItemDispositionKind.SUPERSEDED
+            ),
+            expected_head_sha=request.expected_head_sha,
+            pr_number=request.pr_number,
+            requested_by=request.requested_by,
+            request_event_id=request.request_event_id,
+            requested_at=request.requested_at,
+            reason_code="operator_agent_discard",
+            updated_at=updated_at,
+        )
 
     def prepare_work_item_archive(
         self,
@@ -5429,6 +5921,26 @@ class StateStore:
         values = dict(row)
         values["kind"] = WorkItemDispositionKind(values["kind"])
         return WorkItemDisposition(**values)
+
+    @staticmethod
+    def _row_to_work_item_discard_request(
+        row: sqlite3.Row,
+    ) -> WorkItemDiscardRequest:
+        return WorkItemDiscardRequest(**dict(row))
+
+    @staticmethod
+    def _row_to_terminal_github_closure(
+        row: sqlite3.Row,
+    ) -> TerminalGithubClosure:
+        values = dict(row)
+        values["kind"] = TerminalGithubClosureKind(values["kind"])
+        values["state"] = TerminalGithubClosureState(values["state"])
+        values["outcome"] = (
+            None
+            if values["outcome"] is None
+            else TerminalGithubClosureOutcome(values["outcome"])
+        )
+        return TerminalGithubClosure(**values)
 
     @staticmethod
     def _row_to_work_item_absence_reconciliation(
