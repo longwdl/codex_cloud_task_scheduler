@@ -43,6 +43,7 @@ PLAN_DIRECTORY = Path("/srv/codex-runner/reclamation-plans")
 RECEIPT_DIRECTORY = Path("/srv/codex-runner/reclamation-receipts")
 STATUS_DIRECTORY = Path("/srv/codex-runner/reclamation-status")
 STATUS_PATH = STATUS_DIRECTORY / "latest.json"
+ACTIVE_LOCK_PATH = Path("/srv/codex-runner/run/active.lock")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -75,7 +76,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "requested recovery commit differs from Runner current"
                     )
                 owner_uid = WORK_ITEMS_ROOT.stat(follow_symlinks=False).st_uid
-                if owner_uid != Path("/srv/codex-runner/run/active.lock").stat(
+                if owner_uid != ACTIVE_LOCK_PATH.stat(
                     follow_symlinks=False
                 ).st_uid:
                     raise RunnerAssetReclamationError(
@@ -98,7 +99,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _run_reclamation(args: argparse.Namespace) -> dict[str, object]:
     rollback_commits, rollback_images = _rollback_references()
     work_items_owner_uid = WORK_ITEMS_ROOT.stat(follow_symlinks=False).st_uid
-    active_lock_owner_uid = Path("/srv/codex-runner/run/active.lock").stat(
+    active_lock_owner_uid = ACTIVE_LOCK_PATH.stat(
         follow_symlinks=False
     ).st_uid
     if work_items_owner_uid != active_lock_owner_uid:
@@ -448,7 +449,7 @@ def _protected_runtime_directory(path: Path, expected_uid: int) -> None:
 def _runner_active_lock() -> Iterator[None]:
     config = _read_json(RUNNER_CONFIG)
     value = config.get("active_lock_path")
-    if value != "/srv/codex-runner/run/active.lock":
+    if value != str(ACTIVE_LOCK_PATH):
         raise RunnerAssetReclamationError("Runner active lock path is invalid")
     path = Path(value)
     metadata = path.stat(follow_symlinks=False)
@@ -459,7 +460,7 @@ def _runner_active_lock() -> Iterator[None]:
         or metadata.st_nlink != 1
     ):
         raise RunnerAssetReclamationError("Runner active lock is unsafe")
-    with path.open("r+b", buffering=0) as stream:
+    with path.open("rb", buffering=0) as stream:
         try:
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:

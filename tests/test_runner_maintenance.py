@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr
 import io
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
 from codex_dispatcher.runner_asset_reclamation import RunnerAssetReclamationError
-from codex_dispatcher.runner_maintenance import _parser, _rollback_references
+from codex_dispatcher.runner_maintenance import (
+    _parser,
+    _rollback_references,
+    _runner_active_lock,
+)
 
 
 CURRENT = "a" * 40
@@ -15,6 +21,21 @@ IMAGE = "ghcr.io/example/runner@sha256:" + "c" * 64
 
 
 class RunnerMaintenanceTests(unittest.TestCase):
+    def test_active_lock_needs_no_write_access(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            lock = Path(raw) / "active.lock"
+            lock.write_bytes(b"")
+            lock.chmod(0o400)
+            with patch(
+                "codex_dispatcher.runner_maintenance.ACTIVE_LOCK_PATH", lock
+            ), patch(
+                "codex_dispatcher.runner_maintenance._read_json",
+                return_value={"active_lock_path": str(lock)},
+            ):
+                with _runner_active_lock():
+                    self.assertEqual(0, lock.stat().st_size)
+            self.assertEqual(0o400, lock.stat().st_mode & 0o777)
+
     def test_auto_plan_parser_has_no_apply_argument(self) -> None:
         parsed = _parser().parse_args(["reclamation-auto-plan"])
         self.assertEqual("reclamation-auto-plan", parsed.command)
