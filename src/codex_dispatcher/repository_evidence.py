@@ -39,7 +39,10 @@ _FIXTURE_RECOVERY_ACTIONS = frozenset(
     }
 )
 
-# Higher-value repositories intentionally exclude destructive terminal cleanup.
+# Higher-value recovery is reachable only through the fixed, exact-target manual
+# canary entry point while ordinary higher-value admission remains false.  It may
+# persist an operator-approved disposition and reclaim that exact Runner
+# WorkItem, but it deliberately cannot delete the Git branch.
 _HIGHER_VALUE_RECOVERY_ACTIONS = frozenset(
     {
         "reconcile_active_turn",
@@ -50,6 +53,9 @@ _HIGHER_VALUE_RECOVERY_ACTIONS = frozenset(
         "start_fresh_final_audit",
         "recover_orphan_claim",
         "sync_tracker_state",
+        "record_work_item_disposition",
+        "archive_disposed_work_item",
+        "reconcile_work_item_archive",
     }
 )
 

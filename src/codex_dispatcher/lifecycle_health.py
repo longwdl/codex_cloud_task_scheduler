@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from codex_dispatcher.config import Config
+from codex_dispatcher.followup_intents import FollowupIntentState
 from codex_dispatcher.github_api_metrics import (
     GitHubApiSweepMetric,
     GitHubApiSweepOutcome,
@@ -38,6 +39,7 @@ from codex_dispatcher.work_items import WorkItem, WorkItemState
 
 MAX_BLOCKED_AGE_SECONDS = 24 * 60 * 60
 MAX_ARCHIVE_PENDING_AGE_SECONDS = 15 * 60
+MAX_PLANNED_FOLLOWUP_AGE_SECONDS = 15 * 60
 ACTIVE_TURN_GRACE_SECONDS = 5 * 60
 MAX_REPORTED_ALERTS = 50
 MIN_GITHUB_OBSERVABILITY_GRACE_SECONDS = 30 * 60
@@ -87,6 +89,9 @@ class LifecycleHealthSnapshot:
     work_items_total: int
     active_turns: int
     blocked_work_items: int
+    planned_followups: int
+    cross_role_followups: int
+    no_progress_exhaustions: int
     pending_archives: int
     ambiguous_archives: int
     blocked_archives: int
@@ -123,6 +128,9 @@ class LifecycleHealthSnapshot:
             "work_items_total": self.work_items_total,
             "active_turns": self.active_turns,
             "blocked_work_items": self.blocked_work_items,
+            "planned_followups": self.planned_followups,
+            "cross_role_followups": self.cross_role_followups,
+            "no_progress_exhaustions": self.no_progress_exhaustions,
             "pending_archives": self.pending_archives,
             "ambiguous_archives": self.ambiguous_archives,
             "blocked_archives": self.blocked_archives,
@@ -214,6 +222,9 @@ def inspect_lifecycle_health(
 
     alerts: list[LifecycleAlert] = []
     blocked_work_items = 0
+    planned_followups = 0
+    cross_role_followups = 0
+    no_progress_exhaustions = 0
     pending_archives = 0
     ambiguous_archives = 0
     blocked_archives = 0
@@ -308,6 +319,82 @@ def inspect_lifecycle_health(
                 and archive.status is WorkItemArchiveStatus.ARCHIVED
             )
         )
+
+        followups = store.list_work_item_followups(work_item.work_item_id)
+        for followup in followups:
+            source_generation = store.get_turn_session_generation(
+                followup.source_turn_id
+            )
+            if (
+                source_generation is not None
+                and source_generation.role is not followup.target_role
+            ):
+                cross_role_followups += 1
+            if followup.state is FollowupIntentState.PLANNED:
+                planned_followups += 1
+                followup_age = _age_seconds(moment, followup.updated_at)
+                if followup_age > MAX_PLANNED_FOLLOWUP_AGE_SECONDS:
+                    alerts.append(
+                        _item_alert(
+                            "followup_planned_too_long",
+                            work_item,
+                            followup_age,
+                        )
+                    )
+            target_generation = (
+                None
+                if followup.target_session_generation_id is None
+                else store.get_session_generation(
+                    followup.target_session_generation_id
+                )
+            )
+            if followup.target_session_generation_id is not None and (
+                target_generation is None
+                or target_generation.work_item_id != work_item.work_item_id
+                or target_generation.role is not followup.target_role
+            ):
+                alerts.append(
+                    _item_alert(
+                        "followup_target_generation_conflict",
+                        work_item,
+                    )
+                )
+            if followup.state is FollowupIntentState.STARTED:
+                target_turn = (
+                    None
+                    if followup.target_turn_id is None
+                    else store.get_turn(followup.target_turn_id)
+                )
+                bound_generation = (
+                    None
+                    if target_turn is None
+                    else store.get_turn_session_generation(target_turn.turn_id)
+                )
+                if (
+                    target_turn is None
+                    or target_turn.work_item_id != work_item.work_item_id
+                    or bound_generation is None
+                    or bound_generation.session_generation_id
+                    != followup.target_session_generation_id
+                ):
+                    alerts.append(
+                        _item_alert("followup_started_binding_conflict", work_item)
+                    )
+
+        runtime = config.session_runtime
+        if (
+            runtime is not None
+            and followups
+            and followups[-1].state is FollowupIntentState.EXHAUSTED
+            and store.get_followup_exhaustion_error(
+                followups[-1].source_turn_id
+            )
+            == "no_progress_budget_exhausted"
+        ):
+            no_progress_exhaustions += 1
+            alerts.append(
+                _item_alert("followup_no_progress_exhausted", work_item)
+            )
 
         if absence is not None:
             absence_reconciliations += 1
@@ -421,6 +508,9 @@ def inspect_lifecycle_health(
         work_items_total=len(work_items),
         active_turns=1 if active_turn is not None else 0,
         blocked_work_items=blocked_work_items,
+        planned_followups=planned_followups,
+        cross_role_followups=cross_role_followups,
+        no_progress_exhaustions=no_progress_exhaustions,
         pending_archives=pending_archives,
         ambiguous_archives=ambiguous_archives,
         blocked_archives=blocked_archives,

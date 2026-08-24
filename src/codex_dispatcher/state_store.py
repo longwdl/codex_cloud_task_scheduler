@@ -96,6 +96,7 @@ from codex_dispatcher.work_items import (
     validate_session_generation_id,
     validate_session_id,
     validate_sha256,
+    validate_turn_id,
 )
 from codex_dispatcher.work_item_lifecycle import (
     WorkItemAbsenceReconciliation,
@@ -3082,6 +3083,44 @@ class StateStore:
                 (work_item_id,),
             )
         )
+
+    def get_followup_exhaustion_error(self, source_turn_id: str) -> str | None:
+        """Read the exact durable budget error for one exhausted follow-up."""
+        validate_turn_id(source_turn_id)
+        rows = self._connection.execute(
+            "SELECT payload_json FROM work_item_events "
+            "WHERE turn_id = ? AND event_type = 'turn_followup_exhausted' "
+            "ORDER BY event_id",
+            (source_turn_id,),
+        ).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise ValueError("follow-up exhaustion event is duplicated")
+        payload_json = str(rows[0]["payload_json"])
+        try:
+            payload = json.loads(
+                payload_json, object_pairs_hook=_unique_json_object
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ValueError("follow-up exhaustion event is invalid") from exc
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"cause", "error_code"}
+            or not isinstance(payload["cause"], str)
+            or not isinstance(payload["error_code"], str)
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", payload["error_code"])
+            is None
+            or json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            != payload_json
+        ):
+            raise ValueError("follow-up exhaustion event is invalid")
+        return payload["error_code"]
 
     def record_agent_followup_intent(
         self,

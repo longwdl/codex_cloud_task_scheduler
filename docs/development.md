@@ -179,7 +179,9 @@ The system deployment also includes 15-minute health timers. Control reports bou
 retention, archive, fixed-unit, and Runner-capacity failures and uses the dedicated migration-14
 outbox plus deterministic Slack provider keys to deliver one alert per stable episode and one
 threaded recovery. Health mutates only its outbox/active-alert rows, emits bounded JSON to journald,
-and never repairs WorkItems or Runner state.
+and never repairs WorkItems or Runner state. Its read-only lifecycle projection also counts planned
+and cross-role follow-ups, alerts when a planned follow-up is older than fifteen minutes, validates
+its target generation/Turn binding, and surfaces exhausted same-HEAD no-progress loops immediately.
 
 ## Architecture constraints for offline code
 

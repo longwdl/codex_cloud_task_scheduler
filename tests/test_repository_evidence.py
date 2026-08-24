@@ -147,6 +147,30 @@ class RepositoryEvidenceTests(unittest.TestCase):
         self.assertEqual("blocked", receipt.decision)
         self.assertEqual("repository_recovery_action_not_allowed", receipt.code)
 
+    def test_higher_value_profile_allows_exact_disposition_archive_only(self) -> None:
+        policy = higher_value_policy()
+        item = work_item(policy)
+        task = replace(claimed_task(), branch_name=item.task_branch)
+
+        for action in (
+            "record_work_item_disposition",
+            "archive_disposed_work_item",
+            "reconcile_work_item_archive",
+        ):
+            with self.subTest(action=action):
+                receipt = evaluate_repository_recovery(
+                    action=action,
+                    policy=policy,
+                    task=task,
+                    work_item=item,
+                    turn=None,
+                    pull_request=None,
+                    planning_code=None,
+                    created_at=CREATED_AT,
+                )
+                self.assertEqual("allowed", receipt.decision)
+                self.assertIsNone(receipt.code)
+
     def test_readback_blocks_a_pull_request_target_mismatch(self) -> None:
         policy = fixture_policy()
         item = replace(work_item(policy), pr_number=7, last_published_sha="d" * 40)

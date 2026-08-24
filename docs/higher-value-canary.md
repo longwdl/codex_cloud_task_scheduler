@@ -28,6 +28,14 @@ that observes a different main SHA stops before GitHub claim or policy
 persistence. Existing recovery remains bound to the exact WorkItem policy
 ledger and does not broaden new-work admission.
 
+The same manual path may terminalize an exact canary WorkItem after an owner has
+closed its unmerged PR and replaced its single state label with
+`agent:discard`. Recovery may then record the immutable disposition and execute
+`ARCHIVE`/`ARCHIVE_STATUS` for that exact WorkItem. The Runner writes a
+permanent tombstone before it removes the exact bounded image; its registry is
+retained. Higher-value recovery still rejects `delete_terminal_branch`, so PR
+closure does not silently delete the task branch.
+
 One manually reviewed sweep has this shape:
 
 ```bash
@@ -45,6 +53,16 @@ The GitHub token remains in the process environment and the CLI redacts it from
 errors. If Slack is configured, its independent write gate and bot token are
 also required. Every run takes an integrity-checked mode-`0600` SQLite backup
 when the isolated database already exists.
+
+For terminal disposition, first read back the Issue node ID, current main SHA,
+PR number/state/head/base, and WorkItem branch. Close only the exact unmerged PR
+without branch deletion, then replace only `agent:review` with
+`agent:discard`. Run the command above repeatedly for the same exact Issue until
+the sequence reports `disposition_recorded` followed by `archived`; a later
+idle result is the final idempotency check. Preserve the SQLite recovery
+receipt, target-readback verdict, Control archive row, and Runner registry and
+tombstone. If GitHub identity or HEAD changes, or the PR becomes merged, stop;
+do not synthesize a disposition or delete an image manually.
 
 ## Acceptance sequence
 
@@ -68,6 +86,9 @@ separate destructive checkpoints: immediately before each, print exact targets,
 pre-checks, expected interruption, rollback command, and post-checks.
 
 GitHub currently returns an account-plan error for private-repository rulesets
-and branch protection on both Fixture repositories. CODEOWNERS and the required
-Actions evidence are useful controls but are not represented as equivalent to
-server-enforced branch protection.
+and branch protection on both Fixture repositories. On 2026-08-24 the owner
+explicitly accepted this risk for the Fixture-2 canary, so a ruleset is not an
+acceptance gate. CODEOWNERS and required Actions evidence remain useful but are
+not represented as equivalent to server-enforced branch protection. The risk
+acceptance does not enable ordinary higher-value admission, automatic merge,
+branch deletion, or a broader repository target.

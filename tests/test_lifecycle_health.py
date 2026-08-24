@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 
 from codex_dispatcher.config import (
     Config,
     RepositoryConfig,
     SchedulerConfig,
+    SessionRuntimeConfig,
     SshRuntimeConfig,
     ToolPins,
 )
@@ -34,6 +38,7 @@ from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.work_items import (
     PromptKind,
     SessionGenerationRole,
+    TurnState,
     WorkItem,
     WorkItemState,
 )
@@ -123,7 +128,196 @@ def _seed_observability(store: StateStore, at: str) -> None:
     )
 
 
+def _insert_followup(
+    store: StateStore,
+    *,
+    source_turn_id: str,
+    work_item_id: str,
+    target_role: str,
+    state: str,
+    head_sha: str,
+    at: str,
+    target_session_generation_id: str | None = None,
+    target_turn_id: str | None = None,
+) -> None:
+    context = json.dumps(
+        {
+            "cause": "agent_checkpoint",
+            "classification": "untrusted_agent_advisory",
+            "head_sha": head_sha,
+            "payload": {},
+            "schema_version": 1,
+            "source_turn_id": source_turn_id,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    store._connection.execute(
+        "INSERT INTO turn_followup_intents "
+        "(source_turn_id, work_item_id, cause, target_role, state, head_sha, "
+        "context_json, context_sha256, target_session_generation_id, target_turn_id, "
+        "created_at, updated_at) VALUES (?, ?, 'agent_checkpoint', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            source_turn_id,
+            work_item_id,
+            target_role,
+            state,
+            head_sha,
+            context,
+            sha256(context.encode("utf-8")).hexdigest(),
+            target_session_generation_id,
+            target_turn_id,
+            at,
+            at,
+        ),
+    )
+    store._connection.commit()
+
+
 class LifecycleHealthTests(unittest.TestCase):
+    def test_followup_health_reports_stale_cross_role_binding_and_no_progress(self) -> None:
+        now = datetime(2026, 8, 23, tzinfo=timezone.utc)
+        old = "2026-08-22T23:00:00+00:00"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "state.db"
+            with StateStore(database) as store:
+                store.migrate()
+                _seed_observability(store, now.isoformat())
+
+                stale = _item(20, old)
+                store.create_work_item(stale)
+                store.update_work_item_state(
+                    stale.work_item_id, WorkItemState.PREPARING, updated_at=old
+                )
+                store.update_work_item_state(
+                    stale.work_item_id, WorkItemState.READY, updated_at=old
+                )
+                stale_generation = store.plan_session_generation(
+                    stale.work_item_id,
+                    role=SessionGenerationRole.IMPLEMENTATION,
+                    policy_sha256="c" * 64,
+                    created_at=old,
+                )
+                stale_turn = store.plan_turn(
+                    stale.work_item_id,
+                    issue_revision="stale-followup",
+                    prompt_sha256="d" * 64,
+                    input_head_sha="a" * 40,
+                    created_at=old,
+                )
+                store.bind_turn_session_generation(
+                    stale_turn.turn_id, stale_generation.session_generation_id
+                )
+                store.update_turn_state(
+                    stale_turn.turn_id, TurnState.BLOCKED, updated_at=old
+                )
+                _insert_followup(
+                    store,
+                    source_turn_id=stale_turn.turn_id,
+                    work_item_id=stale.work_item_id,
+                    target_role="ci_repair",
+                    state="planned",
+                    head_sha=HEAD,
+                    at=old,
+                    target_session_generation_id=(
+                        stale_generation.session_generation_id
+                    ),
+                )
+
+                exhausted = _item(21, old)
+                store.create_work_item(exhausted)
+                store.update_work_item_state(
+                    exhausted.work_item_id, WorkItemState.PREPARING, updated_at=old
+                )
+                store.update_work_item_state(
+                    exhausted.work_item_id, WorkItemState.READY, updated_at=old
+                )
+                exhausted_generation = store.plan_session_generation(
+                    exhausted.work_item_id,
+                    role=SessionGenerationRole.IMPLEMENTATION,
+                    policy_sha256="e" * 64,
+                    created_at=old,
+                )
+                exhausted_turns = []
+                for number in (1, 2):
+                    turn = store.plan_turn(
+                        exhausted.work_item_id,
+                        issue_revision=f"no-progress-{number}",
+                        prompt_sha256=f"{number}" * 64,
+                        input_head_sha="a" * 40,
+                        created_at=old,
+                    )
+                    store.bind_turn_session_generation(
+                        turn.turn_id,
+                        exhausted_generation.session_generation_id,
+                    )
+                    store.update_turn_state(
+                        turn.turn_id, TurnState.BLOCKED, updated_at=old
+                    )
+                    exhausted_turns.append(turn)
+                _insert_followup(
+                    store,
+                    source_turn_id=exhausted_turns[0].turn_id,
+                    work_item_id=exhausted.work_item_id,
+                    target_role="implementation",
+                    state="started",
+                    head_sha=HEAD,
+                    at=old,
+                    target_session_generation_id=(
+                        exhausted_generation.session_generation_id
+                    ),
+                    target_turn_id=exhausted_turns[1].turn_id,
+                )
+                _insert_followup(
+                    store,
+                    source_turn_id=exhausted_turns[1].turn_id,
+                    work_item_id=exhausted.work_item_id,
+                    target_role="implementation",
+                    state="planned",
+                    head_sha=HEAD,
+                    at=old,
+                )
+                store.exhaust_followup_intent(
+                    exhausted_turns[1].turn_id,
+                    error_code="no_progress_budget_exhausted",
+                    updated_at=old,
+                )
+
+                config = replace(
+                    _config(database),
+                    session_runtime=SessionRuntimeConfig(
+                        protocol_version=2,
+                        agent_policy_digest="f" * 64,
+                        max_turns_per_session=4,
+                        rotate_after_input_tokens=120_000,
+                        rotate_after_session_age_seconds=14_400,
+                        rotate_before_final_audit=True,
+                        use_incremental_resume_prompts=True,
+                        max_session_generations=3,
+                        max_total_turns=10,
+                        max_no_progress_turns=2,
+                        max_repair_cycles=3,
+                        max_audit_cycles=3,
+                        max_total_tokens=1_000_000,
+                        max_work_item_age_seconds=604_800,
+                    ),
+                )
+                snapshot = inspect_lifecycle_health(config, store, now=now)
+
+        self.assertEqual(1, snapshot.planned_followups)
+        self.assertEqual(1, snapshot.cross_role_followups)
+        self.assertEqual(1, snapshot.no_progress_exhaustions)
+        self.assertEqual(
+            {
+                "followup_no_progress_exhausted",
+                "followup_planned_too_long",
+                "followup_target_generation_conflict",
+            },
+            {alert.code for alert in snapshot.alerts},
+        )
+        self.assertEqual(1, snapshot.to_mapping()["planned_followups"])
+
     def test_inactive_turn_abandonment_is_immediately_visible(self) -> None:
         now = datetime(2026, 8, 23, tzinfo=timezone.utc)
         at = now.isoformat()

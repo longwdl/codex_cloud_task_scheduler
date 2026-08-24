@@ -283,6 +283,10 @@ included and schema 17 atomically stores the aggregate with success/failure outc
 therefore leaves durable evidence instead of losing the process-local counters. Lifecycle health
 uses the latest stored completion age and the daily terminal-audit cursor age, and exposes stable
 missing, stale, failure, unavailable-budget, and low-budget alert codes.
+It also derives follow-up health without changing state: planned intents older than fifteen
+minutes alert, target generation/Turn bindings must agree with the persisted target role, expected
+cross-role handoffs are counted, and an exhausted trailing same-HEAD sequence at the configured
+no-progress limit alerts immediately instead of waiting for the generic blocked-age threshold.
 
 The acceptance evaluator recognizes only three explicit Issue predicates:
 
