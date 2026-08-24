@@ -217,6 +217,12 @@ Do not copy `latest.json` as authority to delete anything. Restore it only as au
 fresh read-only planner after Docker, WorkItem registries, tombstones, and both release trees have
 been restored and re-inspected. Any reference/apply-receipt mismatch blocks Runner activation.
 
+The planner unit retains `CAP_SETUID` in its bounding set, with no ambient capabilities, solely so
+the root-owned collector can temporarily lower its effective UID to the trusted WorkItem owner
+while reading owner-only FUSE session bindings. The trusted UID must match both the WorkItem root
+and active-lock owner. The collector restores its original effective UID before inspecting Docker
+or writing a plan; do not replace this boundary with `allow_other` or a broader FUSE mount policy.
+
 ## Terminal-storage evidence conflict response
 
 `status` or lifecycle health reporting `evidence_conflict` is an incident signal, not a cleanup

@@ -149,6 +149,11 @@ class RunnerDeploymentTests(unittest.TestCase):
             "/srv/codex-runner/reclamation-status",
             service,
         )
+        self.assertIn(
+            "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID",
+            service,
+        )
+        self.assertIn("AmbientCapabilities=\n", service)
         self.assertNotIn("reclamation-apply", service)
         self.assertNotIn("docker image prune", service)
         self.assertIn("OnUnitInactiveSec=6h", timer)

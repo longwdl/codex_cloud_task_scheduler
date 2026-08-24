@@ -25,7 +25,7 @@ StandardError=journal
 SyslogIdentifier=codex-runner-reclamation-plan
 
 NoNewPrivileges=yes
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID
 AmbientCapabilities=
 PrivateDevices=yes
 PrivateNetwork=yes
