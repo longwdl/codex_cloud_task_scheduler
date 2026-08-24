@@ -41,7 +41,7 @@ user = "codex-runner"
 port = 22
 known_hosts_path = "/etc/codex-dispatcher/runner_known_hosts"
 identity_file = "/etc/codex-dispatcher/runner_ed25519"
-lock_path = "/run/codex-dispatcher/higher-value-canary.lock"
+lock_path = "/run/codex-dispatcher/dispatcher.lock"
 mirror_root = "/var/lib/codex-dispatcher/higher-value-canary/mirrors"
 source_temporary_root = "/var/lib/codex-dispatcher/higher-value-canary/source-temporary"
 quarantine_root = "/var/lib/codex-dispatcher/higher-value-canary/quarantine"
@@ -117,6 +117,16 @@ class HigherValueCanaryTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(HigherValueCanaryRejected, "policy is not exact"):
             validate_higher_value_canary_config(broad, self._target())
+
+        separate_lock = replace(
+            config,
+            ssh_runtime=replace(
+                config.ssh_runtime,
+                lock_path=Path("/run/codex-dispatcher/higher-value-canary.lock"),
+            ),
+        )
+        with self.assertRaisesRegex(HigherValueCanaryRejected, "must share"):
+            validate_higher_value_canary_config(separate_lock, self._target())
 
     def test_cli_requires_both_explicit_environment_guards(self) -> None:
         with patch.dict(os.environ, {}, clear=True):

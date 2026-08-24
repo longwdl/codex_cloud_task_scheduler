@@ -19,6 +19,7 @@ HIGHER_VALUE_CANARY_MUTABLE_PATH = "canary/target.txt"
 HIGHER_VALUE_CANARY_REQUIRED_CHECK = "higher-value-canary"
 HIGHER_VALUE_CANARY_MAINTAINER = "longwdl"
 HIGHER_VALUE_CANARY_ISOLATION_COMPONENT = "higher-value-canary"
+HIGHER_VALUE_CANARY_SHARED_LOCK = Path("/run/codex-dispatcher/dispatcher.lock")
 
 
 class HigherValueCanaryRejected(RuntimeError):
@@ -84,7 +85,6 @@ def validate_higher_value_canary_config(
     isolated_paths = (
         config.scheduler.database_path,
         config.scheduler.workspace_root,
-        config.ssh_runtime.lock_path,
         config.ssh_runtime.mirror_root,
         config.ssh_runtime.source_temporary_root,
         config.ssh_runtime.quarantine_root,
@@ -93,6 +93,10 @@ def validate_higher_value_canary_config(
     if any(not _is_canary_isolated(path) for path in isolated_paths):
         raise HigherValueCanaryRejected(
             "higher-value canary Control paths are not isolated"
+        )
+    if config.ssh_runtime.lock_path != HIGHER_VALUE_CANARY_SHARED_LOCK:
+        raise HigherValueCanaryRejected(
+            "higher-value canary must share the ordinary Dispatcher lock"
         )
 
 

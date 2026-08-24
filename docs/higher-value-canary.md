@@ -16,10 +16,14 @@ all of these exact inputs agree:
 - an isolated Control configuration containing exactly this repository as
   class `higher-value`, the exact higher-value recovery/readback profiles, one
   mutable path, one required check, one maintainer, and concurrency one;
-- isolated database, lock, mirror, source, quarantine, publisher, and workspace
-  paths containing the `higher-value-canary` component.
+- isolated database, mirror, source, quarantine, publisher, and workspace paths
+  containing the `higher-value-canary` component, while deliberately sharing
+  the ordinary `/run/codex-dispatcher/dispatcher.lock` so the two entry points
+  cannot overlap.
 
-Normal timers must never use the canary configuration or CLI. A source refresh
+Normal timers must never use the canary configuration or CLI. Stop the ordinary
+timer and prove its service inactive before creating the protected shared lock
+directory and invoking the manual CLI. A source refresh
 that observes a different main SHA stops before GitHub claim or policy
 persistence. Existing recovery remains bound to the exact WorkItem policy
 ledger and does not broaden new-work admission.
