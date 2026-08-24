@@ -101,8 +101,10 @@ repositories. Minimum operations are Metadata read, Contents read/write for the 
 Issues read/write, Pull requests read/write, and Actions read. Do not grant Administration, Secrets,
 Environments, Deployments, Actions write, bypass, force-push, tag, merge, or arbitrary ref deletion.
 
-Slack should be restricted to the configured workspace/channel and only the read/write scopes used
-for root/reply recovery and health alert projection. Slack never supplies task input.
+Slack should be restricted to the configured workspace and two explicit channels. Configure
+`issue_channel_id` for WorkItem root/reply recovery and `system_channel_id` for lifecycle-health
+alert/recovery projection; the IDs must differ. Grant only the read/write scopes required for both
+destinations. Slack never supplies task input.
 
 Before live operation, exercise credential failure with redacted errors and prove credentials are
 absent from argv, TOML, Git config, prompt, Runner mount, Git objects, Slack text, and receipts.

@@ -141,7 +141,7 @@ def validate_fixture_slack_config(config: Config) -> None:
     runtime = config.slack_runtime
     if (
         runtime is None
-        or runtime.channel_id != FIXTURE_SLACK_CHANNEL_ID
+        or runtime.issue_channel_id != FIXTURE_SLACK_CHANNEL_ID
         or runtime.idempotency_contract != SLACK_IDEMPOTENCY_CONTRACT_V1
     ):
         raise FixtureFaultRejected(

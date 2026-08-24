@@ -149,7 +149,8 @@ class SshRuntimeTests(unittest.TestCase):
         config = replace(
             self.config,
             slack_runtime=SlackRuntimeConfig(
-                channel_id="C0BR2D0MS8Y",
+                issue_channel_id="C0BR2D0MS8Y",
+                system_channel_id="C0BS3LPG43G",
                 request_timeout_seconds=10,
                 idempotency_contract="client_msg_id-live-fixture-verified-v1",
             ),
@@ -173,6 +174,10 @@ class SshRuntimeTests(unittest.TestCase):
         self.assertIsInstance(
             sweep._slack_delivery._publisher,
             SlackWebApiPublisher,
+        )
+        self.assertEqual(
+            "C0BR2D0MS8Y",
+            sweep._slack_delivery._channel_id,
         )
         self.assertFalse((self.lock_dir / "dispatcher.lock").exists())
 
@@ -264,7 +269,8 @@ class SshRuntimeTests(unittest.TestCase):
         slack_config = replace(
             fixture_config,
             slack_runtime=SlackRuntimeConfig(
-                channel_id="C0BR2D0MS8Y",
+                issue_channel_id="C0BR2D0MS8Y",
+                system_channel_id="C0BS3LPG43G",
                 request_timeout_seconds=10,
                 idempotency_contract="client_msg_id-live-fixture-verified-v1",
             ),

@@ -37,6 +37,79 @@ from tests.test_scheduler import make_config
 
 
 class CliTests(unittest.TestCase):
+    def test_lifecycle_health_routes_notifications_to_system_channel(self) -> None:
+        slack_token = "xoxb-1234567890-fixture"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "state.db"
+            with StateStore(database) as store:
+                store.migrate()
+            base = make_config(global_max_active=1)
+            config = replace(
+                base,
+                scheduler=replace(base.scheduler, database_path=database),
+                slack_runtime=SlackRuntimeConfig(
+                    issue_channel_id="C0BR2D0MS8Y",
+                    system_channel_id="C0BS3LPG43G",
+                    request_timeout_seconds=10,
+                    idempotency_contract="client_msg_id-live-fixture-verified-v1",
+                ),
+            )
+            snapshot = SimpleNamespace(
+                alerts=(),
+                alerts_truncated=False,
+                integrity="ok",
+                foreign_key_violations=(),
+                checked_at="2026-08-24T00:00:00+00:00",
+                ok=True,
+                to_mapping=lambda: {
+                    "lifecycle_health": True,
+                    "integrity": "ok",
+                    "foreign_key_violations": [],
+                },
+            )
+            stdout = io.StringIO()
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "CODEX_DISPATCHER_ENABLE_SLACK_WRITES": "1",
+                        "SLACK_BOT_TOKEN": slack_token,
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "codex_dispatcher.ssh_runtime.load_protected_ssh_config",
+                    return_value=config,
+                ),
+                patch(
+                    "codex_dispatcher.lifecycle_health.inspect_lifecycle_health",
+                    return_value=snapshot,
+                ),
+                patch(
+                    "codex_dispatcher.health_alert_delivery.HealthAlertDeliveryCoordinator"
+                ) as coordinator,
+                patch("codex_dispatcher.slack_web_api.SlackWebApiPublisher"),
+                contextlib.redirect_stdout(stdout),
+            ):
+                coordinator.return_value.reconcile.return_value.to_mapping.return_value = {
+                    "action": "healthy"
+                }
+                exit_code = main(
+                    [
+                        "lifecycle-health",
+                        "--config",
+                        "config.toml",
+                        "--notify-slack",
+                        "--json",
+                    ]
+                )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(
+            "C0BS3LPG43G",
+            coordinator.call_args.kwargs["channel_id"],
+        )
+
     def test_runner_capacity_reports_turn_and_provision_boundaries(self) -> None:
         snapshot = SimpleNamespace(
             capacity_bytes=1000,
@@ -573,7 +646,8 @@ class CliTests(unittest.TestCase):
         config = replace(
             make_config(global_max_active=1),
             slack_runtime=SlackRuntimeConfig(
-                channel_id="C0BR2D0MS8Y",
+                issue_channel_id="C0BR2D0MS8Y",
+                system_channel_id="C0BS3LPG43G",
                 request_timeout_seconds=10,
                 idempotency_contract="client_msg_id-live-fixture-verified-v1",
             ),
@@ -750,7 +824,8 @@ class CliTests(unittest.TestCase):
         config = replace(
             base,
             slack_runtime=SlackRuntimeConfig(
-                channel_id="C0BR2D0MS8Y",
+                issue_channel_id="C0BR2D0MS8Y",
+                system_channel_id="C0BS3LPG43G",
                 request_timeout_seconds=10,
                 idempotency_contract="client_msg_id-live-fixture-verified-v1",
             ),
@@ -817,7 +892,8 @@ class CliTests(unittest.TestCase):
                     database_path=Path(temp_dir) / "state.db",
                 ),
                 slack_runtime=SlackRuntimeConfig(
-                    channel_id="C0BR2D0MS8Y",
+                    issue_channel_id="C0BR2D0MS8Y",
+                    system_channel_id="C0BS3LPG43G",
                     request_timeout_seconds=10,
                     idempotency_contract="client_msg_id-live-fixture-verified-v1",
                 ),

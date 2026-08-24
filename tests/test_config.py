@@ -62,7 +62,8 @@ terminal_branch_retention_cutover_at = "2026-08-23T19:29:16.047801Z"
 SLACK_RUNTIME = '''
 
 [slack_runtime]
-channel_id = "C0BR2D0MS8Y"
+issue_channel_id = "C0BR2D0MS8Y"
+system_channel_id = "C0BS3LPG43G"
 request_timeout_seconds = 10
 idempotency_contract = "client_msg_id-live-fixture-verified-v1"
 '''
@@ -282,7 +283,8 @@ class ConfigTests(unittest.TestCase):
         runtime = loaded.slack_runtime
         self.assertIsNotNone(runtime)
         assert runtime is not None
-        self.assertEqual("C0BR2D0MS8Y", runtime.channel_id)
+        self.assertEqual("C0BR2D0MS8Y", runtime.issue_channel_id)
+        self.assertEqual("C0BS3LPG43G", runtime.system_channel_id)
         self.assertEqual(10, runtime.request_timeout_seconds)
 
         with self.assertRaisesRegex(ValueError, "live-fixture proof"):
@@ -299,11 +301,25 @@ class ConfigTests(unittest.TestCase):
                     "request_timeout_seconds = 61",
                 )
             )
-        with self.assertRaisesRegex(ValueError, "channel_id"):
+        with self.assertRaisesRegex(ValueError, "issue_channel_id"):
             self._load(
                 (configured + SSH_RUNTIME + SLACK_RUNTIME).replace(
+                    'issue_channel_id = "C0BR2D0MS8Y"',
+                    'issue_channel_id = "#project"',
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "must be different"):
+            self._load(
+                (configured + SSH_RUNTIME + SLACK_RUNTIME).replace(
+                    'system_channel_id = "C0BS3LPG43G"',
+                    'system_channel_id = "C0BR2D0MS8Y"',
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "unknown field"):
+            self._load(
+                (configured + SSH_RUNTIME + SLACK_RUNTIME).replace(
+                    'issue_channel_id = "C0BR2D0MS8Y"',
                     'channel_id = "C0BR2D0MS8Y"',
-                    'channel_id = "#project"',
                 )
             )
         with self.assertRaisesRegex(ValueError, "unknown field"):

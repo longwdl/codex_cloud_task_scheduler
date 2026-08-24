@@ -49,8 +49,10 @@ Control credentials, nor GitHub write credentials.
 ### External systems
 
 GitHub is the source of reviewed intent and the destination for task branches, Draft PRs, comments,
-and state labels. Slack is a bounded outbound projection, not a control plane. SQLite is the local
-coordination ledger but never overrides contradictory external identity; contradictions block.
+and state labels. Slack is a bounded outbound projection with two distinct destinations: WorkItem
+root/result messages go to the Issue channel, while lifecycle-health alert/recovery episodes go to
+the system channel. Slack is not a control plane. SQLite is the local coordination ledger but never
+overrides contradictory external identity; contradictions block.
 
 ## Durable identity
 
@@ -118,7 +120,7 @@ publication/PR/comment/Slack receipt recovery, completion projection, follow-up 
 Audit rotation, inactive-Turn abandonment, disposition, archive, and branch cleanup.
 
 A network error is not proof that a write failed. START is never retried after an ambiguous reply;
-STATUS must prove the exact Runner state. Publisher, GitHub, Slack, archive, and deletion recovery
+STATUS must prove the exact Runner state. Publisher, GitHub, Issue-channel Slack, archive, and deletion recovery
 likewise use stable identity and read-back instead of blind replay.
 
 ## Source, Turn, and publication flow
@@ -154,7 +156,7 @@ commit bounds, and prepares a PublicationPlan bound to the WorkItem and persiste
 
 The Publisher may update only the deterministic task branch. It verifies the remote ref before and
 after the write, creates or recovers one Draft PR, records the exact PR/head/base identity, and then
-projects the Issue comment/label and Slack report. It cannot write the base branch, tags, force
+projects the Issue comment/label and Issue-channel Slack report. It cannot write the base branch, tags, force
 push, delete a ref through publication, merge, or deploy.
 
 ## Completion and autonomous follow-up
@@ -201,7 +203,8 @@ reinspection and permanent receipt; broad prune commands are forbidden.
 The Control Host runs four oneshot timers: Dispatcher, lifecycle health, online backup, and restore
 drill. The Runner runs a capacity timer. Health reads durable lifecycle state, systemd state, GitHub
 API metrics/cursor age, archive/branch backlog, follow-up state, and Runner capacity. Slack alert
-and recovery projection uses a dedicated durable outbox.
+and recovery projection uses a dedicated durable outbox and only the configured system channel;
+it never reuses a WorkItem thread or the Issue channel.
 
 Backups use SQLite Online Backup, mode `0600`, integrity validation, atomic publication, and bounded
 rotation. Restore drills use an isolated temporary database and verify integrity, foreign keys, and

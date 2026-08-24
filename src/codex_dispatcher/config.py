@@ -83,7 +83,8 @@ class SshRuntimeConfig:
 
 @dataclass(frozen=True, slots=True)
 class SlackRuntimeConfig:
-    channel_id: str
+    issue_channel_id: str
+    system_channel_id: str
     request_timeout_seconds: int
     idempotency_contract: str
 
@@ -594,18 +595,32 @@ def _parse_slack_runtime(value: Any) -> SlackRuntimeConfig:
         table,
         frozenset(
             {
-                "channel_id",
+                "issue_channel_id",
+                "system_channel_id",
                 "request_timeout_seconds",
                 "idempotency_contract",
             }
         ),
         "slack_runtime",
     )
-    channel_id = _string(table["channel_id"], "slack_runtime.channel_id")
-    try:
-        validate_slack_channel_id(channel_id)
-    except ValueError as exc:
-        raise ValueError("slack_runtime.channel_id is invalid") from exc
+    issue_channel_id = _string(
+        table["issue_channel_id"], "slack_runtime.issue_channel_id"
+    )
+    system_channel_id = _string(
+        table["system_channel_id"], "slack_runtime.system_channel_id"
+    )
+    for field, channel_id in (
+        ("issue_channel_id", issue_channel_id),
+        ("system_channel_id", system_channel_id),
+    ):
+        try:
+            validate_slack_channel_id(channel_id)
+        except ValueError as exc:
+            raise ValueError(f"slack_runtime.{field} is invalid") from exc
+    if issue_channel_id == system_channel_id:
+        raise ValueError(
+            "slack_runtime issue and system channels must be different"
+        )
     timeout = _positive_int(
         table["request_timeout_seconds"],
         "slack_runtime.request_timeout_seconds",
@@ -623,7 +638,8 @@ def _parse_slack_runtime(value: Any) -> SlackRuntimeConfig:
             "slack_runtime.idempotency_contract requires the exact live-fixture proof value"
         )
     return SlackRuntimeConfig(
-        channel_id=channel_id,
+        issue_channel_id=issue_channel_id,
+        system_channel_id=system_channel_id,
         request_timeout_seconds=timeout,
         idempotency_contract=idempotency_contract,
     )

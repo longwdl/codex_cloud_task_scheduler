@@ -387,7 +387,7 @@ def _assemble_ssh_control_sweep(
         slack_delivery = SlackDeliveryCoordinator(
             store=store,
             publisher=slack_publisher,
-            channel_id=config.slack_runtime.channel_id,
+            channel_id=config.slack_runtime.issue_channel_id,
         )
     return SshControlSweep(
         config=config,

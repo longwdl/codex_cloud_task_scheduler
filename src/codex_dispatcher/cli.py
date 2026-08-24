@@ -463,7 +463,7 @@ def _lifecycle_health(
                         bot_token=slack_token,
                         timeout_seconds=config.slack_runtime.request_timeout_seconds,
                     ),
-                    channel_id=config.slack_runtime.channel_id,
+                    channel_id=config.slack_runtime.system_channel_id,
                 ).reconcile(
                     combined_alerts,
                     checked_at=snapshot.checked_at,

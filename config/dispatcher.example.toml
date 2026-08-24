@@ -61,7 +61,8 @@ max_work_item_age_seconds = 604800
 # target Slack app/workspace returns the original receipt for an exact retry.
 # The bot token belongs only in SLACK_BOT_TOKEN, never in TOML.
 # [slack_runtime]
-# channel_id = "C0BR2D0MS8Y"
+# issue_channel_id = "C0BR2D0MS8Y"
+# system_channel_id = "C0BS3LPG43G"
 # request_timeout_seconds = 10
 # idempotency_contract = "client_msg_id-live-fixture-verified-v1"
 

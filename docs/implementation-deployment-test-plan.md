@@ -72,7 +72,9 @@ branch，并通过 ref read-back 创建或找回一个 Draft PR。禁止 base br
 和任意 ref。
 
 Slack 是出站状态投影，不是控制面。相同 idempotency key/payload 必须找回同一 receipt；歧义只重试
-同一消息，不重跑 Codex 或 Publisher。
+同一消息，不重跑 Codex 或 Publisher。`slack_runtime.issue_channel_id` 只承接 WorkItem root/result；
+`slack_runtime.system_channel_id` 只承接 lifecycle-health 告警和恢复，包括数据库、systemd、GitHub
+API、备份/恢复可见状态与 Runner capacity。两个 channel 必须不同；旧的单一 `channel_id` 不再接受。
 
 ## 3. 状态模型
 

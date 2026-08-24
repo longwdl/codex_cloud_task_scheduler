@@ -11,6 +11,8 @@ on the Control Host.
 ## Current boundary
 
 - One GitHub Issue maps to one durable WorkItem, task branch, Runner directory, and Slack thread.
+- WorkItem reports use the configured Issue channel; lifecycle, systemd, GitHub API, backup/restore,
+  and Runner-capacity alerts use a separate system channel.
 - A WorkItem may have several Turns and several bounded SessionGenerations.
 - The primary Runner agent is Sol. It may select only configured direct-child agent profiles; the
   Runner records metadata-only delegation evidence and rejects policy drift.
@@ -37,7 +39,7 @@ Runner Host
   registry + ext4 image + generation auth/home -> rootless Docker -> Codex CLI
 ```
 
-The Control Host owns repository policy, GitHub and Slack credentials, the trusted mirror,
+The Control Host owns repository policy, GitHub and Slack credentials/channel routing, the trusted mirror,
 quarantine, Publisher, SQLite, backups, health checks, and release receipts. The Runner receives a
 self-contained exact-base bundle and metadata-bound requests. It has no GitHub write credential,
 no host Docker socket inside the Turn container, and no access to another WorkItem.

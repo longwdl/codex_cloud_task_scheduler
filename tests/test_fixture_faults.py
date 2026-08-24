@@ -1307,7 +1307,8 @@ class FixtureFaultTests(unittest.TestCase):
                 ),
             ),
             slack_runtime=SlackRuntimeConfig(
-                channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                issue_channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                system_channel_id="C0BS3LPG43G",
                 request_timeout_seconds=10,
                 idempotency_contract="client_msg_id-live-fixture-verified-v1",
             ),
@@ -1319,7 +1320,7 @@ class FixtureFaultTests(unittest.TestCase):
                     fixture_config,
                     slack_runtime=replace(
                         fixture_config.slack_runtime,
-                        channel_id="C0000000000",
+                        issue_channel_id="C0000000000",
                     ),
                 )
             )
@@ -1394,7 +1395,8 @@ class FixtureFaultTests(unittest.TestCase):
                     ),
                 ),
                 slack_runtime=SlackRuntimeConfig(
-                    channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                    issue_channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                    system_channel_id="C0BS3LPG43G",
                     request_timeout_seconds=10,
                     idempotency_contract="client_msg_id-live-fixture-verified-v1",
                 ),
@@ -1452,7 +1454,8 @@ class FixtureFaultTests(unittest.TestCase):
                     ),
                 ),
                 slack_runtime=SlackRuntimeConfig(
-                    channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                    issue_channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                    system_channel_id="C0BS3LPG43G",
                     request_timeout_seconds=10,
                     idempotency_contract="client_msg_id-live-fixture-verified-v1",
                 ),
@@ -1589,7 +1592,8 @@ class FixtureFaultTests(unittest.TestCase):
                     ),
                 ),
                 slack_runtime=SlackRuntimeConfig(
-                    channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                    issue_channel_id=FIXTURE_SLACK_CHANNEL_ID,
+                    system_channel_id="C0BS3LPG43G",
                     request_timeout_seconds=10,
                     idempotency_contract="client_msg_id-live-fixture-verified-v1",
                 ),
