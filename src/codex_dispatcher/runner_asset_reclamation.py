@@ -6,6 +6,8 @@ import json
 import os
 import re
 import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -549,53 +551,54 @@ def collect_runner_asset_snapshot(
 
     blockers: list[str] = []
     work_item_images: set[str] = set()
-    for work_item_id in sorted(set(registry) - set(archives)):
-        payload = registry[work_item_id]
-        repository = payload.get("repository")
-        issue_number = payload.get("issue_number")
-        if (
-            not isinstance(repository, str)
-            or "/" not in repository
-            or type(issue_number) is not int
-            or issue_number <= 0
-        ):
-            raise RunnerAssetReclamationError("Runner registry identity is malformed")
-        root = (
-            work_items_root
-            / repository.replace("/", "__")
-            / f"issue-{issue_number}"
-        )
-        state = root / "runner-state"
-        try:
-            _protected_directory(
-                state,
-                "WorkItem state directory",
-                trusted_owner_uid=work_items_owner_uid,
-            )
-        except RunnerAssetReclamationError:
-            blockers.append(f"active registry {work_item_id} is not inspectable")
-            continue
-        for binding in sorted(state.rglob("codex-session.json")):
-            try:
-                relative = binding.relative_to(state)
-            except ValueError as exc:
-                raise RunnerAssetReclamationError("session binding escapes WorkItem") from exc
-            if len(relative.parts) > 4:
-                raise RunnerAssetReclamationError("session binding depth is invalid")
-            payload = _read_protected_json(
-                binding,
-                "WorkItem session binding",
-                maximum=4096,
-                trusted_owner_uid=work_items_owner_uid,
-            )
-            image = payload.get("image")
+    with _effective_uid(work_items_owner_uid):
+        for work_item_id in sorted(set(registry) - set(archives)):
+            payload = registry[work_item_id]
+            repository = payload.get("repository")
+            issue_number = payload.get("issue_number")
             if (
-                payload.get("work_item_id") != work_item_id
-                or not isinstance(image, str)
-                or _IMAGE_REF_RE.fullmatch(image) is None
+                not isinstance(repository, str)
+                or "/" not in repository
+                or type(issue_number) is not int
+                or issue_number <= 0
             ):
-                raise RunnerAssetReclamationError("WorkItem image binding is invalid")
-            work_item_images.add(image)
+                raise RunnerAssetReclamationError("Runner registry identity is malformed")
+            root = (
+                work_items_root
+                / repository.replace("/", "__")
+                / f"issue-{issue_number}"
+            )
+            state = root / "runner-state"
+            try:
+                _protected_directory(
+                    state,
+                    "WorkItem state directory",
+                    trusted_owner_uid=work_items_owner_uid,
+                )
+            except RunnerAssetReclamationError:
+                blockers.append(f"active registry {work_item_id} is not inspectable")
+                continue
+            for binding in sorted(state.rglob("codex-session.json")):
+                try:
+                    relative = binding.relative_to(state)
+                except ValueError as exc:
+                    raise RunnerAssetReclamationError("session binding escapes WorkItem") from exc
+                if len(relative.parts) > 4:
+                    raise RunnerAssetReclamationError("session binding depth is invalid")
+                payload = _read_protected_json(
+                    binding,
+                    "WorkItem session binding",
+                    maximum=4096,
+                    trusted_owner_uid=work_items_owner_uid,
+                )
+                image = payload.get("image")
+                if (
+                    payload.get("work_item_id") != work_item_id
+                    or not isinstance(image, str)
+                    or _IMAGE_REF_RE.fullmatch(image) is None
+                ):
+                    raise RunnerAssetReclamationError("WorkItem image binding is invalid")
+                work_item_images.add(image)
 
     return RunnerAssetSnapshot(
         current_release_commit=current_commit,
@@ -610,6 +613,26 @@ def collect_runner_asset_snapshot(
         images=tuple(sorted(images, key=lambda value: value.image_id)),
         blocked_reasons=tuple(blockers),
     )
+
+
+@contextmanager
+def _effective_uid(target_uid: int) -> Iterator[None]:
+    """Read owner-only FUSE WorkItem state without broadening its mount policy."""
+    if type(target_uid) is not int or target_uid < 0:
+        raise RunnerAssetReclamationError("Runner work-items owner is invalid")
+    original_uid = os.geteuid()
+    if original_uid == target_uid:
+        yield
+        return
+    if original_uid != 0:
+        raise RunnerAssetReclamationError(
+            "Runner WorkItem inspection requires root or the trusted owner"
+        )
+    try:
+        os.seteuid(target_uid)
+        yield
+    finally:
+        os.seteuid(original_uid)
 
 
 def inspect_release_assets(releases_root: Path) -> tuple[ReleaseAsset, ...]:

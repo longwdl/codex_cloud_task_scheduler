@@ -6,11 +6,13 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import call, patch
 
 from codex_dispatcher.runner_asset_reclamation import (
     DockerImageAsset,
     RunnerAssetReclamationError,
     RunnerAssetSnapshot,
+    _effective_uid,
     apply_runner_asset_reclamation,
     collect_runner_asset_snapshot,
     delete_exact_release,
@@ -46,6 +48,37 @@ def image(reference: str, image_id: str, *, unique: int = 100) -> DockerImageAss
 
 
 class RunnerAssetReclamationTests(unittest.TestCase):
+    def test_work_item_inspection_drops_and_restores_effective_uid(self) -> None:
+        with (
+            patch(
+                "codex_dispatcher.runner_asset_reclamation.os.geteuid",
+                return_value=0,
+            ),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation.os.seteuid"
+            ) as set_effective_uid,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "fixture interruption"):
+                with _effective_uid(1002):
+                    set_effective_uid.assert_called_once_with(1002)
+                    raise RuntimeError("fixture interruption")
+
+        self.assertEqual(
+            [call(1002), call(0)],
+            set_effective_uid.call_args_list,
+        )
+
+        with patch(
+            "codex_dispatcher.runner_asset_reclamation.os.geteuid",
+            return_value=1001,
+        ):
+            with self.assertRaisesRegex(
+                RunnerAssetReclamationError,
+                "root or the trusted owner",
+            ):
+                with _effective_uid(1002):
+                    self.fail("untrusted user entered WorkItem inspection")
+
     def _releases(self, root: Path) -> tuple:
         releases = root / "releases"
         releases.mkdir(mode=0o700)
