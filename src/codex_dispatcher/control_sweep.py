@@ -1244,9 +1244,24 @@ class SshControlSweep:
         return self._after_turn(task, progress)
 
     def _set_task_state(self, task: TrackerTask, state: TaskState) -> TrackerTask:
-        if task.state is state:
-            return task
-        return self._tracker.set_state(task.repository, task.task_id, state)
+        current = self._tracker.get_task(task.repository, task.task_id)
+        if current is None:
+            raise RuntimeError("task disappeared before state update")
+        if (
+            task.issue_node_id is not None
+            and current.issue_node_id != task.issue_node_id
+        ):
+            raise RuntimeError("task identity changed before state update")
+        if current.state is state:
+            return current
+        if current.state is TaskState.DISCARD and state is not TaskState.COMPLETED:
+            return current
+        return self._tracker.set_state(
+            task.repository,
+            task.task_id,
+            state,
+            expected_state=current.state,
+        )
 
     def _deliver_terminal(
         self,

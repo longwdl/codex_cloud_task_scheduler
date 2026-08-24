@@ -128,11 +128,24 @@ class FakeTracker(_ConfigurableFake):
             self.tasks[task_id] = outcome.task
         return outcome  # type: ignore[return-value]
 
-    def set_state(self, repository: str, task_id: str, state: TaskState) -> TrackerTask:
+    def set_state(
+        self,
+        repository: str,
+        task_id: str,
+        state: TaskState,
+        *,
+        expected_state: TaskState | None = None,
+    ) -> TrackerTask:
         self._record("set_state", repository, task_id, state)
         task = self.tasks.get(task_id)
         if task is None or task.repository != repository:
             raise KeyError(task_id)
+        if expected_state is not None and task.state is not expected_state:
+            if task.state is state:
+                return task
+            if task.state is TaskState.DISCARD and state is not TaskState.COMPLETED:
+                return task
+            raise RuntimeError("task state changed before update")
         default = replace(task, state=state)
         labels = tuple(
             f"agent:{state.value}" if label.startswith("agent:") else label

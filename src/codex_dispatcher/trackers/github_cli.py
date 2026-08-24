@@ -364,16 +364,29 @@ class GitHubCliTracker:
         return ClaimResult(True, claimed)
 
     def set_state(
-        self, repository: str, task_id: str, state: TaskState
+        self,
+        repository: str,
+        task_id: str,
+        state: TaskState,
+        *,
+        expected_state: TaskState | None = None,
     ) -> TrackerTask:
-        """Replace the single current agent state and verify the result."""
+        """Conditionally replace the current agent state and verify the result."""
         repository = _validate_repository(repository)
         issue_number = _validate_issue_id(task_id)
         if not isinstance(state, TaskState):
             raise TypeError("state must be a TaskState")
+        if expected_state is not None and not isinstance(expected_state, TaskState):
+            raise TypeError("expected_state must be a TaskState or None")
         task = self.get_task(repository, task_id)
         if task is None:
             raise GitHubCliTrackerError("task does not exist")
+        if expected_state is not None and task.state is not expected_state:
+            if task.state is state:
+                return task
+            if task.state is TaskState.DISCARD and state is not TaskState.COMPLETED:
+                return task
+            raise GitHubCliTrackerError("task state changed before update")
         self._replace_state_label(repository, issue_number, task.labels, state)
         updated = self.get_task(repository, task_id)
         if updated is None or updated.state is not state:

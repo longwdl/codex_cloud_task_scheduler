@@ -263,8 +263,20 @@ class _InterruptingDeliveryTracker(FakeTracker):
             self.interrupt_comment_once = False
             raise RuntimeError("fixture lost Issue comment receipt")
 
-    def set_state(self, repository: str, task_id: str, state: TaskState):
-        updated = super().set_state(repository, task_id, state)
+    def set_state(
+        self,
+        repository: str,
+        task_id: str,
+        state: TaskState,
+        *,
+        expected_state: TaskState | None = None,
+    ):
+        updated = super().set_state(
+            repository,
+            task_id,
+            state,
+            expected_state=expected_state,
+        )
         if self.interrupt_state_once:
             self.interrupt_state_once = False
             raise RuntimeError("fixture lost Issue label receipt")
@@ -363,6 +375,33 @@ class _InterruptingSlackPublisher:
 
 
 class SshControlSweepTests(unittest.TestCase):
+    def test_state_projection_preserves_concurrent_discard(self) -> None:
+        tracker = FakeTracker()
+        stale = replace(
+            claimed_task(),
+            state=TaskState.DISPATCHING,
+            labels=("agent:dispatching", "exec:ssh-cli", "priority:p1"),
+        )
+        tracker.tasks[stale.task_id] = replace(
+            stale,
+            state=TaskState.DISCARD,
+            labels=("agent:discard", "exec:ssh-cli", "priority:p1"),
+            state_approved_by="alice",
+            state_approval_event_id="7001",
+            state_approved_at="2026-08-24T18:34:00Z",
+        )
+
+        observed = self._sweep(
+            tracker,
+            _RecordingSource(),
+        )._set_task_state(stale, TaskState.RUNNING)
+
+        self.assertIs(TaskState.DISCARD, observed.state)
+        self.assertEqual(
+            ["get_task"],
+            [call.method for call in tracker.calls],
+        )
+
     def test_trusted_discard_closes_exact_pr_then_issue_without_extra_labels(self) -> None:
         tracker = _LostTerminalCloseReceiptTracker(pull_request=True)
         source = _RecordingSource()

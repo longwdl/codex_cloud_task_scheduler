@@ -130,7 +130,14 @@ class Tracker(Protocol):
         approved_by: tuple[str, ...] | None = None,
     ) -> ClaimResult: ...
 
-    def set_state(self, repository: str, task_id: str, state: TaskState) -> TrackerTask: ...
+    def set_state(
+        self,
+        repository: str,
+        task_id: str,
+        state: TaskState,
+        *,
+        expected_state: TaskState | None = None,
+    ) -> TrackerTask: ...
 
     def close_task(
         self,

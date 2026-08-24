@@ -70,6 +70,40 @@ def pull_request(
 
 
 class GitHubCliTrackerTests(unittest.TestCase):
+    def test_conditional_state_update_preserves_concurrent_discard(self) -> None:
+        discarded = issue(
+            labels=[label("agent:discard"), label("exec:ssh-cli")]
+        )
+        event = {
+            "id": 987,
+            "event": "labeled",
+            "created_at": "2026-08-24T18:34:00Z",
+            "label": {"name": "agent:discard"},
+            "actor": {"login": "alice"},
+        }
+        with patch(
+            "codex_dispatcher.trackers.github_cli.run_command",
+            side_effect=[
+                result(discarded),
+                json_lines_result(),
+                json_lines_result(event),
+                result(discarded),
+            ],
+        ) as runner:
+            observed = GitHubCliTracker(gh_path=GH).set_state(
+                REPOSITORY,
+                "12",
+                TaskState.RUNNING,
+                expected_state=TaskState.DISPATCHING,
+            )
+
+        self.assertIs(TaskState.DISCARD, observed.state)
+        self.assertEqual("alice", observed.state_approved_by)
+        self.assertEqual(4, runner.call_count)
+        self.assertFalse(
+            any("PATCH" in call.args[0] for call in runner.call_args_list)
+        )
+
     def test_open_issue_empty_state_reason_is_normalized_but_closed_requires_reason(self) -> None:
         open_issue = issue()
         open_issue["stateReason"] = ""

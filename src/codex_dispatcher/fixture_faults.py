@@ -904,7 +904,12 @@ class _FixtureFaultTracker:
         )
 
     def set_state(
-        self, repository: str, task_id: str, state: TaskState
+        self,
+        repository: str,
+        task_id: str,
+        state: TaskState,
+        *,
+        expected_state: TaskState | None = None,
     ) -> TrackerTask:
         self._injection.require_target(repository, task_id)
         allowed = {
@@ -943,7 +948,12 @@ class _FixtureFaultTracker:
                 raise FixtureFaultRejected(
                     "completion label fault was not preceded by exact comment recovery"
                 )
-            updated = self._delegate.set_state(repository, task_id, state)
+            updated = self._delegate.set_state(
+                repository,
+                task_id,
+                state,
+                expected_state=expected_state,
+            )
             if (
                 updated.repository != self._injection.repository
                 or updated.issue_number != self._injection.issue_number
@@ -958,7 +968,12 @@ class _FixtureFaultTracker:
             self._injection.discard_receipt(
                 FixtureFaultPoint.COMPLETION_LABEL_RECEIPT
             )
-        return self._delegate.set_state(repository, task_id, state)
+        return self._delegate.set_state(
+            repository,
+            task_id,
+            state,
+            expected_state=expected_state,
+        )
 
     def close_task(
         self,
