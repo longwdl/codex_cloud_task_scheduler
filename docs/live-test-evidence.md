@@ -3,6 +3,37 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Dedicated Slack system channel release — 2026-08-24
+
+Release `50b7dfbc93a332cb3a6c6798e25ec0e4c1f83bf4` separated Slack routing into the
+WorkItem/Issue channel `C0BR2D0MS8Y` and lifecycle-health system channel `C0BS3LPG43G`. The strict
+configuration rejects the retired single `channel_id` field and rejects identical Issue/system
+IDs. WorkItem root/result delivery reads only `issue_channel_id`; health alert/recovery delivery
+reads only `system_channel_id`.
+
+The transactional Runner-first/Control-second release receipt is
+`/opt/codex-dispatcher/release-receipts/50b7dfbc93a332cb3a6c6798e25ec0e4c1f83bf4.json`, with archive
+SHA-256 `002102b2d88ac9cbad06299914a56f66b341f37bb0c089e67f12ad05c47bab0b`.
+Both hosts ran 586 tests successfully. The live main config SHA-256 is
+`3a23b7fbcff3707795dedbd01369914fd4ff378e94f3897340fafe54b37c976f`; the isolated
+higher-value config SHA-256 is
+`3c1375a0d4425da72a3309d3dd94eeb84798329547c74608c52d080d808c95d4`. Both are
+`root:codex-dispatcher` mode `0640`, contain only the two current channel IDs, and contain neither
+the retired Slack field nor `cloud_environment_id`. Exact prior bytes were retained in protected
+SHA-bound backups; the higher-value change also has a permanent config receipt.
+
+The existing bot lacked the optional channel-inspection scope, so read-only `conversations.info`
+returned `missing_scope` for both channels. No scope was added. Instead, the bounded idempotency
+fixture `bce38c54-c931-4a65-8466-c479ccf8a8f3` sent the same client message ID twice to the system
+channel and recovered one identical receipt. Exactly one visible canary is expected at
+[`1787551827.250909`](https://codex-nt54555.slack.com/archives/C0BS3LPG43G/p1787551827250909).
+
+Post-release SSH preflight was `idle`. The required recovery-first sweep was also `idle`, performed
+95 GitHub reads, zero writes, and zero failures. SQLite integrity was `ok` with zero foreign-key
+violations and no active health episode. Lifecycle health reported zero alerts, zero active Turns,
+Runner capacity admissible with 74,400,157,696 bytes available, and Slack notification action
+`healthy`. All four Control timers and the Runner capacity timer were active after handoff.
+
 ## Higher-value attack and recovery canary — 2026-08-24
 
 The fixed private repository was
