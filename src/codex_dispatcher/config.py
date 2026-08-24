@@ -42,7 +42,6 @@ class ToolPins:
 class RepositoryConfig:
     slug: str
     base_branch: str
-    cloud_environment_id: str
     max_active: int
     allowed_paths: tuple[str, ...]
     denied_paths: tuple[str, ...]
@@ -91,7 +90,7 @@ class SlackRuntimeConfig:
 
 @dataclass(frozen=True, slots=True)
 class SessionRuntimeConfig:
-    """Explicit requested v2 policy; absence keeps the legacy v1 runtime."""
+    """Explicit protocol-v2 session policy required by the protected SSH runtime."""
 
     protocol_version: int
     agent_policy_digest: str
@@ -276,7 +275,7 @@ def load_config(path: Path) -> Config:
     parsed_repositories: list[RepositoryConfig] = []
     required_repository_keys = frozenset(
         {
-            "slug", "base_branch", "cloud_environment_id", "max_active", "allowed_paths",
+            "slug", "base_branch", "max_active", "allowed_paths",
             "denied_paths", "maintainers", "required_checks",
         }
     )
@@ -308,9 +307,6 @@ def load_config(path: Path) -> Config:
             RepositoryConfig(
                 slug=slug,
                 base_branch=_string(repository["base_branch"], f"{item_path}.base_branch"),
-                cloud_environment_id=_string(
-                    repository["cloud_environment_id"], f"{item_path}.cloud_environment_id"
-                ),
                 max_active=_positive_int(repository["max_active"], f"{item_path}.max_active"),
                 allowed_paths=_repo_paths(
                     repository["allowed_paths"],

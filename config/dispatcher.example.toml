@@ -39,27 +39,23 @@ terminal_branch_retention_seconds = 2592000
 # quoted RFC 3339 UTC timestamp is never selected by configured branch retention.
 # terminal_branch_retention_cutover_at = "2026-08-23T19:29:16.047801Z"
 
-# Protocol v2 session generations are disabled when this table is absent.
-# Keep it commented until the matching Control Host and Runner v2 runtime wiring
-# has been deployed and verified. These values are an explicit policy request;
-# merely upgrading the dispatcher must not enable rotation or incremental prompts.
-# Once v2 WorkItems exist, do not remove this table as a standalone rollback;
-# restore the matching pre-activation database and Runner configuration instead.
-# [session_runtime]
-# protocol_version = 2
-# agent_policy_digest = "replace-with-reviewed-lowercase-sha256-policy-digest"
-# max_turns_per_session = 4
-# rotate_after_input_tokens = 120000
-# rotate_after_session_age_seconds = 14400
-# rotate_before_final_audit = true # require a fresh Audit generation before review
-# use_incremental_resume_prompts = true
-# max_session_generations = 3
-# max_total_turns = 10
-# max_no_progress_turns = 2
-# max_repair_cycles = 3
-# max_audit_cycles = 3
-# max_total_tokens = 1000000
-# max_work_item_age_seconds = 604800
+# The protected SSH runtime requires protocol v2. Replace the example digest
+# with the reviewed Runner agent-policy digest before deployment.
+[session_runtime]
+protocol_version = 2
+agent_policy_digest = "0000000000000000000000000000000000000000000000000000000000000000"
+max_turns_per_session = 4
+rotate_after_input_tokens = 120000
+rotate_after_session_age_seconds = 14400
+rotate_before_final_audit = true
+use_incremental_resume_prompts = true
+max_session_generations = 3
+max_total_turns = 10
+max_no_progress_turns = 2
+max_repair_cycles = 3
+max_audit_cycles = 3
+max_total_tokens = 1000000
+max_work_item_age_seconds = 604800
 
 # Do not uncomment this table until a controlled live fixture proves that the
 # target Slack app/workspace returns the original receipt for an exact retry.
@@ -79,7 +75,6 @@ target_readback_profiles = ["fixture-exact-v1"]
 slug = "longwdl/codex-dispatcher-fixture"
 repository_class = "fixture"
 base_branch = "main"
-cloud_environment_id = "6a7d9f7b8784819183c5c2e3691466e7"
 max_active = 1
 allowed_paths = ["README.md"]
 denied_paths = []

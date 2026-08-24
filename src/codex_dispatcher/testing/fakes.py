@@ -3,17 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any
 
-from codex_dispatcher.executors.base import (
-    ApplyResult,
-    DiffResult,
-    PreflightResult,
-    RemoteRun,
-    RunStatus,
-    SubmissionRequest,
-)
 from codex_dispatcher.trackers.base import (
     ClaimResult,
     DraftPullRequestRequest,
@@ -196,44 +187,3 @@ class FakeTracker(_ConfigurableFake):
         if isinstance(outcome, PullRequest):
             self.pull_requests[(request.repository, request.branch_name)] = outcome
         return outcome  # type: ignore[return-value]
-
-
-class FakeExecutor(_ConfigurableFake):
-    """Configurable executor fake whose default remote status is fail-closed."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.runs: tuple[RemoteRun, ...] = ()
-
-    def preflight(self, environment_id: str) -> PreflightResult:
-        self._record("preflight", environment_id)
-        return self._outcome("preflight", PreflightResult(True))  # type: ignore[return-value]
-
-    def submit(self, request: SubmissionRequest) -> RemoteRun:
-        self._record("submit", request)
-        default = RemoteRun(
-            "", request.local_run_id, request.environment_id, RunStatus.UNKNOWN, request.branch_name
-        )
-        return self._outcome("submit", default)  # type: ignore[return-value]
-
-    def list_runs(self, environment_id: str) -> tuple[RemoteRun, ...]:
-        self._record("list_runs", environment_id)
-        default = tuple(run for run in self.runs if run.environment_id == environment_id)
-        return self._outcome("list_runs", default)  # type: ignore[return-value]
-
-    def reconcile(self, external_task_id: str) -> RemoteRun | None:
-        self._record("reconcile", external_task_id)
-        default = next(
-            (run for run in self.runs if run.external_task_id == external_task_id), None
-        )
-        return self._outcome("reconcile", default)  # type: ignore[return-value]
-
-    def fetch_diff(self, external_task_id: str) -> DiffResult:
-        self._record("fetch_diff", external_task_id)
-        default = DiffResult(external_task_id, False)
-        return self._outcome("fetch_diff", default)  # type: ignore[return-value]
-
-    def apply(self, external_task_id: str, worktree: Path) -> ApplyResult:
-        self._record("apply", external_task_id, worktree)
-        default = ApplyResult(external_task_id, False)
-        return self._outcome("apply", default)  # type: ignore[return-value]

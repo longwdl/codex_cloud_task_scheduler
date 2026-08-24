@@ -36,7 +36,7 @@ def issue(*, number: int = 12, labels: object | None = None) -> dict[str, object
         "number": number,
         "title": "Safe task",
         "body": "Task body",
-        "labels": labels if labels is not None else [label("agent:ready"), label("exec:cloud")],
+        "labels": labels if labels is not None else [label("agent:ready"), label("exec:ssh-cli")],
         "createdAt": "2026-08-13T00:00:00Z",
         "updatedAt": "2026-08-13T00:05:00Z",
         "state": "OPEN",
@@ -383,7 +383,7 @@ class GitHubCliTrackerTests(unittest.TestCase):
             labels=[
                 label("agent:ready"),
                 label("agent:blocked"),
-                label("exec:cloud"),
+                label("exec:ssh-cli"),
             ]
         )
         with patch(
@@ -445,7 +445,7 @@ class GitHubCliTrackerTests(unittest.TestCase):
 
     def test_claim_rereads_updates_and_verifies_state(self) -> None:
         ready = issue()
-        dispatching = issue(labels=[label("agent:dispatching"), label("exec:cloud")])
+        dispatching = issue(labels=[label("agent:dispatching"), label("exec:ssh-cli")])
         with patch(
             "codex_dispatcher.trackers.github_cli.run_command",
             side_effect=[
@@ -473,10 +473,10 @@ class GitHubCliTrackerTests(unittest.TestCase):
         self.assertEqual((GH, "api", "--method", "PATCH"), edit_argv[:4])
         self.assertNotIn("labels[]=agent:ready", edit_argv)
         self.assertIn("labels[]=agent:dispatching", edit_argv)
-        self.assertIn("labels[]=exec:cloud", edit_argv)
+        self.assertIn("labels[]=exec:ssh-cli", edit_argv)
 
     def test_claim_does_not_write_when_task_is_not_ready(self) -> None:
-        paused = issue(labels=[label("agent:paused"), label("exec:cloud")])
+        paused = issue(labels=[label("agent:paused"), label("exec:ssh-cli")])
         with patch(
             "codex_dispatcher.trackers.github_cli.run_command",
             side_effect=[result(paused), json_lines_result()],

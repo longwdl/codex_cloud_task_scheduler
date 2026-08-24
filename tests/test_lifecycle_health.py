@@ -53,7 +53,7 @@ def _config(database: Path) -> Config:
         tools=ToolPins("git", "gh", "codex", "ssh"),
         repositories=(
             RepositoryConfig(
-                "owner/repo", "main", "env", 1, ("README.md",), (), ("owner",), ("ci",)
+                "owner/repo", "main", 1, ("README.md",), (), ("owner",), ("ci",)
             ),
         ),
         ssh_runtime=SshRuntimeConfig(

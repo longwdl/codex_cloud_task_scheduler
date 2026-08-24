@@ -828,6 +828,8 @@ def _require_runtime(config: Config) -> SshRuntimeConfig:
     runtime = config.ssh_runtime
     if runtime is None:
         raise SshRuntimeError("ssh_runtime configuration is required")
+    if config.session_runtime is None:
+        raise SshRuntimeError("protocol-v2 session_runtime configuration is required")
     if config.scheduler.global_max_active != 1 or any(
         repository.max_active != 1 for repository in config.repositories
     ):

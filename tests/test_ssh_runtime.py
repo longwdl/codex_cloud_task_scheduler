@@ -7,7 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from codex_dispatcher.config import SlackRuntimeConfig, SshRuntimeConfig
+from codex_dispatcher.config import (
+    SessionRuntimeConfig,
+    SlackRuntimeConfig,
+    SshRuntimeConfig,
+)
 from codex_dispatcher.contract import ContractCheck
 from codex_dispatcher.control_sweep import (
     ControlSweepResult,
@@ -93,6 +97,22 @@ class SshRuntimeTests(unittest.TestCase):
                 workspace_root=self.root / "workspace",
             ),
             ssh_runtime=runtime,
+            session_runtime=SessionRuntimeConfig(
+                protocol_version=2,
+                agent_policy_digest="a" * 64,
+                max_turns_per_session=4,
+                rotate_after_input_tokens=120000,
+                rotate_after_session_age_seconds=14400,
+                rotate_before_final_audit=True,
+                use_incremental_resume_prompts=True,
+                max_session_generations=3,
+                max_total_turns=10,
+                max_no_progress_turns=2,
+                max_repair_cycles=3,
+                max_audit_cycles=3,
+                max_total_tokens=1000000,
+                max_work_item_age_seconds=604800,
+            ),
         )
         self.store = StateStore(self.config.scheduler.database_path)
         self.store.migrate()
@@ -311,6 +331,7 @@ class SshRuntimeTests(unittest.TestCase):
     def test_runtime_rejects_missing_settings_concurrency_and_weak_tools(self) -> None:
         for config, message in (
             (replace(self.config, ssh_runtime=None), "configuration is required"),
+            (replace(self.config, session_runtime=None), "session_runtime"),
             (
                 replace(
                     self.config,

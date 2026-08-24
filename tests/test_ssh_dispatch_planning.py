@@ -396,7 +396,7 @@ class SshDispatchPlanningTests(unittest.TestCase):
                 state=TaskState.READY,
                 labels=("agent:ready", "exec:ssh-cli"),
             ),
-            replace(claimed_task(), labels=("agent:dispatching", "exec:cloud")),
+            replace(claimed_task(), labels=("agent:dispatching", "exec:other")),
             replace(claimed_task(), updated_at=None),
         )
         for task in invalid_tasks:

@@ -33,7 +33,7 @@ class SshPreflightPlanTests(unittest.TestCase):
     def test_selects_one_ssh_candidate_after_recovery_is_idle(self) -> None:
         tracker = FakeTracker()
         tracker.ready_tasks = (
-            make_task(1, executor_label="exec:cloud"),
+            make_task(1, executor_label="exec:other"),
             make_task(2, executor_label="exec:ssh-cli"),
         )
 

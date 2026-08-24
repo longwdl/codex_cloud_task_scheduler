@@ -1,266 +1,126 @@
-# Codex SSH CLI Task Scheduler
+# Codex SSH CLI Task Dispatcher
 
-A small, fail-closed control-plane service that turns explicitly approved GitHub issues into
-persistent Codex CLI sessions on a dedicated Linux runner and delivers checkpoint commits as draft
-pull requests.
+This repository implements a fail-closed, unattended path from a reviewed GitHub Issue to an
+isolated Codex CLI WorkItem and a Draft Pull Request.
 
-The project is intentionally not a task board, deployment system, or long-running web service.
-GitHub is the only human-input and project view. SQLite stores recoverable work-item and turn state.
-Slack is an outbound-only execution view. A single Linux dispatcher performs deterministic
-reconciliation through restricted SSH.
+The deployed architecture has one execution path: a Linux Control Host coordinates a separate
+Linux Runner over a fixed SSH protocol. Codex runs only inside a rootless Docker container on the
+Runner. The Dispatcher never merges, releases, deploys, or executes Issue-provided shell commands
+on the Control Host.
 
-## Current status
+## Current boundary
 
-The former Codex Cloud design is retained only as historical compatibility code. The deployed
-Fixture target is the remote Linux Codex CLI executor, and the implementation now includes:
+- One GitHub Issue maps to one durable WorkItem, task branch, Runner directory, and Slack thread.
+- A WorkItem may have several Turns and several bounded SessionGenerations.
+- The primary Runner agent is Sol. It may select only configured direct-child agent profiles; the
+  Runner records metadata-only delegation evidence and rejects policy drift.
+- Only `exec:ssh-cli` is an executable Issue label.
+- Repository admission is an explicit class/profile matrix. The ordinary runtime currently admits
+  only the reviewed Fixture profile. Higher-value admission remains hard false; its separate manual
+  canary cannot widen normal admission.
+- SQLite migrations 1 through 20 are the durable ledger. Historical result and generation shapes
+  remain readable only where disaster recovery needs them; no current workflow creates old-format
+  rows.
 
-- strict configuration parsing;
-- the legacy run state machine and additive SQLite persistence;
-- hardened local Git mirror and task-worktree preparation;
-- issue task-spec parsing and immutable prompt snapshots;
-- redaction and safe subprocess execution;
-- stable WorkItem/Turn identity and persistence;
-- strict Runner and Publisher request contracts;
-- Codex JSONL session binding and resume planning;
-- deterministic task-directory and branch identity;
-- bounded source/result Git bundle transfer and quarantine verification;
-- protected trusted-mirror refresh of one fixed GitHub base ref without persisted remotes, with one
-  bounded read-only fetch retry inside the original timeout budget;
-- fixed-lease task-branch publication with exact-SHA read-back recovery;
-- fixed OpenSSH framing and an absolute-path `codex-runner-v1` forced-command service;
-- persistent Runner workspaces and idempotent first/resume Turn execution;
-- a recovery-first, process-locked Control Host sweep with stable Issue/comment snapshots and
-  idempotent Publisher checkpoint completion;
-- an exact-HEAD completion gate that combines configured GitHub Actions checks, the verified
-  publication ledger, and structured Issue acceptance predicates before a completed Turn can enter
-  review;
-- mandatory fresh Audit generations when configured, with an independent audit contract and the
-  same trusted completion gate after a read-only Audit gap is repaired by a separate CI_REPAIR
-  generation;
-- immutable crash-recoverable follow-up intents for Agent checkpoints, exact code-attributable CI
-  failures, and Audit gaps, bounded by repair/audit/token/age/no-progress budgets;
-- fail-closed context/compaction failure handling that rotates only after the Runner proves a clean
-  worktree at the unchanged input HEAD, while dirty or moved-HEAD failures block the generation;
-- strict same-repository Draft PR lookup/creation, branch read-back, SQLite binding, and ordered
-  Issue status projection with lost-receipt recovery;
-- exact merged-PR/head reconciliation that durably closes the WorkItem before projecting
-  `agent:completed`, without merging or closing the Issue itself;
-- a read-only `ssh-preflight` that verifies pinned Control Host tools, plans recovery from a
-  migrated disposable SQLite snapshot, and selects only `exec:ssh-cli` Issues through GitHub reads;
-- a double-opt-in `ssh-run-once` entry point that assembles only fixed GitHub, mirror, and SSH ports;
-- separate triple-opt-in, hard-coded Fixture entries that can discard one successful Runner,
-  Publisher, Draft PR, or Issue-comment receipt, or kill one exact post-claim child process,
-  without changing the normal runtime path;
-- a hashed Slack outbox, unique root/thread binding, redacted terminal reports, and offline
-  lost-receipt recovery behind an idempotent outbound publisher port;
-- a standard-library Slack Web API publisher pinned to `chat.postMessage` and
-  `chat.getPermalink`, with deterministic `client_msg_id`, bounded responses, no redirects,
-  output escaping, and separate runtime/token opt-ins.
-- a fixed, argument-free Linux Control Host entrypoint plus a hardened systemd oneshot/timer and
-  root-only environment-file template; live installation and activation remain operator actions.
-- a credential-free, network-isolated daily systemd job that atomically publishes an
-  integrity-checked SQLite Online Backup, preserves the oldest migration anchor plus the newest
-  seven verified copies, and prunes only validated excess backups.
-- a credential-free, network-isolated weekly restore drill that restores the newest backup into a
-  temporary database and verifies integrity, foreign keys, and the migration ledger before cleanup.
-- 15-minute health timers for Control lifecycle/systemd backlog and Runner capacity admission;
-  Control durably deduplicates outbound-only Slack alert/recovery notifications, while neither
-  monitor performs automated repair.
-- a transactional two-host release tool with a read-only plan, durable schema-v2 phase receipts,
-  bounded natural quiescence, exact optional configuration rollback, lost-response reconciliation,
-  Runner-before-Control activation, and a manually observed sweep before restarting timers;
-- a durable daily terminal-audit cursor plus schema-17 per-sweep GitHub metrics shared by the
-  tracker and Actions importer, including read/write/failure counts, latency, terminal outcome, and
-  rate-limit evidence; health alerts on stale/missing evidence instead of trusting process stdout;
-- an explicit schema-18 inactive-Turn abandonment ledger and double-gated Control command; Runner
-  `STOP` is abandonment-only, repeats exact container inspection under the global Turn lock, and
-  never invokes Docker stop, kill, or remove;
-- permanent open terminal Issues and exact-evidence task-branch reclamation after an explicitly
-  configured retention interval, with prepared/delete/absence receipts and health projection.
-- an isolated schema-18 disaster-recovery drill that restores the newest backup, validates the
-  exact two-host release receipt and Runner tombstones, reads back GitHub/Slack receipts, rebuilds
-  an empty Control application root, and records a scoped measured RTO without replacing live state;
-- exact Runner release/image inventory and two-stage reclamation with current/config/WorkItem/
-  rollback-reference protection, immutable plans, pre-delete reinspection, and permanent receipts;
-- a dedicated exact-target Fixture canary for terminal-branch delete receipt loss and absence
-  reconciliation without lowering the runtime retention policy.
-- a manual-only, exact Issue/node/base-SHA higher-value canary path for the isolated
-  `codex-dispatcher-fixture-2` repository; ordinary higher-value admission remains hard false while
-  the attack and recovery matrix in `docs/higher-value-canary.md` is incomplete.
+## Components
 
-The Runner path has now been exercised against the private Fixture through the real pinned SSH
-transport and Codex CLI 0.147.0 using ChatGPT login. A migrated Issue binding completed PREPARE,
-created one persistent session, and resumed that exact session on the same branch and directory;
-the read-only task produced no diff or publication checkpoint. The Runner on `s3` now
-uses the dedicated locked `codex-runner` account, root-owned release/configuration/tool inputs, an
-external root-owned authorized-key file, and an sshd-enforced fixed command. Existing WorkItems and
-sessions were retained and a completed Turn was read back through STATUS after migration. It now
-executes configured Fixture Turns in rootless per-WorkItem containers with bounded resources,
-storage, mounts, session home, and proxy-only egress.
-The same host account is now forced through a loopback-only Squid CONNECT proxy plus a dedicated
-nftables OUTPUT table. Live probes proved exact OpenAI-domain allow, public-domain deny, direct
-TCP/DNS/UDP and private/metadata denial, metadata-only audit, fail-closed restart, and safe log
-rotation. Container-visible routing, cross-container denial, per-WorkItem ENOSPC/remount behavior,
-and the fixed 8 GiB disk admission boundary have also been exercised. After the final schema-18
-runtime release, credential-free Docker-daemon and host restart, remount, proxy fail-closed, direct
-network denial, and isolated login-status probes were repeated successfully. The auth seed stayed
-unchanged. Every START and RESUME must now pass `codex login status` in the exact WorkItem home;
-invalid authentication blocks before Codex starts and is never blindly retried. Token refresh is
-Codex-managed rather than a separate Dispatcher admission gate. Higher-value repositories remain
-prohibited: schema 20 records class-specific recovery and exact target-readback evidence, but its
-admission row stays hard-false pending dedicated live acceptance in `deploy/runner/DOCKER.md`.
-The Fixture-only Dispatcher, backup, restore-drill, health, and Runner-capacity timers are enabled
-on the dedicated hosts. This activation does not admit another repository class.
+```text
+GitHub Issue and comments
+          |
+          v
+Control Host
+  admission -> recovery-first planner -> SQLite -> Publisher -> GitHub/Slack
+          |
+          | fixed SSH protocol v2
+          v
+Runner Host
+  registry + ext4 image + generation auth/home -> rootless Docker -> Codex CLI
+```
 
-The write-enabled dependency assembly has now completed one bounded happy-path run against Fixture
-Issue `#2`: it claimed one SSH-labelled Issue, created one persistent Codex session, published the
-exact checkpoint SHA to the deterministic task branch, opened one Draft PR, projected the Issue to
-`agent:review`, and passed the Fixture GitHub Actions workflow. Read-back confirmed that `main` did
-not move. A second write-enabled sweep returned `idle`; SQLite, Issue, PR, refs, and the single CI run
-remained unchanged, so it did not create another Turn, session, push, comment, PR, or workflow run.
-A second Fixture Issue has now completed controlled live Publisher, Draft PR, and Issue-comment
-receipt loss. Recovery retained one WorkItem, session, Turn, branch, Draft PR, and status comment,
-left `main` unchanged, and passed the exact-SHA Fixture workflow. That run exposed and fixed a
-recovery-order defect for a terminal local WorkItem whose Issue was still `agent:running`. The real
-Slack HTTP publisher is implemented and wired behind strict optional configuration. A controlled
-live fixture against the private project channel proved that an exact `client_msg_id` retry returned
-the original receipt and left one visible message; normal runtime still requires the separate
-configuration assertion, token, and write opt-in. A subsequent normal end-to-end Fixture produced
-one WorkItem/Turn/session, one Slack root/result thread, one Draft PR, and one successful Actions run;
-an immediate repeated sweep was idle. Merge and production deployment remain absent.
-Existing Codex Cloud adapter code is retained only during migration; Cloud writes remain disabled
-and are not part of the target architecture.
+The Control Host owns repository policy, GitHub and Slack credentials, the trusted mirror,
+quarantine, Publisher, SQLite, backups, health checks, and release receipts. The Runner receives a
+self-contained exact-base bundle and metadata-bound requests. It has no GitHub write credential,
+no host Docker socket inside the Turn container, and no access to another WorkItem.
 
-A separate two-Turn Fixture has also proven the reviewed `needs_input → /codex-context → ready`
-lifecycle through the real GitHub adapter and SSH Runner. The follow-up reused the original WorkItem,
-branch, Runner directory, and Codex session, created only one Draft PR, and passed Fixture CI. This
-run also corrected the Fixture's legacy hyphenated needs-input label; canonical state labels use
-`agent:needs_input`.
+See [Architecture](docs/architecture.md) for invariants and
+[Implementation, deployment, and acceptance](docs/implementation-deployment-test-plan.md) for the
+operational sequence.
 
-AC-047's recorded-publication recovery has also been exercised against Fixture Issue `#8`. A
-fixture-only hook stopped after the exact published SHA was committed but before Turn
-terminalization; guarded recovery then completed without calling the Runner or Publisher again,
-created one Draft PR, and passed Fixture CI. That deterministic exception injection alone did not
-cover an operating-system process kill or a real SSH disconnect; those boundaries were exercised
-separately below.
+## Normal lifecycle
 
-Fixture Issue `#10` subsequently covered the operating-system process boundary. A parent accepted
-an identity-bound private-pipe handshake only after the Issue claim, sent `SIGKILL` to that exact
-child, and proved that no WorkItem, Turn, or Runner call existed. Read-only preflight selected
-`recover_orphan_claim`; after Git transport recovered, the ordinary dispatcher path created one
-WorkItem, Turn, session, task branch, and Draft PR `#11`, passed Fixture CI, and returned idle on an
-immediate repeated sweep.
+1. `ssh-preflight` performs exact tool/config/database checks and plans recovery before new work.
+2. A maintainer-reviewed `agent:ready` Issue is admitted only when repository class, recovery
+   profile, target-readback profile, immutable policy digest, paths, checks, and approver agree.
+3. The Control Host freezes Issue/comment/task-spec evidence and creates or reuses the single
+   WorkItem.
+4. The Runner verifies and prepares an exact source bundle inside the WorkItem's bounded image.
+5. A Turn starts or resumes the bound generation. `codex login status` must pass immediately before
+   every START/RESUME.
+6. The Runner validates structured AgentResult, trusted Git state, resource use, and delegation
+   evidence before returning a checkpoint.
+7. The Publisher verifies the exported bundle, changed paths, exact HEAD, and task branch before
+   pushing and creating or recovering one Draft PR.
+8. The completion gate imports exact-HEAD Actions evidence, evaluates structured acceptance
+   criteria, and requires a fresh Audit generation when configured.
+9. A passed WorkItem enters `review`. Only an exact maintainer merge may project `completed`;
+   `agent:discard` records an immutable disposition instead.
+10. Retention may archive only an eligible completed/discarded WorkItem through an exact Runner
+    tombstone. Branch cleanup and release/image reclamation use separate exact receipts.
 
-Fixture Issue `#12` covered the ambiguous START receipt. The first guarded stage discarded only a
-valid identity-matching START reply and left one `reconciling` Turn with no local session binding.
-The second stage rejected PREPARE/START/RESUME before delegation and completed through exactly
-`STATUS` then `EXPORT`, reusing the same WorkItem and Turn. Draft PR `#13` passed Fixture CI and a
-repeated sweep returned idle. This proves the protocol recovery path, not a physical network-cable
-or SSH-daemon failure.
+Ambiguous START, STATUS, publication, GitHub, Slack, archive, or external identity never causes a
+blind replay. It becomes an explicit recovery action or `blocked`.
 
-Fixture Issue `#14` then exercised a real OpenSSH client-process interruption. The guarded hook
-waited until the exact local WorkItem and Turn were durable, used a separate hook-free SSH
-connection to prove the Runner's durable executing record, freshly revalidated the primary
-process's immutable argv and PID/PGID/SID identity, and sent `SIGKILL` only to that process group.
-The same Turn remained `reconciling`; guarded recovery used only `STATUS` then `EXPORT`, reusing the
-same WorkItem, Turn, branch, Runner directory, and Codex session. Draft PR `#15` and its single
-Fixture Actions run passed at the exact published SHA; before human merge, `main` did not move and
-two ordinary write-enabled sweeps returned idle. After explicit review and merge, the normal
-completion path advanced `main` to merge commit `790c3e0b361f727863e3e6d86ee6e2dce16b4faf`, committed
-the local tombstone, updated the fixed comment, and only then applied `agent:completed`; the Issue
-stayed open, the task branch remained, and a repeated sweep was idle. No SSH daemon, firewall,
-route, or unrelated connection was modified.
+## Runtime commands
 
-Merged-PR completion is implemented and live-verified: after the maintainer reviewed, marked ready,
-and merged Fixture PR `#13`, the dispatcher required the bound PR at the exact persisted head SHA,
-wrote the irreversible local `completed` tombstone first, then idempotently updated the fixed Issue
-comment and finally `agent:completed`. It did not close the Issue, delete the task branch, or perform
-the merge itself; an immediate repeated sweep returned idle.
+Read-only planning and inspection:
 
-After explicit operator authorization and exact-head merge of Fixture PR `#19`, Issue `#18` also
-completed both GitHub projection receipt-loss windows. The first fault persisted the local completed
-tombstone before discarding the successful fixed-comment response; the second retried that comment,
-read back `agent:completed`, and then discarded the label response. Final preflight and two ordinary
-sweeps were idle, with the original WorkItem, Turn, session, branch, and PR preserved.
+```bash
+PYTHONPATH=src python3 -m codex_dispatcher doctor --config config/dispatcher.example.toml --json
+PYTHONPATH=src python3 -m codex_dispatcher status --database /path/to/state.db --json
+PYTHONPATH=src python3 -m codex_dispatcher ssh-preflight --config /etc/codex-dispatcher/config.toml --json
+PYTHONPATH=src python3 -m codex_dispatcher lifecycle-health --config /etc/codex-dispatcher/config.toml --json
+```
 
-Current SSH candidate and recovery planning is exposed through `ssh-preflight`. It checks Git, gh,
-and OpenSSH versions, reads GitHub, and migrates only a temporary copy of SQLite. It does not alter
-the configured database, claim Issues, mutate labels, fetch or push Git, invoke a Runner, or create a
-pull request. Its result is a point-in-time snapshot and never authorizes a write; `ssh-run-once`
-revalidates state while holding the Dispatcher lock. The older `run-once --dry-run` remains
-Cloud-labelled migration code.
+The write sweep requires both CLI and environment opt-in and is normally invoked only by the fixed
+systemd wrapper:
 
-The fault entry is not a production command and is not exposed through the normal CLI. It accepts
-only `longwdl/codex-dispatcher-fixture`, its exact README-only repository contract, and one exact
-Issue/stage selected by read-only preflight. It requires a third repository-name environment opt-in
-and creates a private SQLite online backup before entering the normal process-locked sweep. Its SSH
-transport fault receives only the exact spawned client capability and cannot kill by name; it must
-prove durable remote acceptance through a second read-only STATUS connection before an exact
-process-group termination is authorized.
+```bash
+CODEX_DISPATCHER_ENABLE_SSH_WRITES=1 \
+PYTHONPATH=src python3 -m codex_dispatcher ssh-run-once \
+  --config /etc/codex-dispatcher/config.toml --apply --json
+```
 
-## Requirements
+Do not copy this into an Issue or make it an Issue-controlled argument. Recovery, abandonment,
+higher-value canary, release, rollback, and reclamation commands have additional independent gates.
 
-- Python 3.12 or newer
-- Git
+## Verification
 
-No runtime third-party Python dependency is currently required.
-
-## Verify
+Python 3.12 or newer and only the standard library are required.
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 PYTHONPATH=src python3 -m compileall -q src tests
+git diff --check
 ```
-
-Run the source-tree CLI without installing a package:
-
-```bash
-PYTHONPATH=src python3 -m codex_dispatcher --help
-PYTHONPATH=src python3 -m codex_dispatcher doctor \
-  --config config/dispatcher.example.toml --contract --json
-PYTHONPATH=src python3 -m codex_dispatcher run-once \
-  --dry-run --config config/dispatcher.example.toml --json
-```
-
-With a recognized GitHub token already present in the process environment, inspect one protected
-live SSH configuration without enabling writes:
-
-```bash
-PYTHONPATH=src python3 -m codex_dispatcher ssh-preflight \
-  --config /absolute/path/dispatcher.toml --json
-```
-
-The write-enabled SSH command is intentionally not part of routine offline verification. It requires
-both `--apply` and the exact environment opt-in `CODEX_DISPATCHER_ENABLE_SSH_WRITES=1`, plus an
-explicit recognized GitHub token. If `[slack_runtime]` is configured, it additionally requires
-`CODEX_DISPATCHER_ENABLE_SLACK_WRITES=1` and an `xoxb-` token in `SLACK_BOT_TOKEN`. Do not configure
-the Slack idempotency proof value before the controlled live fixture succeeds, and do not run the
-command merely to validate configuration. The fixture-only `slack-idempotency-fixture` entry point
-requires `--apply`, a canonical UUIDv4, the exact Workspace/channel IDs, and the separate ephemeral
-`CODEX_DISPATCHER_ENABLE_SLACK_FIXTURE_WRITES=1` gate; it must not be used as a routine health check.
-
-A build backend and wheel packaging are intentionally deferred until that tooling choice is
-approved; they are not needed for the offline core.
 
 ## Documentation
 
-- [Implementation, deployment, and acceptance plan](docs/implementation-deployment-test-plan.md)
+- [Architecture](docs/architecture.md)
+- [Development](docs/development.md)
+- [Implementation, deployment, and acceptance](docs/implementation-deployment-test-plan.md)
 - [Owner preparation checklist](docs/owner-preparation-checklist.md)
-- [Development notes](docs/development.md)
-- [Architecture baseline](docs/architecture.md)
-- [Live fixture test evidence](docs/live-test-evidence.md)
-- [Schema-18 disaster recovery and Runner reclamation](docs/schema18-disaster-recovery-and-runner-reclamation.md)
-- [Linux Control Host system service](deploy/systemd/README.md)
-- [Rootless Fixture Control Host user service](deploy/systemd-user/README.md)
-- [Linux Runner production ownership and SSH boundary](deploy/runner/README.md)
+- [Current-schema disaster recovery and exact reclamation](docs/schema18-disaster-recovery-and-runner-reclamation.md)
+- [Higher-value manual canary](docs/higher-value-canary.md)
+- [Live test evidence](docs/live-test-evidence.md)
 
-## Security model
+`docs/live-test-evidence.md` is append-only operational evidence. Historical sections describe the
+system that produced each receipt; they are not current interfaces or implementation requirements.
 
-The dispatcher processes untrusted issue text, Runner output, Git bundles, and agent-generated code.
-It must never execute issue-provided commands on its control host, expose GitHub write credentials
-to Codex, accept Slack as input, or interpret unknown external state as success. Ambiguous execution
-or publication remains active for bounded status/read-back reconciliation and is never treated as
-success by inference. An operator may terminalize a v2 execution only through
-`ssh-abandon-unknown-turn`: read-only `--plan` must obtain exact absent/stopped evidence, while
-`--apply` requires both SSH-write and Turn-abandon environment gates and makes Runner revalidate or
-replay its durable abandonment receipt before SQLite changes.
+## Explicit non-goals
+
+- automatic merge, release, deployment, or production-infrastructure mutation;
+- Slack inbound control;
+- concurrent Turns or multiple active Dispatchers;
+- production credentials, private-network access, or production self-hosted CI on the Runner;
+- treating Agent output as CI, acceptance, authorization, or audit fact;
+- broad cleanup such as `docker image prune` or unbound branch deletion.

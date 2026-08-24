@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable
 
 from codex_dispatcher.config import Config, RepositoryConfig
-from codex_dispatcher.domain import Run
 from codex_dispatcher.repository_admission import (
     HigherValueCanaryTarget,
     RepositoryRecoveryProfile,
@@ -20,7 +17,6 @@ from codex_dispatcher.task_spec import TaskSpecError, is_path_allowed, parse_tas
 from codex_dispatcher.trackers.base import TaskState, Tracker, TrackerTask
 
 
-CLOUD_EXECUTOR_LABEL = "exec:cloud"
 SSH_CLI_EXECUTOR_LABEL = "exec:ssh-cli"
 
 
@@ -44,19 +40,6 @@ class _Candidate:
     created_at: datetime
 
 
-def build_dry_run_plan(
-    config: Config, tracker: Tracker, active_runs: Iterable[Run] = ()
-) -> DryRunPlan:
-    """Select candidates using read methods only; never claim or mutate external state."""
-    return _build_dry_run_plan(
-        config,
-        tracker,
-        active_runs=active_runs,
-        executor_label=CLOUD_EXECUTOR_LABEL,
-        global_max_active=config.scheduler.global_max_active,
-    )
-
-
 def build_ssh_dry_run_plan(
     config: Config,
     tracker: Tracker,
@@ -66,10 +49,9 @@ def build_ssh_dry_run_plan(
     """Plan at most one SSH CLI candidate without mutating tracker or local state."""
     if type(active_turn_exists) is not bool:
         raise TypeError("active_turn_exists must be a bool")
-    return _build_dry_run_plan(
+    return _build_ssh_plan(
         config,
         tracker,
-        active_runs=(),
         executor_label=SSH_CLI_EXECUTOR_LABEL,
         global_max_active=0 if active_turn_exists else 1,
     )
@@ -87,28 +69,23 @@ def build_ssh_higher_value_canary_plan(
         raise TypeError("target must be a HigherValueCanaryTarget")
     if type(active_turn_exists) is not bool:
         raise TypeError("active_turn_exists must be a bool")
-    return _build_dry_run_plan(
+    return _build_ssh_plan(
         config,
         tracker,
-        active_runs=(),
         executor_label=SSH_CLI_EXECUTOR_LABEL,
         global_max_active=0 if active_turn_exists else 1,
         higher_value_canary_target=target,
     )
 
 
-def _build_dry_run_plan(
+def _build_ssh_plan(
     config: Config,
     tracker: Tracker,
     *,
-    active_runs: Iterable[Run],
     executor_label: str,
     global_max_active: int,
     higher_value_canary_target: HigherValueCanaryTarget | None = None,
 ) -> DryRunPlan:
-    active = tuple(run for run in active_runs if run.is_active)
-    active_by_repository = Counter(run.repository for run in active)
-    active_issues = {(run.repository, run.issue_number) for run in active}
     repository_configs = {repository.slug: repository for repository in config.repositories}
     candidates: list[_Candidate] = []
     rejected: list[Rejection] = []
@@ -144,18 +121,14 @@ def _build_dry_run_plan(
             candidate.task.repository,
         )
     )
-    remaining_global = max(global_max_active - len(active), 0)
+    remaining_global = global_max_active
     selected: list[TrackerTask] = []
     selected_repositories: set[str] = set()
     for candidate in candidates:
         task = candidate.task
         repository = repository_configs[task.repository]
-        if (task.repository, task.issue_number) in active_issues:
-            rejected.append(Rejection(task.repository, task.issue_number, "issue_already_active"))
-        elif remaining_global == 0:
+        if remaining_global == 0:
             rejected.append(Rejection(task.repository, task.issue_number, "global_capacity"))
-        elif active_by_repository[task.repository] >= repository.max_active:
-            rejected.append(Rejection(task.repository, task.issue_number, "repository_capacity"))
         elif task.repository in selected_repositories:
             rejected.append(
                 Rejection(task.repository, task.issue_number, "one_per_repository_sweep")

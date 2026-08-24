@@ -28,7 +28,6 @@ target_readback_profiles = ["fixture-exact-v1"]
 slug = "owner/repo"
 repository_class = "fixture"
 base_branch = "main"
-cloud_environment_id = "env-1"
 max_active = 1
 allowed_paths = ["src"]
 denied_paths = []
@@ -162,6 +161,13 @@ class ConfigTests(unittest.TestCase):
             self._load(
                 VALID.replace(
                     'repository_class = "fixture"', 'repository_class = "prod"'
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "unknown field"):
+            self._load(
+                VALID.replace(
+                    'base_branch = "main"',
+                    'base_branch = "main"\ncloud_environment_id = "retired"',
                 )
             )
 

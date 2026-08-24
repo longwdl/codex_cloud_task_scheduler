@@ -3,7 +3,7 @@
 ## Purpose
 
 This repository implements a fail-closed, unattended dispatcher from reviewed
-GitHub issues to Codex Cloud tasks and draft pull requests.
+GitHub Issues to isolated Codex SSH CLI WorkItems and Draft Pull Requests.
 
 ## Safety boundary
 

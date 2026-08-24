@@ -13,7 +13,6 @@ from codex_dispatcher.control_host_backup import (
     drill_latest_state_backup,
     rotate_state_backups,
 )
-from codex_dispatcher.domain import Run
 from codex_dispatcher.state_store import StateStore
 
 
@@ -27,16 +26,6 @@ class ControlHostBackupTests(unittest.TestCase):
         backups.mkdir(mode=0o700)
         with StateStore(database) as store:
             store.migrate()
-            store.create_run(
-                Run.new(
-                    run_id="backup-run",
-                    repository="owner/repo",
-                    issue_number=1,
-                    prompt_sha256="a" * 64,
-                    base_branch="main",
-                    cloud_environment_id="env-1",
-                )
-            )
         return database, backups
 
     def test_creates_one_atomic_mode_0600_integrity_checked_backup(self) -> None:
@@ -56,7 +45,10 @@ class ControlHostBackupTests(unittest.TestCase):
             self.assertEqual([], list(backups.glob(".state-backup-*")))
             with StateStore(result.path, read_only=True) as restored:
                 self.assertEqual("ok", restored.integrity_check())
-                self.assertIsNotNone(restored.get_run("backup-run"))
+                self.assertEqual(
+                    StateStore.supported_schema_migration_versions(),
+                    restored.schema_migration_versions(),
+                )
 
     def test_refuses_collision_weak_directory_and_naive_timestamp(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

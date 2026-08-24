@@ -74,7 +74,6 @@ target_readback_profiles = ["higher-value-exact-v1"]
 slug = "longwdl/codex-dispatcher-fixture-2"
 repository_class = "higher-value"
 base_branch = "main"
-cloud_environment_id = "higher-value-canary"
 max_active = 1
 allowed_paths = ["canary/target.txt"]
 denied_paths = []
