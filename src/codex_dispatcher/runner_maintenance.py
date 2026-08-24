@@ -75,10 +75,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise RunnerAssetReclamationError(
                         "requested recovery commit differs from Runner current"
                     )
-                owner_uid = WORK_ITEMS_ROOT.stat(follow_symlinks=False).st_uid
-                if owner_uid != ACTIVE_LOCK_PATH.stat(
-                    follow_symlinks=False
-                ).st_uid:
+                work_items_owner = WORK_ITEMS_ROOT.stat(follow_symlinks=False)
+                active_lock_owner = ACTIVE_LOCK_PATH.stat(follow_symlinks=False)
+                owner_uid = work_items_owner.st_uid
+                if (
+                    owner_uid != active_lock_owner.st_uid
+                    or work_items_owner.st_gid != active_lock_owner.st_gid
+                ):
                     raise RunnerAssetReclamationError(
                         "Runner evidence and active lock owners differ"
                     )
@@ -98,11 +101,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _run_reclamation(args: argparse.Namespace) -> dict[str, object]:
     rollback_commits, rollback_images = _rollback_references()
-    work_items_owner_uid = WORK_ITEMS_ROOT.stat(follow_symlinks=False).st_uid
-    active_lock_owner_uid = ACTIVE_LOCK_PATH.stat(
-        follow_symlinks=False
-    ).st_uid
-    if work_items_owner_uid != active_lock_owner_uid:
+    work_items_owner = WORK_ITEMS_ROOT.stat(follow_symlinks=False)
+    active_lock_owner = ACTIVE_LOCK_PATH.stat(follow_symlinks=False)
+    work_items_owner_uid = work_items_owner.st_uid
+    work_items_owner_gid = work_items_owner.st_gid
+    if (
+        work_items_owner_uid != active_lock_owner.st_uid
+        or work_items_owner_gid != active_lock_owner.st_gid
+    ):
         raise RunnerAssetReclamationError(
             "Runner evidence and active lock owners differ"
         )
@@ -115,6 +121,7 @@ def _run_reclamation(args: argparse.Namespace) -> dict[str, object]:
         rollback_image_refs=rollback_images,
         images=inspector.inspect(),
         trusted_work_items_owner_uid=work_items_owner_uid,
+        trusted_work_items_owner_gid=work_items_owner_gid,
     )
     plan = plan_runner_asset_reclamation(snapshot)
     if args.command == "reclamation-auto-plan":

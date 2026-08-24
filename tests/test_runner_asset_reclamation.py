@@ -6,13 +6,13 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import call, patch
+from unittest.mock import patch
 
 from codex_dispatcher.runner_asset_reclamation import (
     DockerImageAsset,
     RunnerAssetReclamationError,
     RunnerAssetSnapshot,
-    _effective_uid,
+    _collect_active_work_item_images,
     apply_runner_asset_reclamation,
     collect_runner_asset_snapshot,
     delete_exact_release,
@@ -48,36 +48,82 @@ def image(reference: str, image_id: str, *, unique: int = 100) -> DockerImageAss
 
 
 class RunnerAssetReclamationTests(unittest.TestCase):
-    def test_work_item_inspection_drops_and_restores_effective_uid(self) -> None:
+    def test_work_item_inventory_requires_root_or_full_owner_credentials(self) -> None:
+        registry = {
+            WORK_ITEM: {
+                "repository": "owner/repository",
+                "issue_number": 1,
+            }
+        }
+        payload = json.dumps(
+            {
+                "schema_version": 1,
+                "images": [WORK_ITEM_IMAGE],
+                "blocked_work_item_ids": [],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
         with (
             patch(
-                "codex_dispatcher.runner_asset_reclamation.os.geteuid",
-                return_value=0,
+                "codex_dispatcher.runner_asset_reclamation._process_uids",
+                return_value=(0, 0, 0),
             ),
             patch(
-                "codex_dispatcher.runner_asset_reclamation.os.seteuid"
-            ) as set_effective_uid,
+                "codex_dispatcher.runner_asset_reclamation._process_gids",
+                return_value=(0, 0, 0),
+            ),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation.os.setresuid",
+                create=True,
+            ),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation.os.setresgid",
+                create=True,
+            ),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation.os.pipe",
+                return_value=(10, 11),
+            ),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation.os.fork",
+                return_value=1234,
+            ),
+            patch("codex_dispatcher.runner_asset_reclamation.os.close"),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation.os.read",
+                side_effect=(payload, b""),
+            ),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation.os.waitpid",
+                return_value=(1234, 0),
+            ),
         ):
-            with self.assertRaisesRegex(RuntimeError, "fixture interruption"):
-                with _effective_uid(1002):
-                    set_effective_uid.assert_called_once_with(1002)
-                    raise RuntimeError("fixture interruption")
-
-        self.assertEqual(
-            [call(1002), call(0)],
-            set_effective_uid.call_args_list,
-        )
+            images, blocked_ids = _collect_active_work_item_images(
+                registry=registry,
+                archived_work_item_ids=frozenset(),
+                work_items_root=Path("/runner/work-items"),
+                work_items_owner_uid=1002,
+                work_items_owner_gid=1002,
+            )
+        self.assertEqual({WORK_ITEM_IMAGE}, images)
+        self.assertEqual((), blocked_ids)
 
         with patch(
-            "codex_dispatcher.runner_asset_reclamation.os.geteuid",
-            return_value=1001,
+            "codex_dispatcher.runner_asset_reclamation._process_uids",
+            return_value=(0, 1001, 0),
         ):
             with self.assertRaisesRegex(
                 RunnerAssetReclamationError,
                 "root or the trusted owner",
             ):
-                with _effective_uid(1002):
-                    self.fail("untrusted user entered WorkItem inspection")
+                _collect_active_work_item_images(
+                    registry=registry,
+                    archived_work_item_ids=frozenset(),
+                    work_items_root=Path("/runner/work-items"),
+                    work_items_owner_uid=1002,
+                    work_items_owner_gid=1002,
+                )
 
     def _releases(self, root: Path) -> tuple:
         releases = root / "releases"

@@ -138,6 +138,8 @@ class RunnerDeploymentTests(unittest.TestCase):
         self.assertIn("Group=codex-runner", service)
         self.assertIn("reclamation-auto-plan", service)
         self.assertIn("PrivateNetwork=yes", service)
+        self.assertIn("DevicePolicy=closed", service)
+        self.assertNotIn("PrivateDevices=", service)
         self.assertIn("ProtectSystem=strict", service)
         self.assertIn("ProtectHome=tmpfs", service)
         self.assertNotIn("ProtectHome=read-only", service)
@@ -150,10 +152,14 @@ class RunnerDeploymentTests(unittest.TestCase):
             service,
         )
         self.assertIn(
-            "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID",
+            "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID",
             service,
         )
         self.assertIn("AmbientCapabilities=\n", service)
+        self.assertNotIn("RestrictSUIDSGID=", service)
+        self.assertNotIn("RestrictAddressFamilies=", service)
+        self.assertNotIn("RestrictNamespaces=", service)
+        self.assertNotIn("SystemCallFilter=", service)
         self.assertNotIn("reclamation-apply", service)
         self.assertNotIn("docker image prune", service)
         self.assertIn("OnUnitInactiveSec=6h", timer)

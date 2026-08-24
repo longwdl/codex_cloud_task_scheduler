@@ -6,8 +6,6 @@ import json
 import os
 import re
 import stat
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -23,6 +21,7 @@ _IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _IMAGE_REF_RE = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
 _RUNNER_IMAGE_SOURCE = "https://github.com/longwdl/codex_cloud_task_scheduler"
 _RUNNER_IMAGE_TITLE = "codex-cloud-task-scheduler-runner"
+_WORK_ITEM_INVENTORY_MAXIMUM = 1024 * 1024
 
 
 class RunnerAssetReclamationError(RuntimeError):
@@ -495,6 +494,7 @@ def collect_runner_asset_snapshot(
     rollback_image_refs: tuple[str, ...],
     images: tuple[DockerImageAsset, ...],
     trusted_work_items_owner_uid: int | None = None,
+    trusted_work_items_owner_gid: int | None = None,
 ) -> RunnerAssetSnapshot:
     """Collect every local reference that can retain a Runner release or image."""
     for commit in rollback_release_commits:
@@ -526,6 +526,17 @@ def collect_runner_asset_snapshot(
         "Runner work-items root",
         trusted_owner_uid=work_items_owner_uid,
     )
+    work_items_owner_gid = (
+        work_items_root.stat(follow_symlinks=False).st_gid
+        if trusted_work_items_owner_gid is None
+        else trusted_work_items_owner_gid
+    )
+    if (
+        type(work_items_owner_gid) is not int
+        or work_items_owner_gid < 0
+        or work_items_root.stat(follow_symlinks=False).st_gid != work_items_owner_gid
+    ):
+        raise RunnerAssetReclamationError("Runner work-items group is invalid")
 
     try:
         current_value = os.readlink(current_link)
@@ -549,56 +560,17 @@ def collect_runner_asset_snapshot(
     if set(absences) & set(registry):
         raise RunnerAssetReclamationError("Runner absence still has a registry")
 
-    blockers: list[str] = []
-    work_item_images: set[str] = set()
-    with _effective_uid(work_items_owner_uid):
-        for work_item_id in sorted(set(registry) - set(archives)):
-            payload = registry[work_item_id]
-            repository = payload.get("repository")
-            issue_number = payload.get("issue_number")
-            if (
-                not isinstance(repository, str)
-                or "/" not in repository
-                or type(issue_number) is not int
-                or issue_number <= 0
-            ):
-                raise RunnerAssetReclamationError("Runner registry identity is malformed")
-            root = (
-                work_items_root
-                / repository.replace("/", "__")
-                / f"issue-{issue_number}"
-            )
-            state = root / "runner-state"
-            try:
-                _protected_directory(
-                    state,
-                    "WorkItem state directory",
-                    trusted_owner_uid=work_items_owner_uid,
-                )
-            except RunnerAssetReclamationError:
-                blockers.append(f"active registry {work_item_id} is not inspectable")
-                continue
-            for binding in sorted(state.rglob("codex-session.json")):
-                try:
-                    relative = binding.relative_to(state)
-                except ValueError as exc:
-                    raise RunnerAssetReclamationError("session binding escapes WorkItem") from exc
-                if len(relative.parts) > 4:
-                    raise RunnerAssetReclamationError("session binding depth is invalid")
-                payload = _read_protected_json(
-                    binding,
-                    "WorkItem session binding",
-                    maximum=4096,
-                    trusted_owner_uid=work_items_owner_uid,
-                )
-                image = payload.get("image")
-                if (
-                    payload.get("work_item_id") != work_item_id
-                    or not isinstance(image, str)
-                    or _IMAGE_REF_RE.fullmatch(image) is None
-                ):
-                    raise RunnerAssetReclamationError("WorkItem image binding is invalid")
-                work_item_images.add(image)
+    work_item_images, blocked_work_item_ids = _collect_active_work_item_images(
+        registry=registry,
+        archived_work_item_ids=frozenset(archives),
+        work_items_root=work_items_root,
+        work_items_owner_uid=work_items_owner_uid,
+        work_items_owner_gid=work_items_owner_gid,
+    )
+    blockers = [
+        f"active registry {work_item_id} is not inspectable"
+        for work_item_id in blocked_work_item_ids
+    ]
 
     return RunnerAssetSnapshot(
         current_release_commit=current_commit,
@@ -615,24 +587,249 @@ def collect_runner_asset_snapshot(
     )
 
 
-@contextmanager
-def _effective_uid(target_uid: int) -> Iterator[None]:
-    """Read owner-only FUSE WorkItem state without broadening its mount policy."""
-    if type(target_uid) is not int or target_uid < 0:
-        raise RunnerAssetReclamationError("Runner work-items owner is invalid")
-    original_uid = os.geteuid()
-    if original_uid == target_uid:
-        yield
-        return
-    if original_uid != 0:
+def _collect_active_work_item_images(
+    *,
+    registry: dict[str, dict[str, object]],
+    archived_work_item_ids: frozenset[str],
+    work_items_root: Path,
+    work_items_owner_uid: int,
+    work_items_owner_gid: int,
+) -> tuple[set[str], tuple[str, ...]]:
+    """Inspect FUSE state in an irreversibly unprivileged child when root calls."""
+    active_ids = tuple(sorted(set(registry) - archived_work_item_ids))
+    if not active_ids:
+        return set(), ()
+    user_credentials = _process_uids()
+    group_credentials = _process_gids()
+    owner_user_credentials = (work_items_owner_uid,) * 3
+    owner_group_credentials = (work_items_owner_gid,) * 3
+    if (
+        user_credentials == owner_user_credentials
+        and group_credentials == owner_group_credentials
+    ):
+        return _inspect_active_work_item_images(
+            registry=registry,
+            active_work_item_ids=active_ids,
+            work_items_root=work_items_root,
+            work_items_owner_uid=work_items_owner_uid,
+        )
+    if user_credentials != (0, 0, 0):
         raise RunnerAssetReclamationError(
             "Runner WorkItem inspection requires root or the trusted owner"
         )
+    set_resuid = getattr(os, "setresuid", None)
+    set_resgid = getattr(os, "setresgid", None)
+    if not callable(set_resuid) or not callable(set_resgid):
+        raise RunnerAssetReclamationError(
+            "Runner WorkItem child requires Linux credential isolation"
+        )
+
+    read_descriptor, write_descriptor = os.pipe()
     try:
-        os.seteuid(target_uid)
-        yield
+        child_pid = os.fork()
+    except BaseException:
+        os.close(read_descriptor)
+        os.close(write_descriptor)
+        raise
+    if child_pid == 0:
+        os.close(read_descriptor)
+        exit_code = 1
+        failure_stage = "credential_group_drop"
+        try:
+            if _process_gids() != owner_group_credentials:
+                set_resgid(*owner_group_credentials)
+                if _process_gids() != owner_group_credentials:
+                    raise RunnerAssetReclamationError(
+                        "Runner WorkItem child did not drop root group credentials"
+                    )
+            failure_stage = "credential_user_drop"
+            set_resuid(*owner_user_credentials)
+            if _process_uids() != owner_user_credentials:
+                raise RunnerAssetReclamationError(
+                    "Runner WorkItem child did not drop root credentials"
+                )
+            failure_stage = "inventory_inspection"
+            images, blocked_ids = _inspect_active_work_item_images(
+                registry=registry,
+                active_work_item_ids=active_ids,
+                work_items_root=work_items_root,
+                work_items_owner_uid=work_items_owner_uid,
+            )
+            failure_stage = "inventory_encoding"
+            raw = json.dumps(
+                {
+                    "schema_version": 1,
+                    "images": sorted(images),
+                    "blocked_work_item_ids": list(blocked_ids),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            if len(raw) > _WORK_ITEM_INVENTORY_MAXIMUM:
+                raise RunnerAssetReclamationError(
+                    "Runner WorkItem inventory exceeds its size boundary"
+                )
+            failure_stage = "inventory_write"
+            _write_descriptor_all(write_descriptor, raw)
+            exit_code = 0
+        except BaseException:
+            try:
+                _write_descriptor_all(
+                    write_descriptor,
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "error_code": f"{failure_stage}_failed",
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode(),
+                )
+            except BaseException:
+                pass
+        finally:
+            os.close(write_descriptor)
+            os._exit(exit_code)
+
+    os.close(write_descriptor)
+    raw = bytearray()
+    try:
+        while chunk := os.read(read_descriptor, 65536):
+            raw.extend(chunk)
+            if len(raw) > _WORK_ITEM_INVENTORY_MAXIMUM:
+                raise RunnerAssetReclamationError(
+                    "Runner WorkItem inventory exceeds its size boundary"
+                )
     finally:
-        os.seteuid(original_uid)
+        os.close(read_descriptor)
+        waited_pid, wait_status = os.waitpid(child_pid, 0)
+    child_failed = (
+        waited_pid != child_pid
+        or not os.WIFEXITED(wait_status)
+        or os.WEXITSTATUS(wait_status) != 0
+    )
+    try:
+        payload = json.loads(bytes(raw).decode("utf-8"), object_pairs_hook=_unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise RunnerAssetReclamationError(
+            "Runner WorkItem inventory child returned invalid JSON"
+        ) from exc
+    if child_failed:
+        error_code = payload.get("error_code") if isinstance(payload, dict) else None
+        allowed_error_codes = {
+            "credential_group_drop_failed",
+            "credential_user_drop_failed",
+            "inventory_inspection_failed",
+            "inventory_encoding_failed",
+            "inventory_write_failed",
+        }
+        if error_code not in allowed_error_codes:
+            error_code = "unknown_failure"
+        raise RunnerAssetReclamationError(
+            f"Runner WorkItem inventory child failed: {error_code}"
+        )
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise RunnerAssetReclamationError("Runner WorkItem inventory child is invalid")
+    images = payload.get("images")
+    blocked_ids = payload.get("blocked_work_item_ids")
+    if (
+        not isinstance(images, list)
+        or not all(isinstance(value, str) for value in images)
+        or images != sorted(set(images))
+        or any(_IMAGE_REF_RE.fullmatch(value) is None for value in images)
+        or not isinstance(blocked_ids, list)
+        or not all(isinstance(value, str) for value in blocked_ids)
+        or blocked_ids != sorted(set(blocked_ids))
+        or not set(blocked_ids).issubset(active_ids)
+    ):
+        raise RunnerAssetReclamationError("Runner WorkItem inventory child is invalid")
+    return set(images), tuple(blocked_ids)
+
+
+def _inspect_active_work_item_images(
+    *,
+    registry: dict[str, dict[str, object]],
+    active_work_item_ids: tuple[str, ...],
+    work_items_root: Path,
+    work_items_owner_uid: int,
+) -> tuple[set[str], tuple[str, ...]]:
+    work_item_images: set[str] = set()
+    blocked_ids: list[str] = []
+    for work_item_id in active_work_item_ids:
+        payload = registry[work_item_id]
+        repository = payload.get("repository")
+        issue_number = payload.get("issue_number")
+        if (
+            not isinstance(repository, str)
+            or "/" not in repository
+            or type(issue_number) is not int
+            or issue_number <= 0
+        ):
+            raise RunnerAssetReclamationError("Runner registry identity is malformed")
+        state = (
+            work_items_root
+            / repository.replace("/", "__")
+            / f"issue-{issue_number}"
+            / "runner-state"
+        )
+        try:
+            _protected_directory(
+                state,
+                "WorkItem state directory",
+                trusted_owner_uid=work_items_owner_uid,
+            )
+        except RunnerAssetReclamationError:
+            blocked_ids.append(work_item_id)
+            continue
+        for binding in sorted(state.rglob("codex-session.json")):
+            try:
+                relative = binding.relative_to(state)
+            except ValueError as exc:
+                raise RunnerAssetReclamationError("session binding escapes WorkItem") from exc
+            if len(relative.parts) > 4:
+                raise RunnerAssetReclamationError("session binding depth is invalid")
+            binding_payload = _read_protected_json(
+                binding,
+                "WorkItem session binding",
+                maximum=4096,
+                trusted_owner_uid=work_items_owner_uid,
+            )
+            image = binding_payload.get("image")
+            if (
+                binding_payload.get("work_item_id") != work_item_id
+                or not isinstance(image, str)
+                or _IMAGE_REF_RE.fullmatch(image) is None
+            ):
+                raise RunnerAssetReclamationError("WorkItem image binding is invalid")
+            work_item_images.add(image)
+    return work_item_images, tuple(blocked_ids)
+
+
+def _write_descriptor_all(descriptor: int, raw: bytes) -> None:
+    offset = 0
+    while offset < len(raw):
+        written = os.write(descriptor, raw[offset:])
+        if written <= 0:
+            raise RunnerAssetReclamationError("Runner WorkItem inventory pipe failed")
+        offset += written
+
+
+def _process_uids() -> tuple[int, int, int]:
+    get_resuid = getattr(os, "getresuid", None)
+    if callable(get_resuid):
+        return get_resuid()
+    real_uid = os.getuid()
+    effective_uid = os.geteuid()
+    return real_uid, effective_uid, effective_uid
+
+
+def _process_gids() -> tuple[int, int, int]:
+    get_resgid = getattr(os, "getresgid", None)
+    if callable(get_resgid):
+        return get_resgid()
+    real_gid = os.getgid()
+    effective_gid = os.getegid()
+    return real_gid, effective_gid, effective_gid
 
 
 def inspect_release_assets(releases_root: Path) -> tuple[ReleaseAsset, ...]:

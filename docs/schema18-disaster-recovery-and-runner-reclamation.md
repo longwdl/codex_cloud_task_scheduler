@@ -217,11 +217,19 @@ Do not copy `latest.json` as authority to delete anything. Restore it only as au
 fresh read-only planner after Docker, WorkItem registries, tombstones, and both release trees have
 been restored and re-inspected. Any reference/apply-receipt mismatch blocks Runner activation.
 
-The planner unit retains `CAP_SETUID` in its bounding set, with no ambient capabilities, solely so
-the root-owned collector can temporarily lower its effective UID to the trusted WorkItem owner
-while reading owner-only FUSE session bindings. The trusted UID must match both the WorkItem root
-and active-lock owner. The collector restores its original effective UID before inspecting Docker
-or writing a plan; do not replace this boundary with `allow_other` or a broader FUSE mount policy.
+The planner unit retains `CAP_SETUID` and `CAP_SETGID` in its bounding set, with no ambient
+capabilities, solely so
+the root-owned collector can fork a one-shot inventory child and irreversibly set that child's
+real, effective, and saved UID/GID to the trusted WorkItem owner before reading owner-only FUSE
+session bindings. The trusted UID/GID must match both the WorkItem root and active-lock owner. The
+root parent revalidates the child's bounded digest/blocked-ID result before inspecting releases or
+writing a plan; do not replace this boundary with `allow_other` or a broader FUSE mount policy.
+On the deployed systemd version, `PrivateDevices`, `RestrictAddressFamilies`,
+`RestrictNamespaces`, and `RestrictSUIDSGID` also block the irreversible credential drop. This unit
+therefore replaces `PrivateDevices` with `DevicePolicy=closed` and keeps `PrivateNetwork`.
+`NoNewPrivileges`, the narrow capability set without `CAP_SYS_ADMIN`, a strict read-only system
+view, and write access limited to the plan/status directories remain mandatory compensating
+controls.
 
 ## Terminal-storage evidence conflict response
 
