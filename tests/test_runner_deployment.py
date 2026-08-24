@@ -160,6 +160,18 @@ class RunnerDeploymentTests(unittest.TestCase):
         self.assertNotIn("RestrictAddressFamilies=", service)
         self.assertNotIn("RestrictNamespaces=", service)
         self.assertNotIn("SystemCallFilter=", service)
+        for incompatible_directive in (
+            "ProtectClock=",
+            "ProtectHostname=",
+            "ProtectKernelLogs=",
+            "ProtectKernelModules=",
+            "ProtectKernelTunables=",
+            "LockPersonality=",
+            "MemoryDenyWriteExecute=",
+            "RestrictRealtime=",
+            "SystemCallArchitectures=",
+        ):
+            self.assertNotIn(incompatible_directive, service)
         self.assertNotIn("reclamation-apply", service)
         self.assertNotIn("docker image prune", service)
         self.assertIn("OnUnitInactiveSec=6h", timer)

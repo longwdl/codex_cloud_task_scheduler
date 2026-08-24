@@ -225,11 +225,14 @@ session bindings. The trusted UID/GID must match both the WorkItem root and acti
 root parent revalidates the child's bounded digest/blocked-ID result before inspecting releases or
 writing a plan; do not replace this boundary with `allow_other` or a broader FUSE mount policy.
 On the deployed systemd version, `PrivateDevices`, `RestrictAddressFamilies`,
-`RestrictNamespaces`, and `RestrictSUIDSGID` also block the irreversible credential drop. This unit
-therefore replaces `PrivateDevices` with `DevicePolicy=closed` and keeps `PrivateNetwork`.
-`NoNewPrivileges`, the narrow capability set without `CAP_SYS_ADMIN`, a strict read-only system
-view, and write access limited to the plan/status directories remain mandatory compensating
-controls.
+`RestrictNamespaces`, `RestrictSUIDSGID`, and the other seccomp-generating directives shown absent
+in the checked-in unit also block the irreversible credential drop. This unit therefore replaces
+`PrivateDevices` with `DevicePolicy=closed` and keeps `PrivateNetwork`. `NoNewPrivileges`, the
+narrow capability set without `CAP_SYS_ADMIN`, `CAP_SYS_MODULE`, `CAP_SYSLOG`, `CAP_SYS_TIME`, or
+`CAP_SYS_NICE`, a strict read-only system view, and write access limited to the plan/status
+directories remain mandatory compensating controls. Reintroduce any removed hardening directive
+only after an installed-unit FUSE inventory canary proves that the child can still drop all UID/GID
+credentials.
 
 ## Terminal-storage evidence conflict response
 
