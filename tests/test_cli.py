@@ -19,6 +19,7 @@ from codex_dispatcher.control_host_backup import (
     StateRestoreDrillResult,
 )
 from codex_dispatcher.control_sweep import ControlSweepResult, ControlSweepStatus
+from codex_dispatcher.lifecycle_health import LifecycleAlert
 from codex_dispatcher.ssh_preflight import (
     SshPreflightPlan,
     SshPreflightStatus,
@@ -37,6 +38,75 @@ from tests.test_scheduler import make_config
 
 
 class CliTests(unittest.TestCase):
+    def test_reclamation_plan_ready_notifies_without_failing_health(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "state.db"
+            with StateStore(database) as store:
+                store.migrate()
+            base = make_config(global_max_active=1)
+            config = replace(
+                base,
+                scheduler=replace(base.scheduler, database_path=database),
+            )
+            snapshot = SimpleNamespace(
+                alerts=(),
+                alerts_truncated=False,
+                integrity="ok",
+                foreign_key_violations=0,
+                checked_at="2026-08-24T00:00:00+00:00",
+                ok=True,
+                to_mapping=lambda: {"lifecycle_health": True},
+            )
+            capacity = SimpleNamespace(to_mapping=lambda: {"state": "ok"})
+            reclamation = SimpleNamespace(
+                to_mapping=lambda: {
+                    "state": "plan_ready",
+                    "plan_sha256": "a" * 64,
+                }
+            )
+            stdout = io.StringIO()
+            with (
+                patch(
+                    "codex_dispatcher.ssh_runtime.load_protected_ssh_config",
+                    return_value=config,
+                ),
+                patch(
+                    "codex_dispatcher.lifecycle_health.inspect_lifecycle_health",
+                    return_value=snapshot,
+                ),
+                patch(
+                    "codex_dispatcher.lifecycle_health.inspect_runner_capacity",
+                    return_value=(capacity, ()),
+                ),
+                patch(
+                    "codex_dispatcher.lifecycle_health.inspect_runner_reclamation_status",
+                    return_value=(
+                        reclamation,
+                        (
+                            LifecycleAlert(
+                                "runner_reclamation_plan_ready",
+                                plan_sha256="a" * 64,
+                            ),
+                        ),
+                    ),
+                ),
+                contextlib.redirect_stdout(stdout),
+            ):
+                exit_code = main(
+                    [
+                        "lifecycle-health",
+                        "--config",
+                        "config.toml",
+                        "--runner-capacity",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(0, exit_code)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(1, payload["alert_count"])
+
     def test_lifecycle_health_routes_notifications_to_system_channel(self) -> None:
         slack_token = "xoxb-1234567890-fixture"
         with tempfile.TemporaryDirectory() as temp_dir:

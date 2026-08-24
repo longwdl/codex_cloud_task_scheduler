@@ -220,7 +220,9 @@ This command rechecks the post-release sweep, exact backup content, restore and 
 receipts, all Control timers, the Runner planner timer/status, and the transactional reference
 ledger. It writes only
 `/opt/codex-dispatcher/release-handoff-receipts/<commit>.json`; it never changes the release receipt
-or starts a service. Disaster recovery requires both receipts.
+or starts a service. A sole exact `runner_reclamation_plan_ready` alert is retained as a
+non-blocking warning; stale, unavailable, capacity, lifecycle, or consistency alerts still block.
+Disaster recovery requires both receipts.
 
 Observe with `systemctl status`, `systemctl list-timers`, and bounded queries such as
 `journalctl -u codex-dispatcher.service -n 100` and

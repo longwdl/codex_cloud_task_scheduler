@@ -202,7 +202,9 @@ sudo /opt/codex-dispatcher/current/scripts/codex-dispatcher-release-handoff-v1 \
 The handoff command is idempotent and writes only its immutable root-owned receipt. It fails unless
 the latest Dispatcher sweep, backup, restore drill, lifecycle health, Control timers, Runner
 planner timer/status, and transactional reference ledger all postdate and agree with the release.
-It never updates the release receipt and never authorizes reclamation.
+It never updates the release receipt and never authorizes reclamation. The sole permitted warning
+is an exact current `runner_reclamation_plan_ready` projection with a durable system-channel
+receipt; stale, unavailable, capacity, lifecycle, or consistency alerts fail closed.
 
 The isolated four-trigger canary exercises the real exact-plan, fixed-threshold, durable health
 outbox, and system-channel routing code. Plan mode uses an isolated fake Slack publisher and makes

@@ -225,6 +225,9 @@ After the sweep, backup, restore drill, lifecycle health, and all timers have be
 separate immutable handoff receipt records the operational boundary. It does not rewrite the
 release transaction receipt. The handoff command is idempotent for the same commit, makes no
 GitHub, Slack, Runner-asset, or online-database write, and refuses incomplete or stale evidence.
+An exact current `runner_reclamation_plan_ready` notification is recorded as a non-blocking
+operational warning because the plan cannot authorize deletion; every other health alert blocks
+handoff.
 
 ## Compatibility boundary
 

@@ -193,9 +193,8 @@ def record_release_handoff(
         health.get("ok") is not True
         or health.get("integrity") != "ok"
         or health.get("foreign_key_violations") != 0
-        or health.get("alert_count") != 0
         or not isinstance(notification, dict)
-        or notification.get("action") != "healthy"
+        or health.get("alerts_truncated") is not False
     ):
         raise ReleaseHandoffError("post-release lifecycle health is not healthy")
     health_checked = _timestamp(health.get("checked_at"), "health checked_at")
@@ -216,6 +215,7 @@ def record_release_handoff(
     status_age = int((moment - status_checked).total_seconds())
     if status_checked < release_updated or status_age < -300 or status_age > MAXIMUM_STATUS_AGE_SECONDS:
         raise ReleaseHandoffError("Runner reclamation status is not current for this release")
+    _validate_health_alert_boundary(health, notification, status)
 
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -237,8 +237,9 @@ def record_release_handoff(
         "restore_drill": restore_receipt,
         "lifecycle_health": {
             "checked_at": health.get("checked_at"),
-            "alert_count": 0,
-            "slack_action": "healthy",
+            "alert_count": health.get("alert_count"),
+            "alerts": health.get("alerts"),
+            "slack_notification": notification,
             "work_items_total": health.get("work_items_total"),
             "active_turns": health.get("active_turns"),
         },
@@ -319,6 +320,39 @@ def _validate_runner_references(
         or receipt.get("after_sha256") != _canonical_sha256(references)
     ):
         raise ReleaseHandoffError("Runner reference receipt conflicts with live ledger")
+
+
+def _validate_health_alert_boundary(
+    health: dict[str, Any],
+    notification: dict[str, Any],
+    status: RunnerReclamationStatus,
+) -> None:
+    alerts = health.get("alerts")
+    if status.trigger_reasons:
+        expected = [
+            {
+                "code": "runner_reclamation_plan_ready",
+                "plan_sha256": status.plan_sha256,
+            }
+        ]
+        if (
+            health.get("alert_count") != 1
+            or alerts != expected
+            or notification.get("action")
+            not in {"alert_opened", "alert_updated", "unchanged"}
+            or not isinstance(notification.get("delivery_key"), str)
+            or not isinstance(notification.get("permalink"), str)
+        ):
+            raise ReleaseHandoffError(
+                "post-release health is not the exact non-blocking reclamation alert"
+            )
+        return
+    if (
+        health.get("alert_count") != 0
+        or alerts != []
+        or notification.get("action") not in {"healthy", "recovered"}
+    ):
+        raise ReleaseHandoffError("post-release lifecycle health has blocking alerts")
 
 
 def _systemd_state(

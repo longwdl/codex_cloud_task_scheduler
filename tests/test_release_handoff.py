@@ -37,7 +37,13 @@ def _canonical(payload: dict[str, object]) -> str:
 
 
 class _Commands:
-    def __init__(self, *, backup: Path, timer_active: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        backup: Path,
+        timer_active: bool = True,
+        reclamation_plan_ready: bool = False,
+    ) -> None:
         self.calls = 0
         self.backup = backup
         self.timer_active = timer_active
@@ -66,8 +72,8 @@ class _Commands:
         }
         self.status = build_runner_reclamation_status(
             host_available_bytes=74 * 1024**3,
-            release_count=4,
-            release_target_count=2,
+            release_count=5 if reclamation_plan_ready else 4,
+            release_target_count=3 if reclamation_plan_ready else 2,
             image_target_count=0,
             expected_total_bytes=1024,
             plan_sha256="e" * 64,
@@ -121,16 +127,32 @@ class _Commands:
                     "temporary_restore_removed": True,
                 }
             else:
+                alerts = []
+                notification: dict[str, object] = {"action": "healthy"}
+                if self.status["trigger_reasons"]:
+                    alerts = [
+                        {
+                            "code": "runner_reclamation_plan_ready",
+                            "plan_sha256": self.status["plan_sha256"],
+                        }
+                    ]
+                    notification = {
+                        "action": "alert_opened",
+                        "delivery_key": "slack-health:" + "f" * 64 + ":alert",
+                        "permalink": "https://fixture.slack.com/archives/C0BS3LPG43G/p1",
+                    }
                 payload = {
                     "ok": True,
                     "lifecycle_health": True,
                     "checked_at": "2026-08-24T08:17:00Z",
                     "integrity": "ok",
                     "foreign_key_violations": 0,
-                    "alert_count": 0,
+                    "alert_count": len(alerts),
+                    "alerts": alerts,
+                    "alerts_truncated": False,
                     "active_turns": 0,
                     "work_items_total": 0,
-                    "slack_notification": {"action": "healthy"},
+                    "slack_notification": notification,
                 }
             return json.dumps(payload, sort_keys=True) + "\n"
         raise AssertionError(command)
@@ -238,6 +260,37 @@ class ReleaseHandoffTests(unittest.TestCase):
                     backup_root=paths["backups"],
                 )
             self.assertFalse((paths["handoffs"] / f"{COMMIT}.json").exists())
+
+    def test_exact_plan_ready_alert_is_non_blocking_and_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = self._fixture(Path(temp_dir))
+            commands = _Commands(
+                backup=paths["backup"],
+                reclamation_plan_ready=True,
+            )
+            with patch(
+                "codex_dispatcher.release_handoff.pwd.getpwnam",
+                return_value=SimpleNamespace(pw_uid=os.geteuid()),
+            ):
+                receipt = record_release_handoff(
+                    COMMIT,
+                    command_runner=commands,
+                    now=NOW,
+                    control_current=paths["current"],
+                    release_receipt_root=paths["receipts"],
+                    handoff_receipt_root=paths["handoffs"],
+                    database_path=paths["database"],
+                    backup_root=paths["backups"],
+                )
+
+            health = receipt["lifecycle_health"]
+            self.assertIsInstance(health, dict)
+            assert isinstance(health, dict)
+            self.assertEqual(1, health["alert_count"])
+            self.assertEqual(
+                "runner_reclamation_plan_ready",
+                health["alerts"][0]["code"],  # type: ignore[index]
+            )
 
 
 if __name__ == "__main__":

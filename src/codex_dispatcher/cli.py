@@ -456,6 +456,11 @@ def _lifecycle_health(
                 len(combined_alerts) > MAX_REPORTED_ALERTS
             )
             combined_alerts = combined_alerts[:MAX_REPORTED_ALERTS]
+            blocking_runner_alerts = tuple(
+                alert
+                for alert in runner_alerts
+                if alert.code != "runner_reclamation_plan_ready"
+            )
             notification = None
             if notify_slack:
                 if snapshot.integrity != "ok" or snapshot.foreign_key_violations:
@@ -480,7 +485,9 @@ def _lifecycle_health(
         payload["alerts"] = [alert.to_mapping() for alert in combined_alerts]
         payload["alert_count"] = len(combined_alerts)
         payload["alerts_truncated"] = alerts_truncated
-        payload["ok"] = snapshot.ok and not systemd_alerts and not runner_alerts
+        payload["ok"] = (
+            snapshot.ok and not systemd_alerts and not blocking_runner_alerts
+        )
         payload["systemd_checked"] = check_systemd
         if check_systemd:
             payload["systemd_units"] = [state.to_mapping() for state in unit_states]
