@@ -3,6 +3,130 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Schema-21 terminal closure, concurrent discard, and current-schema recovery — 2026-08-24
+
+Release-line commit `49e3be78258eb5699bbcfd54c7b3898f26e6fc81` introduced schema 21 and the
+terminal GitHub closure state machine. A merged PR is accepted from its persisted exact source
+head, independently of the merge strategy and resulting base-branch commit. Fixture Issue
+[`#46`](https://github.com/longwdl/codex-dispatcher-fixture/issues/46), WorkItem
+`wi_c793ec7c6b2f1cae535619c3`, persisted source head
+`5d213027e4b61168a6abce919592da062bc1fa3f`. Maintainer squash-merge produced the distinct
+base-branch commit `de0af45094026d8cab699ff376fc25c5d1474884`; the Dispatcher verified the
+merged PR's exact source identity, recorded the `completed_issue` closure receipt, projected only
+`agent:completed`, and closed the Issue with reason `completed`. This proves that squash and rebase
+do not require the merge commit to equal `last_published_sha`.
+
+Fixture Issue [`#48`](https://github.com/longwdl/codex-dispatcher-fixture/issues/48), WorkItem
+`wi_82f3e18ffa72838884ffd042`, published exact source head
+`7db62c38396f80184693ab852cf3204c93efc045` to Draft PR
+[`#49`](https://github.com/longwdl/codex-dispatcher-fixture/pull/49). Maintainer
+`longwdl` then applied the single trusted command label `agent:discard`, GitHub event
+`29931716433`. The immutable discard request SHA-256 is
+`c968806bcac76f9db0a22603d01aafca4a26c36d448e1dedb22c8db59feea4ba`. The Dispatcher closed
+only exact unmerged PR #49, recorded closure request SHA-256
+`28837799763db2e02c8995b3681adb5f1a14d25875d7376dc0ad70cff8a300d3`, recorded one uniform
+discard disposition, then closed Issue #48 with reason `not_planned` and closure request SHA-256
+`2da3e1b650a19ca3bfbc91ad16925a815ca43f4a29d06aa5731976dbe0a0857d`. Its exact Runner
+tombstone exists and the live WorkItem directory is absent. No `agent:superseded` state or second
+AI interpretation is part of this path.
+
+The first active-Turn higher-value canary, Fixture-2 Issue
+[`#7`](https://github.com/longwdl/codex-dispatcher-fixture-2/issues/7), exposed a stale Issue
+snapshot boundary: an `agent:discard` event arriving while Codex was active was not visible to the
+already-read object used by publication reconciliation. Draft PR
+[`#8`](https://github.com/longwdl/codex-dispatcher-fixture-2/pull/8) was retained as evidence and
+then closed unmerged; Issue #7 was closed `not_planned`. Commit
+`f94459d64fe1e6c952f661c2d9c29da5ff9a0f8b` added a compare-and-swap GitHub refresh that preserves
+concurrent state-label changes before any projection or publication decision.
+
+The fresh post-fix canary applied `agent:discard` to Fixture-2 Issue
+[`#9`](https://github.com/longwdl/codex-dispatcher-fixture-2/issues/9) while WorkItem
+`wi_400eedc01c2751a989697e12`, Turn `turn_84d812dfce9e4386938d9959fd4d1851`, was durably active.
+Codex finished with source head `7d3743c84c0d615597b84c2376f9c2c88ddc2f6a`, but the refreshed label remained authoritative:
+the result was rejected from delivery, Draft PR
+[`#10`](https://github.com/longwdl/codex-dispatcher-fixture-2/pull/10) was closed unmerged, the
+Issue was closed `not_planned`, and the WorkItem was archived with a permanent Runner tombstone.
+Fixture-2 `main` remained exactly `4f20b764c2a6e8bbe4af71f12c2d4c3bd1cad5fb`. Repeated dedicated
+sweeps then returned `idle`, with zero active Turns and zero containers.
+
+### FUSE-safe Runner planning and release
+
+The Runner's FUSE WorkItem filesystem rejects traversal by host root and by a process that changes
+only its effective identity. Candidate releases `68e2df1`, `05a830d`, and `723ddfb` failed closed
+at the read-only Runner planner gate and automatically restored both hosts and the Runner reference
+ledger. The final implementation forks one bounded inspection child, permanently drops its real,
+effective, and saved GID/UID to the fixed Runner owner, inspects only session bindings, returns
+bounded JSON to the privileged parent, and has the parent revalidate all digests and blocked IDs.
+The systemd unit grants only `CAP_SETGID` and `CAP_SETUID`; it does not grant `CAP_SYS_ADMIN` and
+does not relax filesystem write protection, private networking, process visibility, device policy,
+or Docker-socket read-only binding. The documented platform boundary omits systemd sandbox options
+observed to deny the required irreversible credential transition.
+
+Final runtime release `dfdef2ca333b8a49aebe865565e6506c2a7686c9` used archive SHA-256
+`025f9f255ea836f720e80a4068057deb95750384dc760a431af65f5007494182`. All 633 tests passed on
+both real service-account validation paths before Runner-first and Control-second cutover. The
+permanent release receipt is
+`/opt/codex-dispatcher/release-receipts/dfdef2ca333b8a49aebe865565e6506c2a7686c9.json`. The
+post-release normal sweep was `idle` with zero GitHub writes. The protected backup
+`/var/lib/codex-dispatcher/backups/state-20260824T200743.408482Z.db`, SHA-256
+`055c042c765c71c2e9893d9c2c80723b9d865e4cbd5cc63eecbaae464fa50d23`, passed integrity checking;
+the isolated restore verified migrations 1 through 21, zero foreign-key violations, and removal of
+the temporary database. The handoff receipt is
+`/opt/codex-dispatcher/release-handoff-receipts/dfdef2ca333b8a49aebe865565e6506c2a7686c9.json`, with
+evidence SHA-256 `6112e7bc3e12ce789be48e94201878fbd52a01d8ad923612ce200db7303071f4`.
+
+All five Control timers and both Runner maintenance timers were enabled and active after handoff.
+Lifecycle health was `ok`, SQLite had zero active Turns, and the Runner reported
+`65,746,067,456` available bytes. `codex login status` under the exact Runner `CODEX_HOME` reported
+the expected ChatGPT login. The only health notifications were the two exact read-only
+reclamation plans below, routed to the dedicated system Slack channel; no Issue-channel system
+message was emitted.
+
+### Independent bundle, isolated rebuild, and exact RTO
+
+The current-schema successor to the originally named “schema-18 drill” exported protected release,
+handoff, Runner, schema-21 provenance, database, GitHub, Slack, and tombstone evidence. Bundle
+`20260824T201200Z-dfdef2c` has manifest SHA-256
+`e11757bd1f8289beebcc8e1cdef21fbcfc826af44046733f13b4b620fd50a8d9`. Its opaque off-host copy
+was independently reimported as
+`/var/lib/codex-dispatcher/disaster-recovery-bundles/20260824T201300Z-dfdef2c-reimported`; recovery
+did not trust the live source directory.
+
+The isolated drill receipt is
+`/var/lib/codex-dispatcher/disaster-recovery-drills/20260824T201400Z-dfdef2c/receipt.json`. It
+restored a new candidate database, verified migrations 1 through 21, SQLite integrity and foreign
+keys, release/handoff identities, 25 GitHub Issues, 21 GitHub PRs, 59 Slack receipts, 22 Runner
+archives, two exact absence reconciliations, and five terminal-orphan records. It also rebuilt an
+empty Control root and an empty Runner root without changing either live host. Control rebuild
+manifest SHA-256 was `e7aac0842fefe2e2375dd4ee32e6e125b738bac75ca341b1f3e44a084246ca2a`;
+Runner rebuild manifest SHA-256 was
+`ebf1dc2dcea607c33c2dc0fab9d909a81621e163ab881a8838f4eae9df6ab97a`.
+
+Measured application recovery time was exactly `115,443 ms` from a source bundle aged 372 seconds.
+Host provisioning time is explicitly outside that RTO. The executable recovery boundary recorded
+in the receipt is: stop Dispatcher and health timers; validate the independent manifest and exact
+release; copy the bundled database to a new candidate rather than overwriting online state; install
+Runner first and Control second; run current-schema reconciliation before enabling writes; then run
+strict SSH preflight. On any failure, never replace the online Control database, never switch either
+live `current` symlink, never start, resume, stop, or archive a Runner Turn, retain the source
+bundle, and remove only the exact isolated recovery root. Online identity comparison proved
+`online_state_modified=false`.
+
+### Non-authorizing exact reclamation plans
+
+Control plan `369f58544a8bb175f918c770865531b05967e190e4cb5f9b39f94a180e6c268b` contains eight exact
+targets totaling `30,367,744` allocated bytes: confirmed bundle
+`20260824T113900Z-4ae9ad4-reimported` (`5,701,632`); its three superseded DR inputs (`28,672`);
+isolated recovery root `20260824T114000Z-4ae9ad4` (`10,346,496`); and release trees `4ae9ad4`
+(`4,136,960`), `867d5cb` (`5,816,320`), and `9e58e4f` (`4,337,664`). Every entry includes its
+absolute path, content digest, identity, and allocated bytes.
+
+Runner plan `f489bedfbb87f4dbb60f2cd7ee973d6cd2854599a2e3a4363740f09ba80e80e8` contains three exact old
+release trees totaling `12,681,216` allocated bytes: `4ae9ad4` (`4,132,864`), `867d5cb`
+(`4,214,784`), and `9e58e4f` (`4,333,568`). It contains zero image targets and protects the current
+and immediate rollback commits and current digest. Both plans have `authorizes_apply=false`; no
+target in either plan was deleted.
+
 ## Exact two-host reclamation apply, Control planner, and off-host bundle lifecycle — 2026-08-24
 
 Runner plan `93c8ce14c146df68d4506c6eb69254f815041e2c59df41d24b59c94f721c87ae`
