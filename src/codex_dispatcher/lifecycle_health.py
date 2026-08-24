@@ -21,11 +21,15 @@ from codex_dispatcher.runner_protocol import (
 )
 from codex_dispatcher.runner_transport import (
     RUNNER_CAPACITY_SCOPE_ID,
+    RUNNER_RECLAMATION_SCOPE_ID,
     RunnerCapacityReply,
+    RunnerReclamationStatusReply,
     RunnerTransport,
     RunnerTransportError,
     parse_runner_capacity_reply,
+    parse_runner_reclamation_status_reply,
 )
+from codex_dispatcher.runner_reclamation_status import MAXIMUM_STATUS_AGE_SECONDS
 from codex_dispatcher.ssh_runner_transport import SshRunnerTransport
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.terminal_storage import (
@@ -65,6 +69,7 @@ class LifecycleAlert:
     issue_number: int | None = None
     age_seconds: int | None = None
     unit: str | None = None
+    plan_sha256: str | None = None
 
     def to_mapping(self) -> dict[str, object]:
         payload: dict[str, object] = {"code": self.code}
@@ -74,6 +79,7 @@ class LifecycleAlert:
             "issue_number",
             "age_seconds",
             "unit",
+            "plan_sha256",
         ):
             value = getattr(self, name)
             if value is not None:
@@ -568,6 +574,58 @@ def inspect_runner_capacity(
         alerts.append(LifecycleAlert("runner_turn_capacity_low"))
     if not reply.provision_admissible:
         alerts.append(LifecycleAlert("runner_provision_capacity_low"))
+    return reply, tuple(alerts)
+
+
+def inspect_runner_reclamation_status(
+    config: Config,
+    *,
+    transport: RunnerTransport | None = None,
+    now: datetime | None = None,
+) -> tuple[RunnerReclamationStatusReply | None, tuple[LifecycleAlert, ...]]:
+    """Read the root planner's fixed, credential-free status through Runner SSH."""
+    runtime = config.ssh_runtime
+    if runtime is None:
+        raise ValueError("Runner reclamation health requires ssh_runtime")
+    try:
+        remote = transport or SshRunnerTransport(
+            ssh_path=runtime.ssh_path,
+            host=runtime.host,
+            user=runtime.user,
+            port=runtime.port,
+            known_hosts_path=runtime.known_hosts_path,
+            identity_file=runtime.identity_file,
+            assh_proxy_path=runtime.assh_proxy_path,
+            assh_home=runtime.assh_home,
+            connect_timeout_seconds=runtime.connect_timeout_seconds,
+            operation_timeout_seconds=min(runtime.operation_timeout_seconds, 30),
+        )
+        request = RunnerRequest(
+            RunnerOperation.RECLAMATION_STATUS,
+            RUNNER_RECLAMATION_SCOPE_ID,
+            version=NEXT_PROTOCOL_VERSION,
+        )
+        reply = parse_runner_reclamation_status_reply(remote.invoke(request).payload)
+        checked_at = datetime.fromisoformat(reply.checked_at.replace("Z", "+00:00"))
+        moment = datetime.now(timezone.utc) if now is None else now
+        if moment.tzinfo is None:
+            raise ValueError("Runner reclamation health timestamp lacks timezone")
+        age = int((moment.astimezone(timezone.utc) - checked_at).total_seconds())
+        if age < -300:
+            raise ValueError("Runner reclamation status is from the future")
+    except (OSError, ValueError, RunnerProtocolError, RunnerTransportError):
+        return None, (LifecycleAlert("runner_reclamation_status_unavailable"),)
+    alerts: list[LifecycleAlert] = []
+    if age > MAXIMUM_STATUS_AGE_SECONDS:
+        alerts.append(
+            LifecycleAlert("runner_reclamation_status_stale", age_seconds=age)
+        )
+    elif reply.trigger_reasons:
+        alerts.append(
+            LifecycleAlert(
+                "runner_reclamation_plan_ready", plan_sha256=reply.plan_sha256
+            )
+        )
     return reply, tuple(alerts)
 
 

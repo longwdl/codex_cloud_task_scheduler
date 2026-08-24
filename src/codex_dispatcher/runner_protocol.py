@@ -45,6 +45,7 @@ class RunnerOperation(StrEnum):
     ARCHIVE_STATUS = "archive_status"
     PROVE_ABSENCE = "prove_absence"
     CAPACITY = "capacity"
+    RECLAMATION_STATUS = "reclamation_status"
 
 
 _V1_REQUEST_FIELDS = {
@@ -127,6 +128,9 @@ _V2_REQUEST_FIELDS = {
         }
     ),
     RunnerOperation.CAPACITY: frozenset({"version", "op", "work_item_id"}),
+    RunnerOperation.RECLAMATION_STATUS: frozenset(
+        {"version", "op", "work_item_id"}
+    ),
 }
 
 

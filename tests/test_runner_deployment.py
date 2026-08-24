@@ -14,6 +14,8 @@ CAPACITY_WRAPPER = ROOT / "scripts" / "codex-runner-capacity-v1"
 MAINTENANCE_WRAPPER = ROOT / "scripts" / "codex-runner-maintenance-v1"
 CAPACITY_SERVICE = DEPLOYMENT / "codex-runner-capacity.service"
 CAPACITY_TIMER = DEPLOYMENT / "codex-runner-capacity.timer"
+RECLAMATION_SERVICE = DEPLOYMENT / "codex-runner-reclamation-plan.service"
+RECLAMATION_TIMER = DEPLOYMENT / "codex-runner-reclamation-plan.timer"
 
 
 class RunnerDeploymentTests(unittest.TestCase):
@@ -120,12 +122,32 @@ class RunnerDeploymentTests(unittest.TestCase):
         self.assertNotEqual(0, MAINTENANCE_WRAPPER.stat().st_mode & 0o111)
         self.assertIn("root is required", wrapper)
         self.assertIn("2:reclamation-plan", wrapper)
+        self.assertIn("1:reclamation-auto-plan", wrapper)
         self.assertIn("3:recovery-snapshot", wrapper)
         self.assertIn("3:reclamation-recheck", wrapper)
         self.assertIn("4:reclamation-apply", wrapper)
         self.assertIn("codex_dispatcher.runner_maintenance", wrapper)
         self.assertNotIn("docker image prune", wrapper)
         self.assertNotIn("docker system prune", wrapper)
+
+    def test_reclamation_timer_can_only_write_exact_plans_and_status(self) -> None:
+        service = RECLAMATION_SERVICE.read_text(encoding="utf-8")
+        timer = RECLAMATION_TIMER.read_text(encoding="utf-8")
+
+        self.assertIn("User=root", service)
+        self.assertIn("Group=codex-runner", service)
+        self.assertIn("reclamation-auto-plan", service)
+        self.assertIn("PrivateNetwork=yes", service)
+        self.assertIn("ProtectSystem=strict", service)
+        self.assertIn(
+            "ReadWritePaths=/srv/codex-runner/reclamation-plans "
+            "/srv/codex-runner/reclamation-status",
+            service,
+        )
+        self.assertNotIn("reclamation-apply", service)
+        self.assertNotIn("docker image prune", service)
+        self.assertIn("OnUnitInactiveSec=6h", timer)
+        self.assertIn("Persistent=false", timer)
 
 
 if __name__ == "__main__":

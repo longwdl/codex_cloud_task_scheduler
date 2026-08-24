@@ -1,0 +1,53 @@
+[Unit]
+Description=Codex Runner exact read-only reclamation planning
+Documentation=file:///srv/codex-runner/current/docs/schema18-disaster-recovery-and-runner-reclamation.md
+ConditionFileIsExecutable=/srv/codex-runner/bin/codex-runner-maintenance-v1
+ConditionPathIsDirectory=/srv/codex-runner/releases
+ConditionPathIsDirectory=/srv/codex-runner/reclamation-plans
+ConditionPathIsDirectory=/srv/codex-runner/reclamation-status
+
+[Service]
+Type=oneshot
+User=root
+Group=codex-runner
+UMask=0027
+WorkingDirectory=/srv/codex-runner
+ExecStart=/srv/codex-runner/bin/codex-runner-maintenance-v1 reclamation-auto-plan
+
+TimeoutStartSec=5min
+TimeoutStopSec=30s
+KillMode=control-group
+SendSIGKILL=yes
+Restart=no
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=codex-runner-reclamation-plan
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ReadWritePaths=/srv/codex-runner/reclamation-plans /srv/codex-runner/reclamation-status
+ProcSubset=pid
+KeyringMode=private
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+TasksMax=128

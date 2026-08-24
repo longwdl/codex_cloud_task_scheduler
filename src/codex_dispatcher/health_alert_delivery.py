@@ -192,6 +192,7 @@ def health_alert_fingerprint(alerts: tuple[LifecycleAlert, ...]) -> str:
             alert.repository or "",
             alert.issue_number or 0,
             alert.unit or "",
+            alert.plan_sha256 or "",
         )
         for alert in alerts
     )
@@ -236,6 +237,8 @@ def _render_alert(
             identity += f" {alert.work_item_id}"
         if alert.age_seconds is not None:
             identity += f" age_seconds={alert.age_seconds}"
+        if alert.plan_sha256 is not None:
+            identity += f" plan_sha256={alert.plan_sha256}"
         lines.append(f"- {identity}")
     return "\n".join(lines)
 

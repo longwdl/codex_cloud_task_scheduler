@@ -20,8 +20,10 @@ configured SSH operation timeout plus five minutes, a WorkItem blocked for more 
 archive pending for more than 15 minutes, an ambiguous/blocked archive, or an overdue disposition
 or completed-retention archive. With `--systemd`, the fixed wrapper also requires all four timers
 to be loaded, enabled, and active and rejects a failed dispatcher, backup, or restore-drill service
-result. It also sends one fixed protocol-v2 read-only capacity request through the pinned Runner SSH
-endpoint and reports unavailable, Turn-low, or provision-low capacity. It writes only the
+result. It also sends fixed protocol-v2 read-only capacity and reclamation-status requests through
+the pinned Runner SSH endpoint. Capacity reports unavailable, Turn-low, or provision-low state;
+reclamation reports unavailable/stale planner status or an exact plan ready for separate approval.
+It writes only the
 migration-14 health outbox and active-episode row, sends one deduplicated Slack alert per stable
 episode plus one threaded recovery, and never contacts GitHub or repairs remote state. The health
 command does not run migrations; activate the complete shipped migration ledger through the normal
@@ -244,6 +246,12 @@ only `work_item_disk.host_reserve_bytes` above current availability, run one hea
 the exact config, then run health twice to prove one threaded recovery and no duplicate. Backup/service
 canaries similarly use one controlled invalid input or stopped timer, never delete real backups,
 WorkItems, branches, or images; record the alert and recovery permalinks before re-enabling timers.
+
+The same health invocation sends a strict `reclamation_status` read. It never asks Runner to plan or
+delete during the SSH request: the separate root timer publishes a protected status file, and the
+forced endpoint only validates and returns its bounded summary. Alerts are
+`runner_reclamation_status_unavailable`, `runner_reclamation_status_stale`, or
+`runner_reclamation_plan_ready` and are routed to the configured system channel.
 
 Emergency stop disables `codex-dispatcher.timer`, `codex-dispatcher-backup.timer`, and
 `codex-dispatcher-health.timer`, and `codex-dispatcher-restore-drill.timer`, followed, if necessary,

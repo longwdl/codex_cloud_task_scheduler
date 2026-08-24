@@ -412,6 +412,7 @@ def _lifecycle_health(
             MAX_REPORTED_ALERTS,
             inspect_lifecycle_health,
             inspect_runner_capacity,
+            inspect_runner_reclamation_status,
             inspect_systemd_health,
         )
         from codex_dispatcher.slack_web_api import SlackWebApiPublisher
@@ -437,9 +438,14 @@ def _lifecycle_health(
             if check_systemd:
                 unit_states, systemd_alerts = inspect_systemd_health()
             runner_capacity = None
+            runner_reclamation = None
             runner_alerts = ()
             if check_runner_capacity:
                 runner_capacity, runner_alerts = inspect_runner_capacity(config)
+                runner_reclamation, reclamation_alerts = (
+                    inspect_runner_reclamation_status(config)
+                )
+                runner_alerts = tuple(runner_alerts) + tuple(reclamation_alerts)
             combined_alerts = (
                 tuple(snapshot.alerts)
                 + tuple(systemd_alerts)
@@ -480,6 +486,8 @@ def _lifecycle_health(
         payload["runner_capacity_checked"] = check_runner_capacity
         if runner_capacity is not None:
             payload["runner_capacity"] = runner_capacity.to_mapping()
+        if runner_reclamation is not None:
+            payload["runner_reclamation"] = runner_reclamation.to_mapping()
         payload["slack_notification_enabled"] = notify_slack
         if notification is not None:
             payload["slack_notification"] = notification.to_mapping()

@@ -22,6 +22,7 @@ from codex_dispatcher.lifecycle_health import (
     SystemdUnitState,
     inspect_lifecycle_health,
     inspect_runner_capacity,
+    inspect_runner_reclamation_status,
     inspect_systemd_health,
 )
 from codex_dispatcher.github_api_metrics import (
@@ -30,6 +31,7 @@ from codex_dispatcher.github_api_metrics import (
 )
 from codex_dispatcher.runner_transport import (
     RunnerCapacityReply,
+    RunnerReclamationStatusReply,
     RunnerInactiveContainerState,
     RunnerTransportInterrupted,
     RunnerWireOutput,
@@ -411,6 +413,48 @@ class LifecycleHealthTests(unittest.TestCase):
         )
         self.assertIsNone(reply)
         self.assertEqual("runner_capacity_unavailable", alerts[0].code)
+
+    def test_runner_reclamation_health_alerts_for_plan_and_staleness(self) -> None:
+        checked_at = "2026-08-24T00:00:00Z"
+
+        class ReclamationTransport:
+            def invoke(self, request, *, stdin=b"", source_artifact=None):
+                return RunnerWireOutput(
+                    RunnerReclamationStatusReply(
+                        checked_at=checked_at,
+                        host_available_bytes=60 * 1024**3,
+                        release_count=5,
+                        release_target_count=3,
+                        image_target_count=0,
+                        expected_total_bytes=9 * 1024**3,
+                        minimum_available_bytes=64 * 1024**3,
+                        maximum_release_count=4,
+                        minimum_reclaimable_bytes=8 * 1024**3,
+                        trigger_reasons=(
+                            "host_available_below_threshold",
+                            "reclaimable_bytes_above_threshold",
+                            "release_count_above_limit",
+                        ),
+                        plan_sha256="a" * 64,
+                    ).to_json().encode("utf-8")
+                )
+
+        reply, alerts = inspect_runner_reclamation_status(
+            _config(Path("/tmp/state.db")),
+            transport=ReclamationTransport(),
+            now=datetime(2026, 8, 24, 1, tzinfo=timezone.utc),
+        )
+        self.assertIsNotNone(reply)
+        self.assertEqual("runner_reclamation_plan_ready", alerts[0].code)
+        self.assertEqual("a" * 64, alerts[0].plan_sha256)
+
+        reply, alerts = inspect_runner_reclamation_status(
+            _config(Path("/tmp/state.db")),
+            transport=ReclamationTransport(),
+            now=datetime(2026, 8, 25, tzinfo=timezone.utc),
+        )
+        self.assertIsNotNone(reply)
+        self.assertEqual("runner_reclamation_status_stale", alerts[0].code)
     def test_reports_long_blocked_overdue_completed_and_ambiguous_archive(self) -> None:
         now = datetime(2026, 8, 23, tzinfo=timezone.utc)
         old = "2026-08-01T00:00:00+00:00"

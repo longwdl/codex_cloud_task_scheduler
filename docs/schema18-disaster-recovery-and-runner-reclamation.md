@@ -153,6 +153,14 @@ Install root-owned mode-`0600` files from the examples as:
 /srv/codex-runner/etc/reclamation-rollback-references.json
 ```
 
+This ledger is release-owned schema v2. It contains exactly the current release, its immediate
+rollback release, and the currently configured image digest. Release activation atomically replaces
+the ledger and records the exact before/after payload and SHA-256 under
+`/srv/codex-runner/reclamation-reference-receipts/<commit>.apply.json`. Pre-sweep rollback restores
+the prior payload and creates `<commit>.rollback.json`. A structurally valid but stale schema-v1
+ledger is accepted only as the one-time input to this release migration; the reclamation planner
+itself accepts only schema v2 and otherwise fails closed.
+
 Create the immutable output roots once:
 
 ```bash
@@ -166,9 +174,10 @@ label. `publication_run` requires an exact successful publication run. `tree_equ
 recorded evidence that a local pre-publication build used the same Git tree. New images carry
 `org.opencontainers.image.revision` and do not need a manual provenance row.
 
-The rollback reference file must contain the current release, every release named by the retained
-rollback receipt, and every digest that a rollback config could restore. Its
-`current_release_commit` must equal the live `current` symlink or planning fails closed.
+The rollback reference file must contain exactly the current release, the immediate rollback
+release, and the configured image digest. Its `current_release_commit` must equal the live `current`
+symlink or planning fails closed. Older permanent release/reference receipts remain audit evidence;
+they do not keep assets protected beyond the explicit immediate rollback boundary.
 
 Create the exact inventory and immutable plan:
 
@@ -182,6 +191,13 @@ Runner image ID/RepoDigest/source commit, current config digest, active WorkItem
 permanent registry/archive/absence identity, rollback reference, exact deletion target, and Docker
 reported unique-size estimate. Unlabelled base images and build cache are deliberately not inferred
 as Runner releases and are never selected by this workflow.
+
+The six-hour `codex-runner-reclamation-plan.timer` performs the same inventory read automatically.
+It stores an exact plan only when one or more reviewed thresholds fire: less than 64 GiB host space,
+more than four releases, any unreferenced Runner image, or at least 8 GiB expected reclamation. The
+latest strict status is exposed to Control through the read-only `reclamation_status` Runner
+operation; plan-ready, stale, and unavailable states are delivered through the system Slack alert
+channel. This automatic path has no apply flag and cannot delete assets.
 
 Planning never authorizes deletion. Immediately before a separately approved deletion, re-list the
 exact targets and current estimate without writes:

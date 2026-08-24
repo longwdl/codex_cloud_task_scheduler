@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import fcntl
+import grp
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,9 @@ from codex_dispatcher.runner_asset_reclamation import (
     docker_image_assets_from_json,
     plan_runner_asset_reclamation,
 )
+from codex_dispatcher.runner_reclamation_status import (
+    build_runner_reclamation_status,
+)
 
 
 RUNNER_CONFIG = Path("/srv/codex-runner/etc/config.json")
@@ -37,6 +41,8 @@ ROLLBACK_REFERENCES_PATH = Path(
 )
 PLAN_DIRECTORY = Path("/srv/codex-runner/reclamation-plans")
 RECEIPT_DIRECTORY = Path("/srv/codex-runner/reclamation-receipts")
+STATUS_DIRECTORY = Path("/srv/codex-runner/reclamation-status")
+STATUS_PATH = STATUS_DIRECTORY / "latest.json"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -46,6 +52,7 @@ def _parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--current-release-commit", required=True)
     plan = commands.add_parser("reclamation-plan")
     plan.add_argument("--write-plan", action="store_true", required=True)
+    commands.add_parser("reclamation-auto-plan")
     recheck = commands.add_parser("reclamation-recheck")
     recheck.add_argument("--plan-sha256", required=True)
     apply = commands.add_parser("reclamation-apply")
@@ -109,24 +116,46 @@ def _run_reclamation(args: argparse.Namespace) -> dict[str, object]:
         trusted_work_items_owner_uid=work_items_owner_uid,
     )
     plan = plan_runner_asset_reclamation(snapshot)
+    if args.command == "reclamation-auto-plan":
+        filesystem = os.statvfs(RELEASES_ROOT)
+        available = filesystem.f_bavail * filesystem.f_frsize
+        status = build_runner_reclamation_status(
+            host_available_bytes=available,
+            release_count=len(snapshot.releases),
+            release_target_count=len(plan.release_targets),
+            image_target_count=len(plan.image_targets),
+            expected_total_bytes=plan.expected_total_bytes,
+            plan_sha256=plan.plan_sha256,
+        )
+        plan_path: Path | None = None
+        inventory_path: Path | None = None
+        if status.trigger_reasons:
+            plan_path, inventory_path = _store_plan(plan, snapshot.to_mapping())
+        _protected_directory(STATUS_DIRECTORY)
+        status_gid = grp.getgrnam("codex-runner").gr_gid
+        if STATUS_DIRECTORY.stat(follow_symlinks=False).st_gid != status_gid:
+            raise RunnerAssetReclamationError("reclamation status group is invalid")
+        _write_json_atomic(
+            STATUS_PATH,
+            status.to_mapping(),
+            mode=0o640,
+            group_id=status_gid,
+        )
+        payload = status.to_mapping()
+        payload.update(
+            ok=True,
+            status_path=str(STATUS_PATH),
+            plan_path=str(plan_path) if plan_path is not None else None,
+            reference_inventory_path=(
+                str(inventory_path) if inventory_path is not None else None
+            ),
+            authorizes_apply=False,
+            state_writes=3 if status.trigger_reasons else 1,
+        )
+        return payload
     if args.command == "reclamation-plan":
-        _protected_directory(PLAN_DIRECTORY)
-        path = PLAN_DIRECTORY / f"{plan.plan_sha256}.json"
-        if path.exists() or path.is_symlink():
-            existing = RunnerAssetReclamationPlan.from_mapping(_read_json(path))
-            if existing != plan:
-                raise RunnerAssetReclamationError("stored plan identity conflicts")
-        else:
-            _write_json_atomic(path, plan.to_mapping())
-        inventory_path = PLAN_DIRECTORY / f"inventory-{plan.snapshot_sha256}.json"
+        path, inventory_path = _store_plan(plan, snapshot.to_mapping())
         inventory = snapshot.to_mapping()
-        if inventory_path.exists() or inventory_path.is_symlink():
-            if _read_json(inventory_path) != inventory:
-                raise RunnerAssetReclamationError(
-                    "stored reference inventory identity conflicts"
-                )
-        else:
-            _write_json_atomic(inventory_path, inventory)
         payload = plan.to_mapping()
         payload["plan_path"] = str(path)
         payload["reference_inventory_path"] = str(inventory_path)
@@ -280,15 +309,34 @@ def _rollback_references() -> tuple[tuple[str, ...], tuple[str, ...]]:
     commits = payload.get("protected_release_commits")
     images = payload.get("protected_image_refs")
     current = payload.get("current_release_commit")
+    immediate = payload.get("immediate_rollback_release_commit")
+    current_image = payload.get("current_image_ref")
     if (
-        payload.get("schema_version") != 1
+        set(payload)
+        != {
+            "schema_version",
+            "kind",
+            "current_release_commit",
+            "immediate_rollback_release_commit",
+            "current_image_ref",
+            "protected_release_commits",
+            "protected_image_refs",
+        }
+        or payload.get("schema_version") != 2
         or payload.get("kind") != "runner_reclamation_rollback_references"
         or not isinstance(commits, list)
         or not isinstance(images, list)
         or not all(isinstance(value, str) for value in commits)
         or not all(isinstance(value, str) for value in images)
         or not isinstance(current, str)
+        or not isinstance(immediate, str)
+        or not isinstance(current_image, str)
         or current not in commits
+        or immediate not in commits
+        or current_image not in images
+        or current == immediate
+        or len(commits) != 2
+        or len(images) != 1
         or os.readlink(CURRENT_LINK).rstrip("/").split("/")[-1] != current
     ):
         raise RunnerAssetReclamationError("Runner rollback references are stale or invalid")
@@ -296,6 +344,29 @@ def _rollback_references() -> tuple[tuple[str, ...], tuple[str, ...]]:
         tuple(value for value in commits if value != current),
         tuple(images),
     )
+
+
+def _store_plan(
+    plan: RunnerAssetReclamationPlan,
+    inventory: dict[str, object],
+) -> tuple[Path, Path]:
+    _protected_directory(PLAN_DIRECTORY)
+    path = PLAN_DIRECTORY / f"{plan.plan_sha256}.json"
+    if path.exists() or path.is_symlink():
+        existing = RunnerAssetReclamationPlan.from_mapping(_read_json(path))
+        if existing != plan:
+            raise RunnerAssetReclamationError("stored plan identity conflicts")
+    else:
+        _write_json_atomic(path, plan.to_mapping())
+    inventory_path = PLAN_DIRECTORY / f"inventory-{plan.snapshot_sha256}.json"
+    if inventory_path.exists() or inventory_path.is_symlink():
+        if _read_json(inventory_path) != inventory:
+            raise RunnerAssetReclamationError(
+                "stored reference inventory identity conflicts"
+            )
+    else:
+        _write_json_atomic(inventory_path, inventory)
+    return path, inventory_path
 
 
 def _load_plan(plan_sha256: str) -> RunnerAssetReclamationPlan:
@@ -408,11 +479,20 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return payload
 
 
-def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
+def _write_json_atomic(
+    path: Path,
+    payload: dict[str, object],
+    *,
+    mode: int = 0o600,
+    group_id: int | None = None,
+) -> None:
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode() + b"\n"
     staging = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
+        if group_id is not None:
+            os.fchown(descriptor, 0, group_id)
+        os.fchmod(descriptor, mode)
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(raw)
             stream.flush()

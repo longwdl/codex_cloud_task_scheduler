@@ -31,6 +31,8 @@ Install immutable inputs as root-owned and non-group/world-writable:
 /srv/codex-runner/etc/reclamation-rollback-references.json root:root 0600
 /srv/codex-runner/reclamation-plans/      root:root             0700
 /srv/codex-runner/reclamation-receipts/   root:root             0700
+/srv/codex-runner/reclamation-reference-receipts/ root:root      0700
+/srv/codex-runner/reclamation-status/     root:codex-runner     0750
 /etc/ssh/authorized_keys/                 root:root             0755
 /etc/ssh/authorized_keys/codex-runner     root:codex-runner     0640
 /etc/ssh/sshd_config.d/60-codex-runner.conf root:root           0644
@@ -195,6 +197,19 @@ per-WorkItem archive receipts and never infers targets from age, tags, or free-s
 the exact inventory, recheck, and permanent-receipt sequence in
 [`docs/schema18-disaster-recovery-and-runner-reclamation.md`](../../docs/schema18-disaster-recovery-and-runner-reclamation.md).
 Never use a Docker prune command for this purpose.
+
+The release transaction owns `reclamation-rollback-references.json`. Every successful activation
+replaces it with the exact current release, immediate rollback release, and configured image digest,
+then writes an immutable before/after receipt under
+`reclamation-reference-receipts/`. A pre-sweep release rollback restores the exact prior ledger and
+writes a separate rollback receipt. Do not edit the ledger as a normal release step.
+
+`codex-runner-reclamation-plan.timer` runs the root-only `reclamation-auto-plan` command every six
+hours. It writes an exact non-authorizing plan only when available host space is below 64 GiB, more
+than four releases exist, at least one unreferenced Runner image exists, or expected reclamation is
+at least 8 GiB. It always refreshes the group-readable strict status file used by the forced Runner
+protocol. The timer cannot invoke `reclamation-apply`; deletion still requires a separately approved
+plan SHA-256, a fresh exact recheck, and a permanent reclamation receipt.
 
 If old state was already manually removed, ordinary `ARCHIVE` must continue to fail closed. Schema
 13 keeps a separate absence-reconciliation ledger. After stopping the dispatcher timer, an operator

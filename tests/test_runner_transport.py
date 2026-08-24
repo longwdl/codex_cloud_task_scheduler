@@ -16,7 +16,9 @@ from codex_dispatcher.runner_protocol import (
 )
 from codex_dispatcher.runner_transport import (
     RUNNER_CAPACITY_SCOPE_ID,
+    RUNNER_RECLAMATION_SCOPE_ID,
     RunnerCapacityReply,
+    RunnerReclamationStatusReply,
     RunnerAbsenceReply,
     RunnerArchiveReply,
     RunnerArchiveState,
@@ -28,6 +30,7 @@ from codex_dispatcher.runner_transport import (
     parse_runner_absence_reply,
     parse_runner_archive_reply,
     parse_runner_capacity_reply,
+    parse_runner_reclamation_status_reply,
     parse_runner_export_reply,
     parse_runner_turn_reply,
 )
@@ -361,6 +364,39 @@ class RunnerTransportContractTests(unittest.TestCase):
         payload["provision_shortfall_bytes"] = 0
         with self.assertRaises(RunnerProtocolError):
             parse_runner_capacity_reply(json.dumps(payload))
+
+    def test_reclamation_status_reply_is_strict_and_non_authorizing(self) -> None:
+        reply = RunnerReclamationStatusReply(
+            checked_at="2026-08-24T00:00:00Z",
+            host_available_bytes=60 * 1024**3,
+            release_count=5,
+            release_target_count=3,
+            image_target_count=1,
+            expected_total_bytes=9 * 1024**3,
+            minimum_available_bytes=64 * 1024**3,
+            maximum_release_count=4,
+            minimum_reclaimable_bytes=8 * 1024**3,
+            trigger_reasons=(
+                "host_available_below_threshold",
+                "reclaimable_bytes_above_threshold",
+                "release_count_above_limit",
+                "unreferenced_images_present",
+            ),
+            plan_sha256="f" * 64,
+        )
+        self.assertEqual(
+            reply, parse_runner_reclamation_status_reply(reply.to_json())
+        )
+        self.assertEqual(RUNNER_RECLAMATION_SCOPE_ID, reply.work_item_id)
+        self.assertNotIn("authorizes_apply", reply.to_mapping())
+        payload = json.loads(reply.to_json())
+        payload["trigger_reasons"] = []
+        with self.assertRaises(RunnerProtocolError):
+            parse_runner_reclamation_status_reply(json.dumps(payload))
+        payload = json.loads(reply.to_json())
+        payload["minimum_available_bytes"] = 1
+        with self.assertRaises(RunnerProtocolError):
+            parse_runner_reclamation_status_reply(json.dumps(payload))
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import fcntl
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from codex_dispatcher.runner_protocol import (
 from codex_dispatcher.runner_service import LinuxRunnerService, serve_one
 from codex_dispatcher.runner_transport import (
     RUNNER_CAPACITY_SCOPE_ID,
+    RUNNER_RECLAMATION_SCOPE_ID,
     RunnerArchiveState,
     RunnerInactiveContainerState,
     RunnerTransportRejected,
@@ -27,8 +29,10 @@ from codex_dispatcher.runner_transport import (
     parse_runner_ack,
     parse_runner_archive_reply,
     parse_runner_capacity_reply,
+    parse_runner_reclamation_status_reply,
     parse_runner_turn_reply,
 )
+from codex_dispatcher.runner_reclamation_status import RunnerReclamationStatus
 from codex_dispatcher.runner_turns import (
     RunnerTurnError,
     RunnerTurnExecutor,
@@ -495,6 +499,42 @@ class RunnerTurnExecutorTests(unittest.TestCase):
             )
             reply = parse_runner_capacity_reply(response.payload)
             self.assertTrue(reply.provision_admissible)
+            self.assertFalse((Path(temp_dir) / "missing-parent").exists())
+
+    def test_forced_reclamation_status_is_read_only_and_does_not_take_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = LinuxRunnerService(
+                workspace=SimpleNamespace(),
+                turns=SimpleNamespace(),
+                active_lock_path=Path(temp_dir) / "missing-parent" / "active.lock",
+            )
+            status = RunnerReclamationStatus(
+                checked_at="2026-08-24T00:00:00Z",
+                host_available_bytes=64 * 1024**3,
+                release_count=2,
+                release_target_count=0,
+                image_target_count=0,
+                expected_total_bytes=0,
+                trigger_reasons=(),
+                plan_sha256=None,
+            )
+            with patch(
+                "codex_dispatcher.runner_service.read_runner_reclamation_status",
+                return_value=status,
+            ):
+                response = decode_runner_output(
+                    service.handle_frame(
+                        encode_runner_input(
+                            RunnerRequest(
+                                RunnerOperation.RECLAMATION_STATUS,
+                                RUNNER_RECLAMATION_SCOPE_ID,
+                                version=NEXT_PROTOCOL_VERSION,
+                            )
+                        )
+                    )
+                )
+            reply = parse_runner_reclamation_status_reply(response.payload)
+            self.assertEqual((), reply.trigger_reasons)
             self.assertFalse((Path(temp_dir) / "missing-parent").exists())
 
     def test_forced_command_stop_is_abandonment_only_and_requires_turn_lock(self) -> None:

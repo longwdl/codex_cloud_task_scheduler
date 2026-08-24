@@ -84,6 +84,7 @@ class RunnerTransport(Protocol):
 
 
 RUNNER_CAPACITY_SCOPE_ID = "wi_" + "0" * 24
+RUNNER_RECLAMATION_SCOPE_ID = "wi_" + "1" * 24
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +190,124 @@ def parse_runner_capacity_reply(value: str | bytes) -> RunnerCapacityReply:
             turn_admissible=payload["turn_admissible"],
             provision_admissible=payload["provision_admissible"],
             provision_shortfall_bytes=payload["provision_shortfall_bytes"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise RunnerProtocolError(str(exc)) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class RunnerReclamationStatusReply:
+    checked_at: str
+    host_available_bytes: int
+    release_count: int
+    release_target_count: int
+    image_target_count: int
+    expected_total_bytes: int
+    minimum_available_bytes: int
+    maximum_release_count: int
+    minimum_reclaimable_bytes: int
+    trigger_reasons: tuple[str, ...]
+    plan_sha256: str | None
+    operation: RunnerOperation = RunnerOperation.RECLAMATION_STATUS
+    work_item_id: str = RUNNER_RECLAMATION_SCOPE_ID
+    version: int = NEXT_PROTOCOL_VERSION
+
+    def __post_init__(self) -> None:
+        from codex_dispatcher.runner_reclamation_status import RunnerReclamationStatus
+
+        if self.operation is not RunnerOperation.RECLAMATION_STATUS:
+            raise RunnerProtocolError(
+                "operation does not return reclamation status evidence"
+            )
+        if self.version != NEXT_PROTOCOL_VERSION:
+            raise RunnerProtocolError("unsupported Runner reclamation response version")
+        if self.work_item_id != RUNNER_RECLAMATION_SCOPE_ID:
+            raise RunnerProtocolError("Runner reclamation scope is invalid")
+        try:
+            RunnerReclamationStatus(
+                checked_at=self.checked_at,
+                host_available_bytes=self.host_available_bytes,
+                release_count=self.release_count,
+                release_target_count=self.release_target_count,
+                image_target_count=self.image_target_count,
+                expected_total_bytes=self.expected_total_bytes,
+                minimum_available_bytes=self.minimum_available_bytes,
+                maximum_release_count=self.maximum_release_count,
+                minimum_reclaimable_bytes=self.minimum_reclaimable_bytes,
+                trigger_reasons=self.trigger_reasons,
+                plan_sha256=self.plan_sha256,
+            )
+        except ValueError as exc:
+            raise RunnerProtocolError(str(exc)) from exc
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "op": self.operation.value,
+            "work_item_id": self.work_item_id,
+            "state": "ok",
+            "checked_at": self.checked_at,
+            "host_available_bytes": self.host_available_bytes,
+            "release_count": self.release_count,
+            "release_target_count": self.release_target_count,
+            "image_target_count": self.image_target_count,
+            "expected_total_bytes": self.expected_total_bytes,
+            "minimum_available_bytes": self.minimum_available_bytes,
+            "maximum_release_count": self.maximum_release_count,
+            "minimum_reclaimable_bytes": self.minimum_reclaimable_bytes,
+            "trigger_reasons": list(self.trigger_reasons),
+            "plan_sha256": self.plan_sha256,
+        }
+
+    def to_json(self) -> str:
+        return _dump(self.to_mapping())
+
+
+def parse_runner_reclamation_status_reply(
+    value: str | bytes,
+) -> RunnerReclamationStatusReply:
+    payload = _load(value)
+    expected = {
+        "version",
+        "op",
+        "work_item_id",
+        "state",
+        "checked_at",
+        "host_available_bytes",
+        "release_count",
+        "release_target_count",
+        "image_target_count",
+        "expected_total_bytes",
+        "minimum_available_bytes",
+        "maximum_release_count",
+        "minimum_reclaimable_bytes",
+        "trigger_reasons",
+        "plan_sha256",
+    }
+    reasons = payload.get("trigger_reasons")
+    if (
+        set(payload) != expected
+        or payload.get("state") != "ok"
+        or not isinstance(reasons, list)
+        or not all(isinstance(value, str) for value in reasons)
+    ):
+        raise RunnerProtocolError("Runner reclamation response fields are invalid")
+    try:
+        return RunnerReclamationStatusReply(
+            operation=RunnerOperation(payload["op"]),
+            work_item_id=payload["work_item_id"],
+            version=payload["version"],
+            checked_at=payload["checked_at"],
+            host_available_bytes=payload["host_available_bytes"],
+            release_count=payload["release_count"],
+            release_target_count=payload["release_target_count"],
+            image_target_count=payload["image_target_count"],
+            expected_total_bytes=payload["expected_total_bytes"],
+            minimum_available_bytes=payload["minimum_available_bytes"],
+            maximum_release_count=payload["maximum_release_count"],
+            minimum_reclaimable_bytes=payload["minimum_reclaimable_bytes"],
+            trigger_reasons=tuple(reasons),
+            plan_sha256=payload["plan_sha256"],
         )
     except (TypeError, ValueError) as exc:
         raise RunnerProtocolError(str(exc)) from exc

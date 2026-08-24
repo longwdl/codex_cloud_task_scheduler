@@ -157,6 +157,28 @@ class ReleaseDeploymentTests(unittest.TestCase):
             text.index("record_phase runner_capacity"),
         )
 
+    def test_release_tool_transactionally_owns_reclamation_references(self) -> None:
+        text = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("reclamation-reference-receipts", text)
+        self.assertIn("runner_release_references prepare", text)
+        self.assertIn("runner_release_references commit", text)
+        self.assertIn("runner_release_references rollback", text)
+        self.assertIn('"runner_references_applied"', text)
+        self.assertIn('"runner_reference_apply_receipt"', text)
+        self.assertLess(
+            text.index("record_phase runner_switch_intent"),
+            text.index("record_phase runner_references_install_intent"),
+        )
+        self.assertLess(
+            text.index("record_phase runner_references_install_intent"),
+            text.index("record_phase control_switch_intent"),
+        )
+        self.assertLess(
+            text.index("record_phase runner_reclamation_plan"),
+            text.index("receipt_write committed handoff_required"),
+        )
+
     def test_agent_result_output_schema_is_strict_v2(self) -> None:
         import json
 

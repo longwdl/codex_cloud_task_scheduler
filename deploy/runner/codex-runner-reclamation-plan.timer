@@ -1,0 +1,13 @@
+[Unit]
+Description=Generate exact Codex Runner reclamation plans every six hours
+
+[Timer]
+Unit=codex-runner-reclamation-plan.service
+OnBootSec=10min
+OnUnitInactiveSec=6h
+RandomizedDelaySec=15min
+AccuracySec=5min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

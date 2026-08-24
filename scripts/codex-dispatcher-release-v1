@@ -136,6 +136,8 @@ runner_archive=/var/tmp/codex-dispatcher-release-$commit.tar
 runner_output_schema=/srv/codex-runner/etc/agent-result.schema.json
 runner_audit_output_schema=/srv/codex-runner/etc/agent-result-audit.schema.json
 runner_schema_backup_root=/srv/codex-runner/schema-backups
+runner_reference_receipt_root=/srv/codex-runner/reclamation-reference-receipts
+runner_reclamation_status_root=/srv/codex-runner/reclamation-status
 control_units='codex-dispatcher.service codex-dispatcher.timer codex-dispatcher-backup.service codex-dispatcher-backup.timer codex-dispatcher-health.service codex-dispatcher-health.timer codex-dispatcher-restore-drill.service codex-dispatcher-restore-drill.timer'
 control_services='codex-dispatcher.service codex-dispatcher-health.service codex-dispatcher-backup.service codex-dispatcher-restore-drill.service'
 control_timers='codex-dispatcher.timer codex-dispatcher-health.timer codex-dispatcher-backup.timer codex-dispatcher-restore-drill.timer'
@@ -255,7 +257,7 @@ restore_units() {
         *) restore_runner_release=/srv/codex-runner/$restore_runner ;;
     esac
     /usr/bin/ssh -o BatchMode=yes codex-runner \
-        "/usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$restore_runner_release/scripts/codex-runner-v1' /srv/codex-runner/bin/codex-runner-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$restore_runner_release/scripts/codex-runner-capacity-v1' /srv/codex-runner/bin/codex-runner-capacity-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$restore_runner_release/deploy/runner/codex-runner-capacity.service' /etc/systemd/system/codex-runner-capacity.service && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$restore_runner_release/deploy/runner/codex-runner-capacity.timer' /etc/systemd/system/codex-runner-capacity.timer"
+        "/usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$restore_runner_release/scripts/codex-runner-v1' /srv/codex-runner/bin/codex-runner-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$restore_runner_release/scripts/codex-runner-capacity-v1' /srv/codex-runner/bin/codex-runner-capacity-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$restore_runner_release/scripts/codex-runner-maintenance-v1' /srv/codex-runner/bin/codex-runner-maintenance-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$restore_runner_release/deploy/runner/codex-runner-capacity.service' /etc/systemd/system/codex-runner-capacity.service && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$restore_runner_release/deploy/runner/codex-runner-capacity.timer' /etc/systemd/system/codex-runner-capacity.timer && if /usr/bin/sudo -n /usr/bin/test -f '$restore_runner_release/deploy/runner/codex-runner-reclamation-plan.service'; then /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$restore_runner_release/deploy/runner/codex-runner-reclamation-plan.service' /etc/systemd/system/codex-runner-reclamation-plan.service && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$restore_runner_release/deploy/runner/codex-runner-reclamation-plan.timer' /etc/systemd/system/codex-runner-reclamation-plan.timer; else /usr/bin/sudo -n /usr/bin/systemctl disable --now codex-runner-reclamation-plan.timer >/dev/null 2>&1 || true; /usr/bin/sudo -n /usr/bin/rm -f /etc/systemd/system/codex-runner-reclamation-plan.service /etc/systemd/system/codex-runner-reclamation-plan.timer; fi"
     /usr/bin/sudo -n /usr/bin/systemctl daemon-reload
     /usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n /usr/bin/systemctl daemon-reload
 }
@@ -331,11 +333,30 @@ if [ "$mode" = rollback ]; then
             exit 1
         }
     fi
+    runner_references_applied=$(receipt_field runner_references_applied)
+    [ "$runner_references_applied" = 1 ] || {
+        printf '%s\n' 'release receipt lacks transactional Runner references' >&2
+        exit 1
+    }
+    runner_reference_apply_receipt=$(receipt_field runner_reference_apply_receipt)
+    [ "$runner_reference_apply_receipt" = "$runner_reference_receipt_root/$commit.apply.json" ] || {
+        printf '%s\n' 'Runner reference receipt path is invalid' >&2
+        exit 1
+    }
     receipt_update_existing rollback_in_progress rollback_intent '' rollback
     /usr/bin/sudo -n /usr/bin/ln -sfn "$previous_control" /opt/codex-dispatcher/current.rollback
     /usr/bin/sudo -n /usr/bin/mv -Tf /opt/codex-dispatcher/current.rollback /opt/codex-dispatcher/current
     /usr/bin/ssh -o BatchMode=yes codex-runner \
         "/usr/bin/sudo -n /usr/bin/ln -sfn '$previous_runner' /srv/codex-runner/current.rollback && /usr/bin/sudo -n /usr/bin/mv -Tf /srv/codex-runner/current.rollback /srv/codex-runner/current"
+    if ! /usr/bin/ssh -o BatchMode=yes codex-runner \
+            "/usr/bin/sudo -n /usr/bin/env -i HOME=/root LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH='$runner_release/src' /usr/bin/python3 -P -s -m codex_dispatcher.runner_release_references rollback --release-commit '$commit'"; then
+        /usr/bin/ssh -o BatchMode=yes codex-runner \
+            "/usr/bin/sudo -n /usr/bin/ln -sfn 'releases/$commit' /srv/codex-runner/current.rollback && /usr/bin/sudo -n /usr/bin/mv -Tf /srv/codex-runner/current.rollback /srv/codex-runner/current"
+        /usr/bin/sudo -n /usr/bin/ln -sfn "$control_release" /opt/codex-dispatcher/current.rollback
+        /usr/bin/sudo -n /usr/bin/mv -Tf /opt/codex-dispatcher/current.rollback /opt/codex-dispatcher/current
+        receipt_update_existing committed handoff_required runner_reference_rollback_failed apply
+        exit 1
+    fi
     if [ "$config_applied" = 1 ]; then
         old_config_sha=$(receipt_field config_old_sha256)
         validate_hex "$old_config_sha" 64 || exit 1
@@ -516,6 +537,9 @@ runner_audit_schema_new_sha256=
 runner_audit_schema_previous_uid=
 runner_audit_schema_previous_gid=
 runner_audit_schema_previous_mode=
+runner_references_started=0
+runner_references_applied=0
+runner_reference_apply_receipt=
 current_phase=arguments
 active_timers_before=
 dispatcher_invocation_id_before=
@@ -547,7 +571,8 @@ receipt_write() {
         "$runner_audit_schema_old_sha256" "$runner_audit_schema_new_sha256" \
         "$runner_audit_schema_previous_uid" "$runner_audit_schema_previous_gid" \
         "$runner_audit_schema_previous_mode" "$dispatcher_invocation_id_before" \
-        "$active_timers_before" "$started_at" <<'PY'
+        "$active_timers_before" "$started_at" "$runner_references_started" \
+        "$runner_references_applied" "$runner_reference_apply_receipt" <<'PY'
 import json, os, pathlib, sys, tempfile
 path = pathlib.Path(sys.argv[1])
 data = {"schema_version": 2, "kind": "codex_dispatcher_release",
@@ -575,7 +600,10 @@ data = {"schema_version": 2, "kind": "codex_dispatcher_release",
     "runner_audit_schema_previous_mode": sys.argv[32] or None,
     "dispatcher_invocation_id_before": sys.argv[33],
     "active_timers_before": sys.argv[34].split(), "timers_started": False,
-    "requires_manual_sweep": True, "started_at": sys.argv[35]}
+    "requires_manual_sweep": True, "started_at": sys.argv[35],
+    "runner_references_started": sys.argv[36] == "1",
+    "runner_references_applied": sys.argv[37] == "1",
+    "runner_reference_apply_receipt": sys.argv[38] or None}
 data["updated_at"] = __import__("datetime").datetime.now(
     __import__("datetime").timezone.utc).isoformat().replace("+00:00", "Z")
 fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -687,6 +715,13 @@ cleanup() {
         if [ "$activated_runner" -eq 1 ]; then
             /usr/bin/ssh -o BatchMode=yes codex-runner \
                 "/usr/bin/sudo -n /usr/bin/ln -sfn '$previous_runner' /srv/codex-runner/current.rollback && /usr/bin/sudo -n /usr/bin/mv -Tf /srv/codex-runner/current.rollback /srv/codex-runner/current" || rollback_ok=0
+        fi
+        if [ "$runner_references_started" -eq 1 ]; then
+            if /usr/bin/ssh -o BatchMode=yes codex-runner \
+                    "/usr/bin/sudo -n /usr/bin/test -f '$runner_reference_apply_receipt' && ! /usr/bin/sudo -n /usr/bin/test -L '$runner_reference_apply_receipt'"; then
+                /usr/bin/ssh -o BatchMode=yes codex-runner \
+                    "/usr/bin/sudo -n /usr/bin/env -i HOME=/root LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH='$runner_release/src' /usr/bin/python3 -P -s -m codex_dispatcher.runner_release_references rollback --release-commit '$commit'" || rollback_ok=0
+            fi
         fi
         restore_units "$previous_control" "$previous_runner" || rollback_ok=0
     fi
@@ -895,6 +930,20 @@ else
 fi
 receipt_write in_progress runner_switch_observed ''
 
+record_phase runner_references_install_intent
+previous_runner_commit=${previous_runner##*/}
+validate_hex "$previous_runner_commit" 40
+runner_reference_apply_receipt=$runner_reference_receipt_root/$commit.apply.json
+runner_references_started=1
+receipt_write in_progress runner_references_prepare_intent ''
+/usr/bin/ssh -o BatchMode=yes codex-runner \
+    "/usr/bin/sudo -n /usr/bin/install -d -o root -g root -m 0700 '$runner_reference_receipt_root' /srv/codex-runner/reclamation-plans /srv/codex-runner/reclamation-receipts && /usr/bin/sudo -n /usr/bin/install -d -o root -g codex-runner -m 0750 '$runner_reclamation_status_root' && /usr/bin/sudo -n /usr/bin/env -i HOME=/root LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH='$runner_release/src' /usr/bin/python3 -P -s -m codex_dispatcher.runner_release_references prepare --release-commit '$commit' --previous-release-commit '$previous_runner_commit'"
+receipt_write in_progress runner_references_prepare_observed ''
+/usr/bin/ssh -o BatchMode=yes codex-runner \
+    "/usr/bin/sudo -n /usr/bin/env -i HOME=/root LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH='$runner_release/src' /usr/bin/python3 -P -s -m codex_dispatcher.runner_release_references commit --release-commit '$commit'"
+runner_references_applied=1
+receipt_write in_progress runner_references_install_observed ''
+
 record_phase control_switch_intent
 control_switch_started=1
 /usr/bin/sudo -n /usr/bin/ln -sfn "$control_release" /opt/codex-dispatcher/current.next
@@ -908,7 +957,7 @@ for unit in $control_units; do
         "$control_release/deploy/systemd/$unit" "/etc/systemd/system/$unit"
 done
 /usr/bin/ssh -o BatchMode=yes codex-runner \
-    "/usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$runner_release/scripts/codex-runner-v1' /srv/codex-runner/bin/codex-runner-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$runner_release/scripts/codex-runner-capacity-v1' /srv/codex-runner/bin/codex-runner-capacity-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$runner_release/scripts/codex-runner-maintenance-v1' /srv/codex-runner/bin/codex-runner-maintenance-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$runner_release/deploy/runner/codex-runner-capacity.service' /etc/systemd/system/codex-runner-capacity.service && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$runner_release/deploy/runner/codex-runner-capacity.timer' /etc/systemd/system/codex-runner-capacity.timer"
+    "/usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$runner_release/scripts/codex-runner-v1' /srv/codex-runner/bin/codex-runner-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$runner_release/scripts/codex-runner-capacity-v1' /srv/codex-runner/bin/codex-runner-capacity-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0755 '$runner_release/scripts/codex-runner-maintenance-v1' /srv/codex-runner/bin/codex-runner-maintenance-v1 && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$runner_release/deploy/runner/codex-runner-capacity.service' /etc/systemd/system/codex-runner-capacity.service && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$runner_release/deploy/runner/codex-runner-capacity.timer' /etc/systemd/system/codex-runner-capacity.timer && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$runner_release/deploy/runner/codex-runner-reclamation-plan.service' /etc/systemd/system/codex-runner-reclamation-plan.service && /usr/bin/sudo -n /usr/bin/install -o root -g root -m 0644 '$runner_release/deploy/runner/codex-runner-reclamation-plan.timer' /etc/systemd/system/codex-runner-reclamation-plan.timer"
 record_phase runner_schema_install_intent
 runner_schema_install_started=1
 /usr/bin/ssh -o BatchMode=yes codex-runner \
@@ -934,7 +983,9 @@ receipt_write in_progress runner_audit_schema_install_observed ''
     /etc/systemd/system/codex-dispatcher-restore-drill.timer
 /usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n /usr/bin/systemd-analyze verify \
     /etc/systemd/system/codex-runner-capacity.service \
-    /etc/systemd/system/codex-runner-capacity.timer
+    /etc/systemd/system/codex-runner-capacity.timer \
+    /etc/systemd/system/codex-runner-reclamation-plan.service \
+    /etc/systemd/system/codex-runner-reclamation-plan.timer
 
 if [ "$seen_config" -eq 1 ]; then
     record_phase config_install_intent
@@ -951,6 +1002,10 @@ fi
 record_phase runner_capacity
 /usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n /usr/bin/systemctl start \
     codex-runner-capacity.service
+
+record_phase runner_reclamation_plan
+/usr/bin/ssh -o BatchMode=yes codex-runner /usr/bin/sudo -n /usr/bin/systemctl start \
+    codex-runner-reclamation-plan.service
 
 record_phase prepared
 for service in $control_services; do

@@ -14,8 +14,14 @@ from codex_dispatcher.runner_protocol import (
 )
 from codex_dispatcher.runner_transport import (
     RunnerCapacityReply,
+    RunnerReclamationStatusReply,
     RunnerTransportRejected,
     RunnerWireOutput,
+)
+from codex_dispatcher.runner_reclamation_status import (
+    STATUS_PATH,
+    RunnerReclamationStatusError,
+    read_runner_reclamation_status,
 )
 from codex_dispatcher.runner_turns import RunnerTurnError, RunnerTurnExecutor
 from codex_dispatcher.runner_wire import (
@@ -40,6 +46,7 @@ class LinuxRunnerService:
         workspace: RunnerWorkspace,
         turns: RunnerTurnExecutor,
         active_lock_path: Path,
+        reclamation_status_path: Path = STATUS_PATH,
     ) -> None:
         if (
             not isinstance(active_lock_path, Path)
@@ -50,6 +57,7 @@ class LinuxRunnerService:
         self._workspace = workspace
         self._turns = turns
         self._active_lock_path = active_lock_path
+        self._reclamation_status_path = reclamation_status_path
 
     def handle_frame(self, frame: bytes) -> bytes:
         request, prompt, source_artifact = decode_runner_input(frame)
@@ -100,9 +108,29 @@ class LinuxRunnerService:
                     provision_shortfall_bytes=snapshot.provision_shortfall_bytes,
                 )
                 output = RunnerWireOutput(reply.to_json().encode("utf-8"))
+            elif request.operation is RunnerOperation.RECLAMATION_STATUS:
+                status = read_runner_reclamation_status(self._reclamation_status_path)
+                reply = RunnerReclamationStatusReply(
+                    checked_at=status.checked_at,
+                    host_available_bytes=status.host_available_bytes,
+                    release_count=status.release_count,
+                    release_target_count=status.release_target_count,
+                    image_target_count=status.image_target_count,
+                    expected_total_bytes=status.expected_total_bytes,
+                    minimum_available_bytes=status.minimum_available_bytes,
+                    maximum_release_count=status.maximum_release_count,
+                    minimum_reclaimable_bytes=status.minimum_reclaimable_bytes,
+                    trigger_reasons=status.trigger_reasons,
+                    plan_sha256=status.plan_sha256,
+                )
+                output = RunnerWireOutput(reply.to_json().encode("utf-8"))
             else:
                 raise RunnerTransportRejected("Runner operation is disabled")
-        except (RunnerWorkspaceError, RunnerTurnError) as exc:
+        except (
+            RunnerWorkspaceError,
+            RunnerTurnError,
+            RunnerReclamationStatusError,
+        ) as exc:
             raise RunnerTransportRejected("Runner definitively rejected the request") from exc
         return encode_runner_output(output)
 
