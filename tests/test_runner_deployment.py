@@ -139,6 +139,11 @@ class RunnerDeploymentTests(unittest.TestCase):
         self.assertIn("reclamation-auto-plan", service)
         self.assertIn("PrivateNetwork=yes", service)
         self.assertIn("ProtectSystem=strict", service)
+        self.assertIn("ProtectHome=tmpfs", service)
+        self.assertNotIn("ProtectHome=read-only", service)
+        self.assertIn(
+            "BindReadOnlyPaths=/run/user/1002/docker.sock", service
+        )
         self.assertIn(
             "ReadWritePaths=/srv/codex-runner/reclamation-plans "
             "/srv/codex-runner/reclamation-status",
