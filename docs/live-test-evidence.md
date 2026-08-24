@@ -2547,3 +2547,72 @@ service-only `ExecMainStatus`. Runner observation now uses fixed `ecs-user` SSH 
 and systemd property validation is unit-type-specific. An earlier `cca0552` activation was rolled
 back before its first Dispatcher invocation; all later corrections used forward releases after
 their first sweep. No binary-only rollback was attempted after external reconciliation began.
+
+## Independent recovery bundle and exact two-host reclamation — 2026-08-24
+
+Release `4ae9ad45645a30e3dd233ac044f9fb97fc132389` is active on Control and Runner;
+its immediate rollback release is `31688e2a6086ed7e70d620fe673abb0cf6fc54a5`. The release
+archive SHA-256 is
+`75bee71f64d5482f2e41bd77be3d652f5e8a5e296d57d49b09f90dde52cd5ae9`.
+All 612 tests and compile checks passed under both Linux service contexts before activation. The
+post-release sweep was `idle` with four reads, zero writes, and zero failures. All four Control
+timers and the Runner reclamation-plan timer are active. The immutable handoff receipt SHA-256 is
+`e035e460f2f71ecd8e069942bdeed254c31738497b6b668eaf6a2d741cfaf53e`.
+
+The previously approved Runner plan
+`ff3dff9f415915ccf0db46c9fe867cf20886114129d6694f714941dd4ca333fb` was rechecked immediately
+before apply. Its seven exact release targets and tree hashes were unchanged, with zero image
+targets and `28,217,344` expected bytes. The apply reclaimed all seven exact targets and wrote the
+permanent receipt
+`/srv/codex-runner/reclamation-receipts/ff3dff9f415915ccf0db46c9fe867cf20886114129d6694f714941dd4ca333fb.json`,
+whose file SHA-256 is
+`cc1ece8aa2c001c95172da63361730188fb9a7d10c301b224e355cb78b9c0341`. Every exact target was then
+absent, while current and rollback references remained protected. The original plan alert was
+closed in its existing
+[system-channel thread](https://codex-nt54555.slack.com/archives/C0BS3LPG43G/p1787569232583129?thread_ts=1787566764.673029&cid=C0BS3LPG43G).
+
+The accepted current-state recovery bundle is
+`20260824T113900Z-4ae9ad4`, with manifest SHA-256
+`0fbe4fb75ded683417eac67973be691186f0741f583fc11986deebcd5c7c38f2`. It was exported as opaque
+bytes to
+`/Users/wdl/.codex/disaster-recovery-bundles/20260824T113900Z-4ae9ad4`, then imported into the
+distinct Control path `20260824T113900Z-4ae9ad4-reimported`; both manifest hashes matched. The
+bundle contains the exact release tree, protected Control configuration, release and handoff
+receipts, schema-v3 Runner snapshot including registry rows, current state database, one exact
+higher-value provenance database, and the permanent external system-Slack canary receipt.
+
+The accepted recovery receipt is
+`/var/lib/codex-dispatcher/disaster-recovery-drills/20260824T114000Z-4ae9ad4/receipt.json`, with file
+SHA-256 `1d6cfba87e33aee8b14238074899d5693551fc30724d24420b99b7a92740d353`.
+The measured application RTO is `101,385` milliseconds, scoped from independent-bundle validation
+through isolated schema-20 restore, Control and Runner application-filesystem rebuilds, and exact
+Runner/GitHub/Slack read-back. It reconciled migrations 1 through 20, 23 WorkItems, 23 GitHub
+Issues, 19 Pull Requests, 21 Runner archives, two absences, three database-proven Runner-only
+terminal histories, 39 WorkItem Slack receipts, and 14 system Slack receipts. The Control and
+Runner rebuild hashes are
+`98cec6cca8336108f19cb9bb19d615b5a2c7b79ffb3039a9a167f97dedd17399` and
+`f2d94b79061ba08f5618774152f6904324b58037a47aeb000522731d45cdeb32`.
+The receipt records `online_state_modified=false`, exact bundle-based recovery commands, and a
+rollback boundary that never overwrites the online database, switches live links, or mutates a
+Runner Turn during the drill. VM procurement and base-OS provisioning remain outside the measured
+RTO.
+
+The Control-only reclamation plan is
+`e2ce1cd33d20b51390b6c65cbba32457da0affdd8c282f9355f2315dec6e26d5`, stored root-owned and mode
+`0600`. It is `authorizes_apply=false` and identifies 89 exact hash-bound targets totalling
+`257,454,080` allocated bytes: 28 superseded DR inputs (`204,800` bytes), 13 older DR roots
+(`72,691,712` bytes), and 48 old Control releases (`184,557,568` bytes). It protects current
+`4ae9ad4`, rollback `31688e2`, the current release receipt, the final successful current-release
+DR root, and all three current-release DR inputs. Control has no reclamation apply command; no
+Control target was deleted.
+
+The releases created after the approved Runner deletion produced a new, separate read-only Runner
+plan `93c8ce14c146df68d4506c6eb69254f815041e2c59df41d24b59c94f721c87ae`.
+It identifies only releases `042586e`, `300146a`, and `bfdcc0e`, with exact tree hashes, zero image
+targets, and `12,275,712` expected bytes. This plan is not covered by the earlier deletion approval
+and remains unapplied. Its durable
+[system-channel alert](https://codex-nt54555.slack.com/archives/C0BS3LPG43G/p1787571191333429)
+was unchanged on repeat health projection. The final health check was `ok`, reported zero active
+Turns, and routed the system condition to channel `C0BS3LPG43G`; it made no new Issue-channel
+write. Final available space was `74,370,961,408` bytes on Runner and `12,152,168,448` bytes on
+Control.
