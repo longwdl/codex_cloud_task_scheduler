@@ -2479,3 +2479,71 @@ reference changed.
 GitHub rulesets are unavailable for this private personal-account repository on the current plan.
 The owner accepted that residual risk for this credential-free fixture only. This exception does
 not apply to a production-connected repository.
+
+## Operational handoff, system canary, and two-host recovery — 2026-08-24
+
+Commit `042586e8043ce24fe51ebc84f3527507aa5f0714` is the final Control and Runner
+release. Its archive SHA-256 is
+`dc19a9f7ed625c071dcdca58f6049784f096e753e80d1b1507950fc9b38a3ddb`; all 611
+tests passed locally and under both Linux service accounts. The final manual and timer-triggered
+sweeps were `idle`, each with four GitHub reads, zero writes, and zero failures. Backup
+`state-20260824T101821.830463Z.db` has SHA-256
+`18224b6daf86f108aa45935d4004f594f3cbce287b7caa746b3162378bcb7d3e`; its
+isolated restore verified integrity `ok`, zero foreign-key violations, migrations 1 through 20,
+and removal of the temporary database. Bounded backup rotation removed one superseded retained
+copy and preserved the configured oldest anchor.
+
+The immutable operational receipt is
+`/opt/codex-dispatcher/release-handoff-receipts/042586e8043ce24fe51ebc84f3527507aa5f0714.json`.
+Its evidence SHA-256 is
+`86deaa70f9cc00885b4e23073e7c6841604faface2ca3247c9be19f2ce3678a1`.
+It binds both current links, the schema-v2 release/image reference ledger and apply receipt, the
+post-release Runner planner status, four enabled/active Control timers, the enabled/active Runner
+planner timer, the backup/restore evidence, and lifecycle health. It records
+`authorizes_reclamation_apply=false`.
+
+The live four-trigger canary fixture
+`rc_300146ae2f89113b2734c2c34c0459ed` passed for host-space, release-count,
+unreferenced-image, and reclaimable-byte triggers. Its permanent evidence SHA-256 is
+`4daa49df9a5c8aa9f4f5ecd40e2e6b228c6d689c19bb871f56db17032eaf377e`.
+It sent exactly one
+[system-channel alert](https://codex-nt54555.slack.com/archives/C0BS3LPG43G/p1787566112056129)
+and one
+[threaded recovery](https://codex-nt54555.slack.com/archives/C0BS3LPG43G/p1787566112864029?thread_ts=1787566112.056129&cid=C0BS3LPG43G),
+with zero Issue-channel writes, zero online-database changes, and zero asset deletions. Repeating
+the same apply returned the identical receipt and permalinks without a new Slack write.
+
+The continuous Runner planner currently reports exact plan
+`ff3dff9f415915ccf0db46c9fe867cf20886114129d6694f714941dd4ca333fb`.
+Its trigger is only `release_count_above_limit`; the Runner has `74,356,228,096` available bytes,
+zero containers, no image target, and seven unreferenced release targets totalling `28,217,344`
+bytes. The protected current and immediate rollback releases are `042586e` and `300146a`.
+The seven exact target commits are `2a07275`, `4cb98c4`, `50b7dfb`, `8951bc0`, `9f7d235`,
+`bb0ddee`, and `cca0552`; their tree hashes and byte counts are bound by the plan. Reinspection
+matched with `state_writes=0`, and the plan remains `authorizes_apply=false`. The current durable
+[system-channel plan alert](https://codex-nt54555.slack.com/archives/C0BS3LPG43G/p1787566764673029)
+is operationally non-blocking but still requires a separate exact deletion approval.
+
+The successful schema-v2 recovery receipt is
+`/var/lib/codex-dispatcher/disaster-recovery-drills/20260824T102000Z-042586e/receipt.json`.
+The measured application RTO is exactly `98,928` milliseconds. It reconciled migrations 1 through
+20, 23 WorkItems, 21 Control-bound Runner archives, two absences, three additional fully terminal
+Runner-only canary tombstones, 23 GitHub Issues, 19 Pull Requests, and 39 Slack receipts. The empty
+Control and Runner rebuild manifest SHA-256 values are
+`40dd88e99f3751d487f7bf2755ec97ca1424773f8b9ec542d7264cd9e7d07e44` and
+`48ccdfa5599904a5bb6aadeb20e8db477b5246026566bdb5daaf2f520f249036`.
+The drill reports `online_state_modified=false`; VM procurement and base-OS provisioning remain
+outside the measured RTO.
+
+The first recovery attempt at `20260824T100900Z-300146a` failed closed because three permanent
+Runner canary archive/registry tombstones were intentionally absent from the online Control
+database. It retained `failed-receipt.json` and changed no online state. The corrected rule still
+requires exact evidence for every Control WorkItem, while separately counting only fully terminal
+Runner-only history; unexplained live registries and archive/absence overlap remain fatal.
+
+Release-handoff validation also exposed and fixed two fail-closed integration defects before the
+final receipt: root initially lacked the reviewed Runner SSH identity, and timer units do not expose
+service-only `ExecMainStatus`. Runner observation now uses fixed `ecs-user` SSH through root sudo,
+and systemd property validation is unit-type-specific. An earlier `cca0552` activation was rolled
+back before its first Dispatcher invocation; all later corrections used forward releases after
+their first sweep. No binary-only rollback was attempted after external reconciliation began.
