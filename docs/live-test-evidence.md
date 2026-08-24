@@ -78,9 +78,14 @@ canary sweeps were idle. The production Control preflight and real service bound
 the real sweep made four GitHub reads, zero writes, and zero failures.
 
 An attempted rollback of `3b883a9` after that production sweep was correctly rejected before any
-write because the Dispatcher invocation ID had advanced. The receipt-bound positive rollback uses
-a newly activated release before any Dispatcher invocation; its final receipt and forward release
-are recorded by the immediately following evidence commit.
+write because the Dispatcher invocation ID had advanced. For the positive path, evidence-only
+release `d6f1f993380fc57307d0721542eaef7c9fb8a58a` with archive SHA-256
+`f47e3893f39ba23ab307662388729e9a42a85465fba7c544ef5feae48b2d258c` was activated on both hosts
+without a Dispatcher invocation, then immediately rolled back through its permanent v2 receipt.
+The receipt ended `status=rolled_back`, `phase=rollback_observed`, and both hosts returned to
+`3b883a9b4b798fdf495b3507542fcc70aeceee5b`. All timers stayed stopped; the three review WorkItems,
+ten finished Turns, seven unique delivered Slack receipts, three exact mounts, and zero containers
+were unchanged. This successor evidence commit is the forward release target.
 
 ## Repository admission, effective storage, and current-schema recovery — 2026-08-24
 
