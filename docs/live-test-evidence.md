@@ -3,6 +3,63 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Transactional release references and automatic read-only reclamation — 2026-08-24
+
+Commits `29b27b751a2116504a6670a51f9853f1802fbf7a`,
+`803ea7c8019e3edd9741ee64ce656b9d0a5731b5`, and
+`bb0ddeebe8711b6a09808528affc696ab98b9278` moved Runner reclamation ownership into the release
+transaction and added threshold-driven, read-only planning. The live release archive SHA-256 was
+`a587631e5727708a69be1a03592340762ff25c6c1a1b9512c9c6cd49a5b080d0`. The complete 603-test
+suite passed locally and under both real Linux service accounts; compilation, shell syntax, unit
+verification, and a hardened transient Docker-socket canary also passed.
+
+The first two release attempts failed closed during the new Runner planner pre-handoff check. The
+`29b27b7` receipt, archive SHA-256
+`2354c4025abf1a15274f51de19abb9cb981c97e654a003dcf041cbcce4b0ec9e`, exposed that a maintenance
+lock opened for writing was incompatible with the read-only service filesystem. The `803ea7c`
+receipt, archive SHA-256
+`d9041a494e864e7fa9b86d10f1c231141b9808260035d04510c9b1d00824dbbc`, then exposed that
+`ProtectHome=yes` hid the rootless Docker socket. Both receipts ended `status=rolled_back`,
+`phase=rollback_observed`, and `error_code=runner_reclamation_plan_failed`; both host links,
+reference ledgers, and stopped timer state returned to the exact pre-release boundary. The final
+unit uses a read-only lock descriptor, `ProtectHome=tmpfs`, and a single read-only bind for
+`/run/user/1002/docker.sock`.
+
+Release `bb0ddee` committed Runner first and Control second. The permanent reference-change receipt
+is
+`/srv/codex-runner/reclamation-reference-receipts/bb0ddeebe8711b6a09808528affc696ab98b9278.apply.json`.
+It records before SHA-256
+`c8a118ddeba61528291efdc96d8feb8575521c3742814fc7deae39042af6e495` and after SHA-256
+`b3e09a1628ae2f7d3a271b1509f199d7e3a88eca55b91799ca1301b71d5162e0`. The live schema-v2 ledger
+now names current release `bb0ddee`, immediate rollback release `50b7dfb`, and exact current image
+`ghcr.io/longwdl/codex-cloud-task-scheduler-runner@sha256:da3662343e86ebeeba97f54f1c7f03faf03b988e07677cbd171a80d9903c772d`.
+The release receipt remains `phase=handoff_required` and `timers_started=false` by design: the
+release transaction never claims the separately observed operator handoff.
+
+The required write-enabled sweep completed `idle`, with four GitHub reads, zero writes, and zero
+failures. The immediately timer-triggered sweep was also `idle` with the same write count. The
+protected backup
+`/var/lib/codex-dispatcher/backups/state-20260824T081541.833957Z.db` is
+`codex-dispatcher:codex-dispatcher`, mode `0600`, 851,968 bytes, and reported integrity `ok`. The
+isolated restore drill used that backup at age 20 seconds, restored migrations 1 through 20 with
+zero foreign-key violations, and removed its temporary database.
+
+The first automatic Runner planner invocation completed successfully with
+`authorizes_apply=false`. It observed 74,395,025,408 available bytes, four releases, two exact
+unreferenced release targets, zero image targets, and 8,187,904 estimated reclaimable bytes. None
+of the fixed triggers fired: available space remained above 64 GiB, release count did not exceed
+four, reclaimable bytes remained below 8 GiB, and there was no unreferenced image. It therefore
+wrote only the strict latest status, with no plan SHA and no deletion receipt. The planner timer is
+enabled and next runs at `2026-08-24 22:24:03 CST`.
+
+Lifecycle health at `2026-08-24T08:16:27Z` reported SQLite integrity `ok`, zero foreign-key
+violations, zero alerts, zero active Turns, 21 archived WorkItems, two absence reconciliations,
+Runner capacity admissible, and Slack action `healthy`. All four Control timers are enabled and
+active. The next natural daily backup is `2026-08-25 00:03:43 CST`; the next natural weekly restore
+drill is `2026-08-31 00:20:09 CST`. Those two future clock boundaries remain explicitly pending
+and must be appended as natural timer evidence only after their service invocation timestamps and
+receipts are observed; the manual validations above do not satisfy that claim.
+
 ## Dedicated Slack system channel release — 2026-08-24
 
 Release `50b7dfbc93a332cb3a6c6798e25ec0e4c1f83bf4` separated Slack routing into the
