@@ -2690,3 +2690,42 @@ was unchanged on repeat health projection. The final health check was `ok`, repo
 Turns, and routed the system condition to channel `C0BS3LPG43G`; it made no new Issue-channel
 write. Final available space was `74,370,961,408` bytes on Runner and `12,152,168,448` bytes on
 Control.
+
+## Authorized exact two-host reclamation apply — 2026-08-24
+
+After a separate destructive-action authorization, both hosts were quiesced and the already
+listed exact plans were rechecked immediately before deletion. The Control SQLite database passed
+`PRAGMA integrity_check`, no Turn was active, all four independent off-host bundle manifests were
+validated again, and current release `867d5cb685d617a33b17ab77e7a46d459d0191b9`, immediate rollback
+release `4ae9ad45645a30e3dd233ac044f9fb97fc132389`, the current Runner image, and the protected latest
+recovery chain were excluded from both plans. Neither apply used a wildcard or a Docker prune
+operation.
+
+Runner plan `b0b801d56ef197ae77122a0e4250b5920ad224230742e3f1884354b9c465d66c` deleted exactly the
+three hash-bound release trees `2f1323f`, `31688e2`, and `c2fd2a5`, deleted no image, and reclaimed
+the expected `12,562,432` allocated bytes. Its plan-file SHA-256 is
+`dcfaf23187240cc608972e3cbc06a1bde077448ab6d5da3245e182a159a9bdf8`; the permanent receipt is
+`/srv/codex-runner/reclamation-receipts/b0b801d56ef197ae77122a0e4250b5920ad224230742e3f1884354b9c465d66c.json`,
+with file SHA-256 `f5b51d9b45b3162994d16cf3e70d7fdbd31b2aaf53aa7a191f2e767e1ee23483`.
+
+Control plan `60c30e53a1f05ce664827838fb9b0ca730b0c8ce48ca3620b8d38343468abaab` deleted exactly 99
+hash-bound objects: seven confirmed superseded DR bundles, 28 superseded DR inputs, 13 old DR
+roots, and 51 old release trees. It reclaimed the expected `311,726,080` allocated bytes and wrote
+101 bounded state mutations, including the permanent receipt. Its plan-file SHA-256 is
+`661fa11c8abd119869ccf76a6dce2c42f575efa5beb79498f264d38395855853`; the receipt is
+`/var/lib/codex-dispatcher/control-reclamation-receipts/60c30e53a1f05ce664827838fb9b0ca730b0c8ce48ca3620b8d38343468abaab.json`,
+with file SHA-256 `7b75ec92521cf97c6476308404c2400533752c1d05e4bfabb1157ea5be17e960`.
+
+Post-apply inspection found zero remaining paths from the 99-target Control plan and none of the
+three Runner targets. The protected current and rollback release directories, latest isolated DR
+root `20260824T114000Z-4ae9ad4`, reimported bundle `20260824T113900Z-4ae9ad4-reimported`, and all
+three rollback-release DR inputs remained present. Fresh automatic planners reported two releases
+on each host, one Control recovery root, zero unconfirmed bundles, zero image targets, zero release
+targets, and no trigger reasons. They measured `12,447,129,600` available bytes on Control and
+`74,381,697,024` on Runner. Total exact recovery was `324,288,512` allocated bytes.
+
+All five Control timers were restored active and enabled. The final health check reported
+integrity `ok`, zero foreign-key violations, zero active Turns, zero alerts, and clean Runner
+capacity. It sent one
+[threaded system-channel recovery](https://codex-nt54555.slack.com/archives/C0BS3LPG43G/p1787582028768009?thread_ts=1787580695.192839&cid=C0BS3LPG43G);
+the next health projection was `healthy` and produced no duplicate Slack write.
