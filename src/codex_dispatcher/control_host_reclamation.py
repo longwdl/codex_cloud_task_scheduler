@@ -194,14 +194,30 @@ def _hash_path(path: Path) -> tuple[str, int]:
     root_device = metadata.st_dev
     for candidate in sorted(path.rglob("*")):
         item = candidate.stat(follow_symlinks=False)
+        relative = candidate.relative_to(path).as_posix()
+        if candidate.is_symlink():
+            link_target = os.readlink(candidate)
+            if Path(link_target).is_absolute() or ".." in Path(link_target).parts:
+                raise ControlHostReclamationError(
+                    "Control reclamation tree contains an unsafe symlink"
+                )
+            allocated += item.st_blocks * 512
+            rows.append(
+                {
+                    "path": relative,
+                    "type": "symlink",
+                    "mode": stat.S_IMODE(item.st_mode),
+                    "size": item.st_size,
+                    "link_target": link_target,
+                }
+            )
+            continue
         if (
-            candidate.is_symlink()
-            or item.st_dev != root_device
+            item.st_dev != root_device
             or item.st_mode & 0o022
             or not (stat.S_ISDIR(item.st_mode) or stat.S_ISREG(item.st_mode))
         ):
             raise ControlHostReclamationError("Control reclamation tree is unsafe")
-        relative = candidate.relative_to(path).as_posix()
         allocated += item.st_blocks * 512
         rows.append(
             {

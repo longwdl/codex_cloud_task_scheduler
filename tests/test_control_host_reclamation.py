@@ -5,7 +5,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from codex_dispatcher.control_host_reclamation import plan_control_host_reclamation
+from codex_dispatcher.control_host_reclamation import (
+    ControlHostReclamationError,
+    plan_control_host_reclamation,
+)
 
 
 CURRENT = "c" * 40
@@ -56,6 +59,7 @@ class ControlHostReclamationTests(unittest.TestCase):
             failed = dr / "20260823T100000Z-old"
             failed.mkdir(mode=0o700)
             (failed / "failed-receipt.json").write_text("{}", encoding="utf-8")
+            (failed / "current").symlink_to(f"releases/{OLD}")
             inputs = root / "inputs"
             inputs.mkdir(mode=0o700)
             (inputs / f"runner-{CURRENT}.json").write_text("{}", encoding="utf-8")
@@ -78,6 +82,19 @@ class ControlHostReclamationTests(unittest.TestCase):
             self.assertIn(str(latest), plan.protected_paths)
             self.assertGreater(plan.expected_total_bytes, 0)
             self.assertFalse(plan.to_mapping()["authorizes_apply"])
+
+            (failed / "current").unlink()
+            (failed / "current").symlink_to("../../etc")
+            with self.assertRaisesRegex(
+                ControlHostReclamationError, "unsafe symlink"
+            ):
+                plan_control_host_reclamation(
+                    releases_root=releases,
+                    current_link=current,
+                    current_release_receipt=receipt,
+                    disaster_recovery_roots=dr,
+                    disaster_recovery_inputs=inputs,
+                )
 
 
 if __name__ == "__main__":
