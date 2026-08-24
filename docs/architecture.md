@@ -225,6 +225,8 @@ After the sweep, backup, restore drill, lifecycle health, and all timers have be
 separate immutable handoff receipt records the operational boundary. It does not rewrite the
 release transaction receipt. The handoff command is idempotent for the same commit, makes no
 GitHub, Slack, Runner-asset, or online-database write, and refuses incomplete or stale evidence.
+Its root-owned writer performs Runner observation through the fixed reviewed `ecs-user` SSH
+identity rather than depending on root SSH configuration.
 An exact current `runner_reclamation_plan_ready` notification is recorded as a non-blocking
 operational warning because the plan cannot authorize deletion; every other health alert blocks
 handoff.

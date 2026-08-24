@@ -30,6 +30,7 @@ HANDOFF_RECEIPT_ROOT = Path("/opt/codex-dispatcher/release-handoff-receipts")
 DATABASE_PATH = Path("/var/lib/codex-dispatcher/state.db")
 BACKUP_ROOT = Path("/var/lib/codex-dispatcher/backups")
 RUNNER_HOST = "codex-runner"
+CONTROL_SSH_USER = "ecs-user"
 RUNNER_CURRENT = "/srv/codex-runner/current"
 RUNNER_REFERENCES = "/srv/codex-runner/etc/reclamation-rollback-references.json"
 RUNNER_REFERENCE_RECEIPTS = "/srv/codex-runner/reclamation-reference-receipts"
@@ -101,11 +102,7 @@ def record_release_handoff(
     if control_target != expected_control:
         raise ReleaseHandoffError("Control current differs from release receipt")
     runner_target = run(
-        (
-            "/usr/bin/ssh",
-            "-o",
-            "BatchMode=yes",
-            RUNNER_HOST,
+        (*_runner_ssh_prefix(),
             "/usr/bin/readlink",
             RUNNER_CURRENT,
         )
@@ -364,10 +361,7 @@ def _systemd_state(
         command.extend(("-p", field))
     if remote:
         command = [
-            "/usr/bin/ssh",
-            "-o",
-            "BatchMode=yes",
-            RUNNER_HOST,
+            *_runner_ssh_prefix(),
             *command,
         ]
     output = run(tuple(command))
@@ -414,11 +408,7 @@ def _latest_journal_json(
 
 def _remote_file(run: CommandRunner, path: str) -> bytes:
     output = run(
-        (
-            "/usr/bin/ssh",
-            "-o",
-            "BatchMode=yes",
-            RUNNER_HOST,
+        (*_runner_ssh_prefix(),
             "/usr/bin/sudo",
             "-n",
             "/usr/bin/cat",
@@ -426,6 +416,20 @@ def _remote_file(run: CommandRunner, path: str) -> bytes:
         )
     )
     return output.encode("utf-8")
+
+
+def _runner_ssh_prefix() -> tuple[str, ...]:
+    return (
+        "/usr/bin/sudo",
+        "-n",
+        "-H",
+        "-u",
+        CONTROL_SSH_USER,
+        "/usr/bin/ssh",
+        "-o",
+        "BatchMode=yes",
+        RUNNER_HOST,
+    )
 
 
 def _validate_backup(

@@ -218,7 +218,8 @@ sudo /opt/codex-dispatcher/current/scripts/codex-dispatcher-release-handoff-v1 \
 
 This command rechecks the post-release sweep, exact backup content, restore and health journal
 receipts, all Control timers, the Runner planner timer/status, and the transactional reference
-ledger. It writes only
+ledger. Root performs Runner read-back through the reviewed fixed `ecs-user` SSH account and never
+loads a second SSH identity. It writes only
 `/opt/codex-dispatcher/release-handoff-receipts/<commit>.json`; it never changes the release receipt
 or starts a service. A sole exact `runner_reclamation_plan_ready` alert is retained as a
 non-blocking warning; stale, unavailable, capacity, lifecycle, or consistency alerts still block.

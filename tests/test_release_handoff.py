@@ -45,6 +45,7 @@ class _Commands:
         reclamation_plan_ready: bool = False,
     ) -> None:
         self.calls = 0
+        self.commands: list[tuple[str, ...]] = []
         self.backup = backup
         self.timer_active = timer_active
         self.references: dict[str, object] = {
@@ -82,6 +83,7 @@ class _Commands:
 
     def __call__(self, command: tuple[str, ...]) -> str:
         self.calls += 1
+        self.commands.append(command)
         if "/usr/bin/readlink" in command:
             return f"releases/{COMMIT}\n"
         if "/usr/bin/cat" in command:
@@ -237,6 +239,24 @@ class ReleaseHandoffTests(unittest.TestCase):
 
             self.assertEqual(first, second)
             self.assertGreater(calls, 0)
+            runner_calls = [
+                command for command in commands.commands if "/usr/bin/ssh" in command
+            ]
+            self.assertTrue(runner_calls)
+            self.assertTrue(
+                all(
+                    command[:6]
+                    == (
+                        "/usr/bin/sudo",
+                        "-n",
+                        "-H",
+                        "-u",
+                        "ecs-user",
+                        "/usr/bin/ssh",
+                    )
+                    for command in runner_calls
+                )
+            )
             self.assertEqual("operational", first["status"])
             self.assertTrue(first["timers_started"])
             self.assertFalse(first["external_writes"])
