@@ -125,7 +125,16 @@ systemd-analyze verify \
 Manually run backup and restore-drill services before enabling timers. Require mode-`0600` backup,
 integrity `ok`, zero foreign-key violations, exact migration ledger, and removal of the temporary
 restore. Confirm dispatcher/health/backup/restore timers and Runner capacity timer are enabled and
-active only after the release handoff is observed.
+active only after the release handoff is observed. Also require the Runner reclamation-plan timer
+to be enabled/active, then record the exact operational boundary with:
+
+```bash
+sudo /opt/codex-dispatcher/current/scripts/codex-dispatcher-release-handoff-v1 \
+  --commit <40-hex-release-commit> --apply
+```
+
+The command writes one root-owned mode-`0600` receipt below
+`/opt/codex-dispatcher/release-handoff-receipts/`; it does not mutate the committed release receipt.
 
 ## 7. Release authorization packet
 

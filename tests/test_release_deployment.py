@@ -164,6 +164,7 @@ class ReleaseDeploymentTests(unittest.TestCase):
         self.assertIn("runner_release_references prepare", text)
         self.assertIn("runner_release_references commit", text)
         self.assertIn("runner_release_references rollback", text)
+        self.assertIn("scripts/codex-dispatcher-release-handoff-v1", text)
         self.assertIn('"runner_references_applied"', text)
         self.assertIn('"runner_reference_apply_receipt"', text)
         self.assertLess(

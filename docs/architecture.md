@@ -201,22 +201,30 @@ reinspection and permanent receipt; broad prune commands are forbidden.
 ## Operations, health, and disaster recovery
 
 The Control Host runs four oneshot timers: Dispatcher, lifecycle health, online backup, and restore
-drill. The Runner runs a capacity timer. Health reads durable lifecycle state, systemd state, GitHub
-API metrics/cursor age, archive/branch backlog, follow-up state, and Runner capacity. Slack alert
-and recovery projection uses a dedicated durable outbox and only the configured system channel;
-it never reuses a WorkItem thread or the Issue channel.
+drill. The Runner runs capacity and exact reclamation-planning timers. Health reads durable
+lifecycle state, systemd state, GitHub API metrics/cursor age, archive/branch backlog, follow-up
+state, Runner capacity, and the strict latest reclamation status. Slack alert and recovery
+projection uses a dedicated durable outbox and only the configured system channel; it never reuses
+a WorkItem thread or the Issue channel.
 
 Backups use SQLite Online Backup, mode `0600`, integrity validation, atomic publication, and bounded
 rotation. Restore drills use an isolated temporary database and verify integrity, foreign keys, and
-the exact migration ledger. The full disaster-recovery drill additionally reconciles release
-receipt, Control/Runner release identity, Runner tombstones/absences, GitHub, Slack, and an empty
-Control application-filesystem rebuild without replacing the online environment.
+the exact migration ledger. The full disaster-recovery drill additionally reconciles the release
+and operational-handoff receipts, Control/Runner release identity, schema-v2 Runner release/image
+references and their apply receipt, current planner status/unit digests, Runner tombstones and
+absences, GitHub, and Slack. It rebuilds isolated empty Control and Runner application filesystems
+without replacing either online environment.
 
 Release activation is Runner-first and Control-second, guarded by inactive service/locks, exact
 archive digest, both-host tests, prior links, database backup, and a permanent transaction receipt.
 Timers remain stopped for the observed handoff sweep. Rollback is exact and receipt-bound; after a
 new Dispatcher invocation, state/external recovery may require the preserved backup rather than a
 symlink-only rollback.
+
+After the sweep, backup, restore drill, lifecycle health, and all timers have been observed, a
+separate immutable handoff receipt records the operational boundary. It does not rewrite the
+release transaction receipt. The handoff command is idempotent for the same commit, makes no
+GitHub, Slack, Runner-asset, or online-database write, and refuses incomplete or stale evidence.
 
 ## Compatibility boundary
 

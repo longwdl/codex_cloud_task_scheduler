@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
 
 from codex_dispatcher.control_host_backup import create_state_backup
 from codex_dispatcher.disaster_recovery import (
@@ -16,6 +15,7 @@ from codex_dispatcher.disaster_recovery import (
     run_schema18_disaster_recovery_drill,
 )
 from codex_dispatcher.runner_protocol import RunnerOperation, RunnerRequest
+from codex_dispatcher.runner_reclamation_status import build_runner_reclamation_status
 from codex_dispatcher.runner_transport import RunnerArchiveReply, RunnerArchiveState
 from codex_dispatcher.slack_reporting import (
     SlackDeliveryReceipt,
@@ -39,6 +39,20 @@ PREVIOUS = "b" * 40
 HEAD = "d" * 40
 CHANNEL = "C0BR2D0MS8Y"
 MESSAGE_TS = "1700000000.000001"
+IMAGE = "ghcr.io/longwdl/codex-cloud-task-scheduler-runner@sha256:" + "f" * 64
+
+
+def _canonical(payload: dict[str, object]) -> str:
+    raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return sha256(raw.encode()).hexdigest()
+
+
+def _write_canonical(path: Path, payload: dict[str, object]) -> str:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
+    path.write_text(raw, encoding="utf-8")
+    path.chmod(0o600)
+    return sha256(raw.encode()).hexdigest()
 
 
 class _SlackVerifier:
@@ -81,22 +95,70 @@ class DisasterRecoveryTests(unittest.TestCase):
 
                 self.assertEqual((1, 0), _reconcile_github(store, tracker))
 
-    def test_root_admin_can_bind_snapshot_to_explicit_runner_owner(self) -> None:
+    def test_snapshot_binds_operational_runner_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            work_items = Path(temp_dir) / "work-items"
+            root = Path(temp_dir)
+            work_items = root / "work-items"
             for name in (".registry", ".archives", ".absences"):
                 (work_items / name).mkdir(mode=0o700, parents=True)
             owner_uid = work_items.stat().st_uid
-
-            with patch(
-                "codex_dispatcher.disaster_recovery.os.geteuid",
-                return_value=owner_uid + 1000,
+            references = {
+                "schema_version": 2,
+                "kind": "runner_reclamation_rollback_references",
+                "current_release_commit": COMMIT,
+                "immediate_rollback_release_commit": PREVIOUS,
+                "current_image_ref": IMAGE,
+                "protected_release_commits": [COMMIT, PREVIOUS],
+                "protected_image_refs": [IMAGE],
+            }
+            reference_receipt = {
+                "schema_version": 1,
+                "kind": "runner_reclamation_reference_change_receipt",
+                "operation": "apply",
+                "status": "applied",
+                "release_commit": COMMIT,
+                "previous_release_commit": PREVIOUS,
+                "after_references": references,
+                "after_sha256": _canonical(references),
+            }
+            status = build_runner_reclamation_status(
+                host_available_bytes=74 * 1024**3,
+                release_count=2,
+                release_target_count=0,
+                image_target_count=0,
+                expected_total_bytes=0,
+                plan_sha256="1" * 64,
+                now=NOW,
+            ).to_mapping()
+            references_path = root / "references.json"
+            reference_receipt_path = root / "reference-receipt.json"
+            status_path = root / "status.json"
+            _write_canonical(references_path, references)
+            _write_canonical(reference_receipt_path, reference_receipt)
+            _write_canonical(status_path, status)
+            installed_units = root / "installed-units"
+            release = root / "release"
+            for unit in (
+                "codex-runner-reclamation-plan.service",
+                "codex-runner-reclamation-plan.timer",
             ):
-                snapshot = collect_runner_recovery_snapshot(
-                    work_items_root=work_items,
-                    current_release_commit=COMMIT,
-                    trusted_owner_uid=owner_uid,
+                (installed_units / unit).parent.mkdir(parents=True, exist_ok=True)
+                (release / "deploy/runner" / unit).parent.mkdir(
+                    parents=True, exist_ok=True
                 )
+                (installed_units / unit).write_text(unit)
+                (release / "deploy/runner" / unit).write_text(unit)
+
+            snapshot = collect_runner_recovery_snapshot(
+                work_items_root=work_items,
+                current_release_commit=COMMIT,
+                trusted_owner_uid=owner_uid,
+                release_references_path=references_path,
+                release_reference_receipt_path=reference_receipt_path,
+                reclamation_status_path=status_path,
+                installed_unit_root=installed_units,
+                current_release_path=release,
+            )
 
             self.assertEqual(COMMIT, snapshot["current_release_commit"])
             self.assertEqual([], snapshot["registry_work_item_ids"])
@@ -184,7 +246,9 @@ class DisasterRecoveryTests(unittest.TestCase):
         for relative in (
             "scripts/codex-dispatcher-v1",
             "scripts/codex-dispatcher-backup-v1",
+            "scripts/codex-dispatcher-release-handoff-v1",
             "scripts/codex-dispatcher-restore-drill-v1",
+            "scripts/codex-runner-maintenance-v1",
             "deploy/systemd/codex-dispatcher.service",
             "deploy/systemd/codex-dispatcher.timer",
             "deploy/systemd/codex-dispatcher-backup.service",
@@ -193,6 +257,8 @@ class DisasterRecoveryTests(unittest.TestCase):
             "deploy/systemd/codex-dispatcher-health.timer",
             "deploy/systemd/codex-dispatcher-restore-drill.service",
             "deploy/systemd/codex-dispatcher-restore-drill.timer",
+            "deploy/runner/codex-runner-reclamation-plan.service",
+            "deploy/runner/codex-runner-reclamation-plan.timer",
         ):
             path = release / relative
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -207,9 +273,11 @@ class DisasterRecoveryTests(unittest.TestCase):
                     "status": "committed",
                     "phase": "handoff_required",
                     "committed": True,
+                    "runner_references_applied": True,
                     "release_commit": COMMIT,
                     "previous_control": f"/opt/codex-dispatcher/releases/{PREVIOUS}",
                     "previous_runner": f"releases/{PREVIOUS}",
+                    "updated_at": "2026-08-23T12:30:00Z",
                 }
             ),
             encoding="utf-8",
@@ -217,8 +285,51 @@ class DisasterRecoveryTests(unittest.TestCase):
         config = root / "config.toml"
         config.write_text("# secret-free fixture config\n", encoding="utf-8")
 
-        runner_snapshot = {
+        references = {
+            "schema_version": 2,
+            "kind": "runner_reclamation_rollback_references",
+            "current_release_commit": COMMIT,
+            "immediate_rollback_release_commit": PREVIOUS,
+            "current_image_ref": IMAGE,
+            "protected_release_commits": [COMMIT, PREVIOUS],
+            "protected_image_refs": [IMAGE],
+        }
+        reference_receipt = {
             "schema_version": 1,
+            "kind": "runner_reclamation_reference_change_receipt",
+            "operation": "apply",
+            "status": "applied",
+            "release_commit": COMMIT,
+            "previous_release_commit": PREVIOUS,
+            "after_references": references,
+            "after_sha256": _canonical(references),
+        }
+        reclamation_status = build_runner_reclamation_status(
+            host_available_bytes=74 * 1024**3,
+            release_count=2,
+            release_target_count=0,
+            image_target_count=0,
+            expected_total_bytes=0,
+            plan_sha256="1" * 64,
+            now=NOW,
+        ).to_mapping()
+        references_sha = sha256(
+            (json.dumps(references, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        ).hexdigest()
+        reference_receipt_sha = sha256(
+            (
+                json.dumps(reference_receipt, sort_keys=True, separators=(",", ":"))
+                + "\n"
+            ).encode()
+        ).hexdigest()
+        status_sha = sha256(
+            (
+                json.dumps(reclamation_status, sort_keys=True, separators=(",", ":"))
+                + "\n"
+            ).encode()
+        ).hexdigest()
+        runner_snapshot = {
+            "schema_version": 2,
             "kind": "runner_recovery_snapshot",
             "current_release_commit": COMMIT,
             "registry_work_item_ids": [item.work_item_id],
@@ -233,7 +344,40 @@ class DisasterRecoveryTests(unittest.TestCase):
                 }
             ],
             "absences": [],
+            "release_references": references,
+            "release_references_sha256": references_sha,
+            "release_reference_receipt": reference_receipt,
+            "release_reference_receipt_sha256": reference_receipt_sha,
+            "reclamation_status": reclamation_status,
+            "reclamation_status_sha256": status_sha,
+            "planner_unit_sha256": {
+                unit: sha256(
+                    (release / "deploy/runner" / unit).read_bytes()
+                ).hexdigest()
+                for unit in (
+                    "codex-runner-reclamation-plan.service",
+                    "codex-runner-reclamation-plan.timer",
+                )
+            },
         }
+        release_sha = sha256(receipt.read_bytes()).hexdigest()
+        handoff_payload: dict[str, object] = {
+            "schema_version": 1,
+            "kind": "codex_dispatcher_release_handoff",
+            "status": "operational",
+            "release_commit": COMMIT,
+            "release_receipt_sha256": release_sha,
+            "runner_references_sha256": references_sha,
+            "runner_reference_receipt_sha256": reference_receipt_sha,
+            "runner_reclamation_status_sha256": status_sha,
+            "runner_reclamation_status": reclamation_status,
+            "timers_started": True,
+            "external_writes": False,
+            "authorizes_reclamation_apply": False,
+        }
+        handoff_payload["evidence_sha256"] = _canonical(handoff_payload)
+        handoff = root / "handoff-receipt.json"
+        handoff.write_text(json.dumps(handoff_payload), encoding="utf-8")
         tracker = FakeTracker()
         tracker.tasks["1"] = TrackerTask(
             repository="owner/repo",
@@ -262,6 +406,7 @@ class DisasterRecoveryTests(unittest.TestCase):
             "backups": backups,
             "release": release,
             "receipt": receipt,
+            "handoff": handoff,
             "config": config,
             "runner_snapshot": runner_snapshot,
             "tracker": tracker,
@@ -282,6 +427,7 @@ class DisasterRecoveryTests(unittest.TestCase):
                 control_release_path=fixture["release"],  # type: ignore[arg-type]
                 control_config_path=fixture["config"],  # type: ignore[arg-type]
                 release_receipt_path=fixture["receipt"],  # type: ignore[arg-type]
+                handoff_receipt_path=fixture["handoff"],  # type: ignore[arg-type]
                 runner_snapshot=fixture["runner_snapshot"],  # type: ignore[arg-type]
                 tracker=fixture["tracker"],  # type: ignore[arg-type]
                 slack_verifier=verifier,
@@ -306,6 +452,14 @@ class DisasterRecoveryTests(unittest.TestCase):
                 self.assertEqual("ok", store.integrity_check())
                 self.assertEqual(tuple(range(1, 21)), store.schema_migration_versions())
             self.assertTrue((recovery / "empty-control-host-manifest.json").is_file())
+            self.assertTrue((recovery / "empty-runner-host-manifest.json").is_file())
+            self.assertTrue(
+                (
+                    recovery
+                    / "empty-runner-host/srv/codex-runner/etc/"
+                    "reclamation-rollback-references.json"
+                ).is_file()
+            )
 
     def test_runner_tombstone_drift_fails_without_touching_online_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -329,6 +483,7 @@ class DisasterRecoveryTests(unittest.TestCase):
                     control_release_path=fixture["release"],  # type: ignore[arg-type]
                     control_config_path=fixture["config"],  # type: ignore[arg-type]
                     release_receipt_path=fixture["receipt"],  # type: ignore[arg-type]
+                    handoff_receipt_path=fixture["handoff"],  # type: ignore[arg-type]
                     runner_snapshot=snapshot,
                     tracker=fixture["tracker"],  # type: ignore[arg-type]
                     slack_verifier=_SlackVerifier(),

@@ -1,0 +1,13 @@
+#!/bin/sh
+
+set -eu
+umask 077
+
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+export PATH=/opt/codex-python/current/bin:/usr/bin:/bin
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONNOUSERSITE=1
+export PYTHONPATH=/opt/codex-dispatcher/current/src
+
+exec /opt/codex-python/current/bin/python3 -P -s -m codex_dispatcher.release_handoff "$@"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import time
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from codex_dispatcher.control_host_backup import drill_latest_state_backup
+from codex_dispatcher.runner_reclamation_status import RunnerReclamationStatus
 from codex_dispatcher.runner_transport import (
     RunnerArchiveState,
     parse_runner_archive_reply,
@@ -36,12 +38,14 @@ from codex_dispatcher.work_item_lifecycle import (
 from codex_dispatcher.work_items import WorkItemState, validate_work_item_id
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _EXPECTED_DATABASE_SCHEMA = tuple(range(1, 21))
 _RELEASE_FILES = (
     "scripts/codex-dispatcher-v1",
     "scripts/codex-dispatcher-backup-v1",
+    "scripts/codex-dispatcher-release-handoff-v1",
     "scripts/codex-dispatcher-restore-drill-v1",
+    "scripts/codex-runner-maintenance-v1",
     "deploy/systemd/codex-dispatcher.service",
     "deploy/systemd/codex-dispatcher.timer",
     "deploy/systemd/codex-dispatcher-backup.service",
@@ -50,7 +54,24 @@ _RELEASE_FILES = (
     "deploy/systemd/codex-dispatcher-health.timer",
     "deploy/systemd/codex-dispatcher-restore-drill.service",
     "deploy/systemd/codex-dispatcher-restore-drill.timer",
+    "deploy/runner/codex-runner-reclamation-plan.service",
+    "deploy/runner/codex-runner-reclamation-plan.timer",
 )
+_RUNNER_REFERENCES = Path(
+    "/srv/codex-runner/etc/reclamation-rollback-references.json"
+)
+_RUNNER_REFERENCE_RECEIPTS = Path(
+    "/srv/codex-runner/reclamation-reference-receipts"
+)
+_RUNNER_RECLAMATION_STATUS = Path(
+    "/srv/codex-runner/reclamation-status/latest.json"
+)
+_RUNNER_PLANNER_UNITS = (
+    "codex-runner-reclamation-plan.service",
+    "codex-runner-reclamation-plan.timer",
+)
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_IMAGE_RE = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
 
 
 class DisasterRecoveryError(RuntimeError):
@@ -70,12 +91,17 @@ class DisasterRecoveryResult:
     source_age_seconds: int
     release_commit: str
     release_receipt_sha256: str
+    handoff_receipt_sha256: str
     runner_snapshot_sha256: str
+    runner_references_sha256: str
+    runner_reference_receipt_sha256: str
+    runner_reclamation_status_sha256: str
     control_config_sha256: str
     previous_control_commit: str
     previous_runner_commit: str
     restored_database_sha256: str
     rebuild_manifest_sha256: str
+    runner_rebuild_manifest_sha256: str
     work_item_count: int
     runner_archive_count: int
     runner_absence_count: int
@@ -95,12 +121,17 @@ class DisasterRecoveryResult:
             "source_age_seconds": self.source_age_seconds,
             "release_commit": self.release_commit,
             "release_receipt_sha256": self.release_receipt_sha256,
+            "handoff_receipt_sha256": self.handoff_receipt_sha256,
             "runner_snapshot_sha256": self.runner_snapshot_sha256,
+            "runner_references_sha256": self.runner_references_sha256,
+            "runner_reference_receipt_sha256": self.runner_reference_receipt_sha256,
+            "runner_reclamation_status_sha256": self.runner_reclamation_status_sha256,
             "control_config_sha256": self.control_config_sha256,
             "previous_control_commit": self.previous_control_commit,
             "previous_runner_commit": self.previous_runner_commit,
             "restored_database_sha256": self.restored_database_sha256,
             "rebuild_manifest_sha256": self.rebuild_manifest_sha256,
+            "runner_rebuild_manifest_sha256": self.runner_rebuild_manifest_sha256,
             "database_schema_migrations": list(_EXPECTED_DATABASE_SCHEMA),
             "work_item_count": self.work_item_count,
             "runner_archive_count": self.runner_archive_count,
@@ -111,7 +142,8 @@ class DisasterRecoveryResult:
             "rto_milliseconds": self.rto_milliseconds,
             "rto_scope": (
                 "latest-backup selection through isolated schema-20 restore, "
-                "Control application-filesystem rebuild, and Runner/GitHub/Slack read-back"
+                "Control and Runner application-filesystem rebuilds, and exact "
+                "Runner/GitHub/Slack read-back"
             ),
             "infrastructure_provisioning_rto_measured": False,
             "online_state_modified": False,
@@ -141,8 +173,13 @@ def collect_runner_recovery_snapshot(
     work_items_root: Path,
     current_release_commit: str,
     trusted_owner_uid: int | None = None,
+    release_references_path: Path = _RUNNER_REFERENCES,
+    release_reference_receipt_path: Path | None = None,
+    reclamation_status_path: Path = _RUNNER_RECLAMATION_STATUS,
+    installed_unit_root: Path = Path("/etc/systemd/system"),
+    current_release_path: Path = Path("/srv/codex-runner/current"),
 ) -> dict[str, object]:
-    """Collect bounded Runner registry and permanent tombstone evidence locally."""
+    """Collect bounded Runner lifecycle, release, and planner recovery evidence."""
     _validate_commit(current_release_commit, "current_release_commit")
     if trusted_owner_uid is not None and (
         type(trusted_owner_uid) is not int or trusted_owner_uid < 0
@@ -196,14 +233,55 @@ def collect_runner_recovery_snapshot(
             }
         )
 
-    return {
+    reference_receipt_path = (
+        _RUNNER_REFERENCE_RECEIPTS / f"{current_release_commit}.apply.json"
+        if release_reference_receipt_path is None
+        else release_reference_receipt_path
+    )
+    references = _read_json_file(
+        release_references_path,
+        "Runner release references",
+        maximum=64 * 1024,
+        trusted_owner_uid=0,
+    )
+    reference_receipt = _read_json_file(
+        reference_receipt_path,
+        "Runner release reference receipt",
+        maximum=128 * 1024,
+        trusted_owner_uid=0,
+    )
+    reclamation_status = _read_json_file(
+        reclamation_status_path,
+        "Runner reclamation status",
+        maximum=64 * 1024,
+        trusted_owner_uid=0,
+    )
+    planner_units: dict[str, str] = {}
+    for unit in _RUNNER_PLANNER_UNITS:
+        installed = installed_unit_root / unit
+        release_unit = current_release_path / "deploy/runner" / unit
+        installed_sha = _sha256_file(installed)
+        if installed_sha != _sha256_file(release_unit):
+            raise DisasterRecoveryError("installed Runner planner unit differs from release")
+        planner_units[unit] = installed_sha
+
+    snapshot = {
         "schema_version": _SCHEMA_VERSION,
         "kind": "runner_recovery_snapshot",
         "current_release_commit": current_release_commit,
         "registry_work_item_ids": sorted(registry_ids),
         "archives": sorted(archive_rows, key=lambda row: str(row["work_item_id"])),
         "absences": sorted(absence_rows, key=lambda row: str(row["work_item_id"])),
+        "release_references": references,
+        "release_references_sha256": _sha256_file(release_references_path),
+        "release_reference_receipt": reference_receipt,
+        "release_reference_receipt_sha256": _sha256_file(reference_receipt_path),
+        "reclamation_status": reclamation_status,
+        "reclamation_status_sha256": _sha256_file(reclamation_status_path),
+        "planner_unit_sha256": planner_units,
     }
+    _validate_runner_snapshot(snapshot)
+    return snapshot
 
 
 def load_runner_recovery_snapshot(path: Path) -> dict[str, object]:
@@ -221,6 +299,7 @@ def run_schema18_disaster_recovery_drill(
     control_release_path: Path,
     control_config_path: Path,
     release_receipt_path: Path,
+    handoff_receipt_path: Path,
     runner_snapshot: dict[str, object],
     tracker: Tracker,
     slack_verifier: SlackReceiptVerifier | None,
@@ -245,6 +324,10 @@ def run_schema18_disaster_recovery_drill(
 
         release = _read_release_receipt(release_receipt_path)
         release_commit = _validate_commit(release["release_commit"], "release_commit")
+        handoff = _read_handoff_receipt(handoff_receipt_path, release_commit)
+        release_receipt_sha256 = _sha256_file(release_receipt_path)
+        if handoff.get("release_receipt_sha256") != release_receipt_sha256:
+            raise DisasterRecoveryError("handoff receipt release digest conflicts")
         if control_release_path.name != release_commit:
             raise DisasterRecoveryError("Control release path conflicts with receipt")
         _validate_release_tree(control_release_path)
@@ -252,6 +335,7 @@ def run_schema18_disaster_recovery_drill(
         runner_commit = _validate_runner_snapshot(runner_snapshot)
         if runner_commit != release_commit:
             raise DisasterRecoveryError("Control and Runner release commits differ")
+        _verify_handoff_runner_evidence(handoff, runner_snapshot)
         previous_control = _release_commit_from_path(
             release.get("previous_control"), "previous_control"
         )
@@ -275,12 +359,15 @@ def run_schema18_disaster_recovery_drill(
             )
             slack_count = _reconcile_slack(restored, slack_verifier)
 
-        rebuild_manifest = _rebuild_empty_control_root(
+        rebuild_manifest, runner_rebuild_manifest = _rebuild_empty_hosts(
             recovery_root=recovery_root,
             release_path=control_release_path,
             release_commit=release_commit,
             restored_database=restored_database,
             control_config=control_config_path,
+            release_receipt=release_receipt_path,
+            handoff_receipt=handoff_receipt_path,
+            runner_snapshot=runner_snapshot,
         )
         rto_milliseconds = max(0, (time.monotonic_ns() - started) // 1_000_000)
         result = DisasterRecoveryResult(
@@ -290,13 +377,24 @@ def run_schema18_disaster_recovery_drill(
             source_backup_sha256=_sha256_file(restore_evidence.source_path),
             source_age_seconds=restore_evidence.source_age_seconds,
             release_commit=release_commit,
-            release_receipt_sha256=_sha256_file(release_receipt_path),
+            release_receipt_sha256=release_receipt_sha256,
+            handoff_receipt_sha256=_sha256_file(handoff_receipt_path),
             runner_snapshot_sha256=_canonical_sha256(runner_snapshot),
+            runner_references_sha256=str(
+                runner_snapshot["release_references_sha256"]
+            ),
+            runner_reference_receipt_sha256=str(
+                runner_snapshot["release_reference_receipt_sha256"]
+            ),
+            runner_reclamation_status_sha256=str(
+                runner_snapshot["reclamation_status_sha256"]
+            ),
             control_config_sha256=_sha256_file(control_config_path),
             previous_control_commit=previous_control,
             previous_runner_commit=previous_runner,
             restored_database_sha256=_sha256_file(restored_database),
             rebuild_manifest_sha256=rebuild_manifest,
+            runner_rebuild_manifest_sha256=runner_rebuild_manifest,
             work_item_count=len(work_items),
             runner_archive_count=archive_count,
             runner_absence_count=absence_count,
@@ -511,14 +609,17 @@ def _task_state_for_work_item(state: WorkItemState) -> TaskState:
     return mapping[state]
 
 
-def _rebuild_empty_control_root(
+def _rebuild_empty_hosts(
     *,
     recovery_root: Path,
     release_path: Path,
     release_commit: str,
     restored_database: Path,
     control_config: Path,
-) -> str:
+    release_receipt: Path,
+    handoff_receipt: Path,
+    runner_snapshot: dict[str, object],
+) -> tuple[str, str]:
     empty_root = recovery_root / "empty-control-host"
     empty_root.mkdir(mode=0o700)
     release_target = (
@@ -537,15 +638,93 @@ def _rebuild_empty_control_root(
     with StateStore(restored_database, read_only=True) as source:
         source.backup(state_target)
     os.chmod(state_target, 0o600, follow_symlinks=False)
+    control_receipt_root = empty_root / "opt/codex-dispatcher/release-receipts"
+    control_receipt_root.mkdir(mode=0o700, parents=True)
+    shutil.copy2(
+        release_receipt,
+        control_receipt_root / f"{release_commit}.json",
+        follow_symlinks=False,
+    )
+    handoff_root = empty_root / "opt/codex-dispatcher/release-handoff-receipts"
+    handoff_root.mkdir(mode=0o700, parents=True)
+    shutil.copy2(
+        handoff_receipt,
+        handoff_root / f"{release_commit}.json",
+        follow_symlinks=False,
+    )
     unit_root = empty_root / "etc/systemd/system"
     unit_root.mkdir(mode=0o755, parents=True)
     for relative in _RELEASE_FILES:
         if relative.startswith("deploy/systemd/"):
             source = release_target / relative
             shutil.copy2(source, unit_root / source.name, follow_symlinks=False)
+    control_manifest_sha = _write_tree_manifest(
+        empty_root, recovery_root / "empty-control-host-manifest.json"
+    )
+
+    runner_root = recovery_root / "empty-runner-host"
+    runner_release = runner_root / "srv/codex-runner/releases" / release_commit
+    runner_release.parent.mkdir(mode=0o755, parents=True)
+    shutil.copytree(release_path, runner_release, symlinks=False)
+    runner_current = runner_root / "srv/codex-runner/current"
+    runner_current.symlink_to(f"releases/{release_commit}")
+    runner_etc = runner_root / "srv/codex-runner/etc"
+    runner_etc.mkdir(mode=0o700, parents=True)
+    references = runner_snapshot.get("release_references")
+    reference_receipt_payload = runner_snapshot.get("release_reference_receipt")
+    reclamation_status = runner_snapshot.get("reclamation_status")
+    if not all(
+        isinstance(value, dict)
+        for value in (references, reference_receipt_payload, reclamation_status)
+    ):
+        raise DisasterRecoveryError("Runner recovery artifacts are incomplete")
+    assert isinstance(references, dict)
+    assert isinstance(reference_receipt_payload, dict)
+    assert isinstance(reclamation_status, dict)
+    reference_target = runner_etc / "reclamation-rollback-references.json"
+    _write_json_atomic(reference_target, references)
+    reference_receipt_root = (
+        runner_root / "srv/codex-runner/reclamation-reference-receipts"
+    )
+    reference_receipt_root.mkdir(mode=0o700, parents=True)
+    reference_receipt_target = reference_receipt_root / f"{release_commit}.apply.json"
+    _write_json_atomic(reference_receipt_target, reference_receipt_payload)
+    status_root = runner_root / "srv/codex-runner/reclamation-status"
+    status_root.mkdir(mode=0o750, parents=True)
+    status_target = status_root / "latest.json"
+    _write_json_atomic(status_target, reclamation_status)
+    for path in (reference_target, reference_receipt_target, status_target):
+        os.chmod(path, 0o600, follow_symlinks=False)
+    if (
+        _sha256_file(reference_target)
+        != runner_snapshot.get("release_references_sha256")
+        or _sha256_file(reference_receipt_target)
+        != runner_snapshot.get("release_reference_receipt_sha256")
+        or _sha256_file(status_target)
+        != runner_snapshot.get("reclamation_status_sha256")
+    ):
+        raise DisasterRecoveryError("rebuilt Runner artifact digest conflicts")
+    runner_units = runner_root / "etc/systemd/system"
+    runner_units.mkdir(mode=0o755, parents=True)
+    planner_units = runner_snapshot.get("planner_unit_sha256")
+    if not isinstance(planner_units, dict):
+        raise DisasterRecoveryError("Runner planner unit evidence is incomplete")
+    for unit in _RUNNER_PLANNER_UNITS:
+        source = runner_release / "deploy/runner" / unit
+        target = runner_units / unit
+        shutil.copy2(source, target, follow_symlinks=False)
+        if _sha256_file(target) != planner_units.get(unit):
+            raise DisasterRecoveryError("rebuilt Runner planner unit conflicts")
+    runner_manifest_sha = _write_tree_manifest(
+        runner_root, recovery_root / "empty-runner-host-manifest.json"
+    )
+    return control_manifest_sha, runner_manifest_sha
+
+
+def _write_tree_manifest(root: Path, manifest_path: Path) -> str:
     manifest: list[dict[str, object]] = []
-    for path in sorted(empty_root.rglob("*")):
-        relative = path.relative_to(empty_root).as_posix()
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
         if path.is_symlink():
             manifest.append({"path": relative, "symlink": os.readlink(path)})
         elif path.is_file():
@@ -559,7 +738,6 @@ def _rebuild_empty_control_root(
     canonical = json.dumps(
         manifest, ensure_ascii=True, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
-    manifest_path = recovery_root / "empty-control-host-manifest.json"
     _write_bytes_atomic(manifest_path, canonical + b"\n")
     return sha256(canonical).hexdigest()
 
@@ -578,6 +756,37 @@ def _read_release_receipt(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _read_handoff_receipt(path: Path, release_commit: str) -> dict[str, Any]:
+    payload = _read_json_file(path, "release handoff receipt", maximum=256 * 1024)
+    evidence = payload.get("evidence_sha256")
+    body = dict(payload)
+    body.pop("evidence_sha256", None)
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("kind") != "codex_dispatcher_release_handoff"
+        or payload.get("status") != "operational"
+        or payload.get("release_commit") != release_commit
+        or payload.get("timers_started") is not True
+        or payload.get("external_writes") is not False
+        or payload.get("authorizes_reclamation_apply") is not False
+        or evidence != _canonical_sha256(body)
+    ):
+        raise DisasterRecoveryError("release handoff receipt is invalid")
+    return payload
+
+
+def _verify_handoff_runner_evidence(
+    handoff: dict[str, Any], snapshot: dict[str, object]
+) -> None:
+    if (
+        handoff.get("runner_references_sha256")
+        != snapshot.get("release_references_sha256")
+        or handoff.get("runner_reference_receipt_sha256")
+        != snapshot.get("release_reference_receipt_sha256")
+    ):
+        raise DisasterRecoveryError("handoff and Runner recovery evidence conflict")
+
+
 def _validate_runner_snapshot(snapshot: dict[str, object]) -> str:
     if (
         not isinstance(snapshot, dict)
@@ -585,9 +794,70 @@ def _validate_runner_snapshot(snapshot: dict[str, object]) -> str:
         or snapshot.get("kind") != "runner_recovery_snapshot"
     ):
         raise DisasterRecoveryError("Runner recovery snapshot is invalid")
-    return _validate_commit(
+    commit = _validate_commit(
         snapshot.get("current_release_commit"), "Runner current release"
     )
+    references = snapshot.get("release_references")
+    reference_receipt = snapshot.get("release_reference_receipt")
+    status_payload = snapshot.get("reclamation_status")
+    unit_sha = snapshot.get("planner_unit_sha256")
+    if not all(
+        isinstance(value, dict)
+        for value in (references, reference_receipt, status_payload, unit_sha)
+    ):
+        raise DisasterRecoveryError("Runner operational recovery evidence is incomplete")
+    assert isinstance(references, dict)
+    assert isinstance(reference_receipt, dict)
+    assert isinstance(status_payload, dict)
+    assert isinstance(unit_sha, dict)
+    rollback = references.get("immediate_rollback_release_commit")
+    image = references.get("current_image_ref")
+    try:
+        rollback_commit = _validate_commit(rollback, "Runner rollback release")
+    except ValueError as exc:
+        raise DisasterRecoveryError(
+            "Runner release reference evidence is inconsistent"
+        ) from exc
+    if (
+        references.get("schema_version") != 2
+        or references.get("kind") != "runner_reclamation_rollback_references"
+        or references.get("current_release_commit") != commit
+        or references.get("protected_release_commits") != [commit, rollback_commit]
+        or not isinstance(image, str)
+        or _IMAGE_RE.fullmatch(image) is None
+        or references.get("protected_image_refs") != [image]
+        or reference_receipt.get("schema_version") != 1
+        or reference_receipt.get("kind")
+        != "runner_reclamation_reference_change_receipt"
+        or reference_receipt.get("operation") != "apply"
+        or reference_receipt.get("status") != "applied"
+        or reference_receipt.get("release_commit") != commit
+        or reference_receipt.get("previous_release_commit") != rollback_commit
+        or reference_receipt.get("after_references") != references
+        or reference_receipt.get("after_sha256") != _canonical_sha256(references)
+    ):
+        raise DisasterRecoveryError("Runner release reference evidence is inconsistent")
+    RunnerReclamationStatus.from_mapping(status_payload)
+    for field, payload in (
+        ("release_references_sha256", references),
+        ("release_reference_receipt_sha256", reference_receipt),
+        ("reclamation_status_sha256", status_payload),
+    ):
+        digest = snapshot.get(field)
+        if not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None:
+            raise DisasterRecoveryError("Runner artifact digest is invalid")
+        canonical_file = (
+            json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        if sha256(canonical_file).hexdigest() != digest:
+            raise DisasterRecoveryError("Runner artifact file digest is inconsistent")
+    if set(unit_sha) != set(_RUNNER_PLANNER_UNITS) or any(
+        not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None
+        for value in unit_sha.values()
+    ):
+        raise DisasterRecoveryError("Runner planner unit evidence is invalid")
+    return commit
 
 
 def _validate_release_tree(path: Path) -> None:

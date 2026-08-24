@@ -371,6 +371,8 @@ class CliTests(unittest.TestCase):
                     "/opt/codex-dispatcher/releases/" + "a" * 40,
                     "--release-receipt",
                     "/var/lib/codex-dispatcher/recovery-input/receipt.json",
+                    "--handoff-receipt",
+                    "/var/lib/codex-dispatcher/recovery-input/handoff.json",
                     "--runner-snapshot",
                     "/var/lib/codex-dispatcher/recovery-input/runner.json",
                 ]
@@ -427,6 +429,8 @@ class CliTests(unittest.TestCase):
                     "/opt/codex-dispatcher/releases/" + "a" * 40,
                     "--release-receipt",
                     "/var/lib/codex-dispatcher/recovery-input/receipt.json",
+                    "--handoff-receipt",
+                    "/var/lib/codex-dispatcher/recovery-input/handoff.json",
                     "--runner-snapshot",
                     "/var/lib/codex-dispatcher/recovery-input/runner.json",
                     "--execute-isolated",

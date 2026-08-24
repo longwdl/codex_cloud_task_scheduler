@@ -101,6 +101,7 @@ def _build_parser() -> argparse.ArgumentParser:
     disaster_recovery.add_argument("--recovery-root", required=True, type=Path)
     disaster_recovery.add_argument("--control-release", required=True, type=Path)
     disaster_recovery.add_argument("--release-receipt", required=True, type=Path)
+    disaster_recovery.add_argument("--handoff-receipt", required=True, type=Path)
     disaster_recovery.add_argument("--runner-snapshot", required=True, type=Path)
     disaster_recovery.add_argument(
         "--execute-isolated",
@@ -531,6 +532,7 @@ def _schema18_disaster_recovery(
     recovery_root: Path,
     control_release: Path,
     release_receipt: Path,
+    handoff_receipt: Path,
     runner_snapshot_path: Path,
 ) -> tuple[int, dict[str, object]]:
     from codex_dispatcher.redaction import redact_text
@@ -578,6 +580,7 @@ def _schema18_disaster_recovery(
             control_release_path=control_release,
             control_config_path=config_path,
             release_receipt_path=release_receipt,
+            handoff_receipt_path=handoff_receipt,
             runner_snapshot=load_runner_recovery_snapshot(runner_snapshot_path),
             tracker=GitHubCliTracker(
                 gh_path=runtime.gh_path,
@@ -1035,6 +1038,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             recovery_root=args.recovery_root,
             control_release=args.control_release,
             release_receipt=args.release_receipt,
+            handoff_receipt=args.handoff_receipt,
             runner_snapshot_path=args.runner_snapshot,
         )
         _emit(payload, args.json)

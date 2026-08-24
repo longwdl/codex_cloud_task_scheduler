@@ -11,16 +11,18 @@ operation and must never follow automatically from a plan.
 ## Measured recovery boundary
 
 The receipt's `rto_milliseconds` measures one exact interval: selection of the newest validated
-backup through isolated schema-20 restore, release-receipt validation, Control/Runner version
-agreement, Runner registry/archive/absence reconciliation, GitHub Issue/PR/branch read-back, Slack
-permalink read-back, and reconstruction of an empty Control application filesystem root. The
-receipt records the backup age as the observed recovery point.
+backup through isolated schema-20 restore, release and operational-handoff receipt validation,
+Control/Runner version agreement, Runner registry/archive/absence and schema-v2 reference
+reconciliation, GitHub Issue/PR/branch read-back, Slack permalink read-back, and reconstruction of
+empty Control and Runner application filesystem roots. The receipt records the backup age as the
+observed recovery point.
 
 This is not a claim about VM procurement, OS installation, DNS, package mirrors, secret-manager
 availability, or operator approval latency. Those infrastructure intervals are explicitly marked
-unmeasured. The isolated empty root does not replace either live `current` symlink and never starts
-a service. It contains the exact release, secret-free Control config, systemd units, and restored
-database needed to prove the application reconstruction path.
+unmeasured. The isolated empty roots do not replace either live `current` symlink and never start a
+service. They contain the exact release, secret-free Control config, systemd units, restored
+database, permanent handoff/release receipts, Runner reference ledger/apply receipt, and strict
+planner status needed to prove both application reconstruction paths.
 
 ## Schema-20 isolated drill
 
@@ -28,13 +30,16 @@ Preconditions:
 
 - leave the current Control and Runner environments in place;
 - require a committed schema-v2 release receipt for the exact current commit;
+- require a permanent operational handoff receipt for that release;
 - require the newest retained backup to be mode `0600`, schema 20, integral, and free of foreign-key
   violations;
 - require no unfinished Slack outbox row;
 - place copied inputs in a `codex-dispatcher`-owned mode-`0700` directory and never print secrets.
 
-On the Runner, collect one bounded tombstone snapshot as root. Replace the commit with the exact
-value returned by `readlink /srv/codex-runner/current`:
+On the Runner, collect one bounded schema-v2 recovery snapshot as root. It includes WorkItem
+registry/tombstones, the exact current/rollback release and image ledger, its immutable apply
+receipt, the latest planner status, and installed planner-unit hashes. Replace the commit with the
+exact value returned by `readlink /srv/codex-runner/current`:
 
 ```bash
 sudo /srv/codex-runner/bin/codex-runner-maintenance-v1 \
@@ -54,6 +59,9 @@ sudo install -o codex-dispatcher -g codex-dispatcher -m 0600 \
 sudo install -o codex-dispatcher -g codex-dispatcher -m 0600 \
   /opt/codex-dispatcher/release-receipts/<40-hex-current-commit>.json \
   /var/lib/codex-dispatcher/disaster-recovery-inputs/release-<40-hex-current-commit>.json
+sudo install -o codex-dispatcher -g codex-dispatcher -m 0600 \
+  /opt/codex-dispatcher/release-handoff-receipts/<40-hex-current-commit>.json \
+  /var/lib/codex-dispatcher/disaster-recovery-inputs/handoff-<40-hex-current-commit>.json
 ```
 
 Run the isolated drill through a transient service so the existing protected environment file is
@@ -74,12 +82,14 @@ sudo systemd-run --wait --collect --pipe \
   --recovery-root /var/lib/codex-dispatcher/disaster-recovery-drills/<UTC-run-id> \
   --control-release /opt/codex-dispatcher/releases/<40-hex-current-commit> \
   --release-receipt /var/lib/codex-dispatcher/disaster-recovery-inputs/release-<40-hex-current-commit>.json \
+  --handoff-receipt /var/lib/codex-dispatcher/disaster-recovery-inputs/handoff-<40-hex-current-commit>.json \
   --runner-snapshot /var/lib/codex-dispatcher/disaster-recovery-inputs/runner-<40-hex-current-commit>.json \
   --execute-isolated --json
 ```
 
 Acceptance requires `status=passed`, `database_schema_migrations=[1,...,20]`, identical Control and
-Runner commits, all recorded external counts reconciled, `online_state_modified=false`, and a
+Runner commits, exact reference and planner digests, all recorded external counts reconciled,
+`online_state_modified=false`, distinct Control/Runner rebuild-manifest SHA-256 values, and a
 mode-protected `receipt.json`. A failure writes `failed-receipt.json`; retain it and the source
 backup, and remove only that exact recovery directory after investigation. Do not retry by reusing
 the same recovery directory.
@@ -127,6 +137,39 @@ database aside and restore the same validated backup again. Once any write-enabl
 binary-only rollback is forbidden: stop all Dispatcher timers and reconcile SQLite, Runner,
 GitHub, and Slack from the durable receipts before another attempt.
 
+## Empty Runner Host recovery commands
+
+The drill separately exercises the application files below `empty-runner-host/`. On a genuinely
+new Runner, install the pinned OS packages, rootless Docker, service account, SSH policy, Codex
+login seed, egress proxy/firewall, and protected Runner config before this application layer. Keep
+the Runner protocol unavailable until all hashes agree:
+
+```bash
+sudo install -d -o root -g root -m 0755 /srv/codex-runner/releases
+sudo install -d -o root -g root -m 0700 \
+  /srv/codex-runner/etc /srv/codex-runner/reclamation-reference-receipts
+sudo tar -C /srv/codex-runner/releases/<40-hex-release-commit> \
+  --no-same-owner --no-same-permissions -xf <verified-release-archive>
+sudo ln -sfn releases/<40-hex-release-commit> /srv/codex-runner/current.next
+sudo mv -Tf /srv/codex-runner/current.next /srv/codex-runner/current
+sudo install -o root -g root -m 0600 <validated-reference-ledger> \
+  /srv/codex-runner/etc/reclamation-rollback-references.json
+sudo install -o root -g root -m 0600 <validated-reference-apply-receipt> \
+  /srv/codex-runner/reclamation-reference-receipts/<40-hex-release-commit>.apply.json
+sudo install -o root -g root -m 0644 \
+  /srv/codex-runner/current/deploy/runner/codex-runner-reclamation-plan.service \
+  /srv/codex-runner/current/deploy/runner/codex-runner-reclamation-plan.timer \
+  /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemd-analyze verify \
+  /etc/systemd/system/codex-runner-reclamation-plan.service \
+  /etc/systemd/system/codex-runner-reclamation-plan.timer
+```
+
+Do not copy `latest.json` as authority to delete anything. Restore it only as audit evidence; run a
+fresh read-only planner after Docker, WorkItem registries, tombstones, and both release trees have
+been restored and re-inspected. Any reference/apply-receipt mismatch blocks Runner activation.
+
 ## Terminal-storage evidence conflict response
 
 `status` or lifecycle health reporting `evidence_conflict` is an incident signal, not a cleanup
@@ -145,6 +188,51 @@ durable evidence. Re-enable the timer only after `status`, lifecycle health, Run
 an immediate ordinary sweep all agree, with the sweep producing no unexpected write.
 
 ## Runner release and image reference inventory
+
+After every successful release sweep, backup, restore drill, health check, and timer activation,
+record the operational boundary without rewriting the transaction receipt:
+
+```bash
+sudo /opt/codex-dispatcher/current/scripts/codex-dispatcher-release-handoff-v1 \
+  --commit <40-hex-current-commit> --apply
+sudo /opt/codex-dispatcher/current/scripts/codex-dispatcher-release-handoff-v1 \
+  --commit <40-hex-current-commit> --status
+```
+
+The handoff command is idempotent and writes only its immutable root-owned receipt. It fails unless
+the latest Dispatcher sweep, backup, restore drill, lifecycle health, Control timers, Runner
+planner timer/status, and transactional reference ledger all postdate and agree with the release.
+It never updates the release receipt and never authorizes reclamation.
+
+The isolated four-trigger canary exercises the real exact-plan, fixed-threshold, durable health
+outbox, and system-channel routing code. Plan mode uses an isolated fake Slack publisher and makes
+no network write:
+
+```bash
+sudo -u codex-dispatcher env \
+  PYTHONPATH=/opt/codex-dispatcher/current/src \
+  /opt/codex-python/current/bin/python3 -P -s -m \
+  codex_dispatcher.reclamation_canary \
+  --config /etc/codex-dispatcher/config.toml \
+  --fixture-id rc_<32-lowercase-hex> --plan
+```
+
+A reviewed live projection requires the separate Slack fixture gate and `--apply`. It sends exactly
+one alert root plus one threaded recovery to `system_channel_id`, writes zero Issue-channel
+messages, uses an isolated SQLite outbox, and writes one permanent canary receipt. It never changes
+the online Dispatcher database or Runner assets:
+
+```bash
+sudo systemd-run --wait --collect --pipe \
+  --property=User=codex-dispatcher --property=Group=codex-dispatcher \
+  --property=EnvironmentFile=/etc/codex-dispatcher/health.env \
+  --setenv=CODEX_DISPATCHER_ENABLE_SLACK_FIXTURE_WRITES=1 \
+  --setenv=PYTHONPATH=/opt/codex-dispatcher/current/src \
+  /opt/codex-python/current/bin/python3 -P -s -m \
+  codex_dispatcher.reclamation_canary \
+  --config /etc/codex-dispatcher/config.toml \
+  --fixture-id rc_<32-lowercase-hex> --apply
+```
 
 Install root-owned mode-`0600` files from the examples as:
 
@@ -198,6 +286,14 @@ more than four releases, any unreferenced Runner image, or at least 8 GiB expect
 latest strict status is exposed to Control through the read-only `reclamation_status` Runner
 operation; plan-ready, stale, and unavailable states are delivered through the system Slack alert
 channel. This automatic path has no apply flag and cannot delete assets.
+
+Continuous observation consists of the six-hour Runner planner plus the Control health timer. The
+planner overwrites only strict `latest.json` when no threshold fires and writes an immutable exact
+plan only after a trigger. Health reports plan-ready, stale, or unavailable status through the
+system channel. Operators must not create dummy images or releases on the live Runner to force an
+alert; use the isolated canary above. A real generated plan is only an alert and authorization
+packet input. Before deletion, list its exact targets and current byte estimate again and obtain a
+separate approval.
 
 Planning never authorizes deletion. Immediately before a separately approved deletion, re-list the
 exact targets and current estimate without writes:

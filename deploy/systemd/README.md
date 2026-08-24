@@ -209,6 +209,19 @@ backup timer. Start and verify one restore drill before enabling its weekly time
 operational timers before manually starting the health service,
 because its systemd assertion intentionally treats a disabled timer as unhealthy.
 
+After all observations pass, create the separate immutable operational receipt:
+
+```bash
+sudo /opt/codex-dispatcher/current/scripts/codex-dispatcher-release-handoff-v1 \
+  --commit <40-hex-release-commit> --apply
+```
+
+This command rechecks the post-release sweep, exact backup content, restore and health journal
+receipts, all Control timers, the Runner planner timer/status, and the transactional reference
+ledger. It writes only
+`/opt/codex-dispatcher/release-handoff-receipts/<commit>.json`; it never changes the release receipt
+or starts a service. Disaster recovery requires both receipts.
+
 Observe with `systemctl status`, `systemctl list-timers`, and bounded queries such as
 `journalctl -u codex-dispatcher.service -n 100` and
 `journalctl -u codex-dispatcher-backup.service -n 20`, plus
