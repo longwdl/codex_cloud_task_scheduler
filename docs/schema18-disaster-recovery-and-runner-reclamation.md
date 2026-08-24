@@ -1,7 +1,7 @@
 # Current-schema disaster recovery and exact Runner asset reclamation
 
 The command retains its historical `schema18-disaster-recovery` name, but the current release
-requires the exact schema-19 migration set (1 through 19).
+requires the exact schema-20 migration set (1 through 20).
 
 This runbook has two independent workflows. The disaster-recovery drill may write only below a new
 isolated recovery directory and may perform GitHub and Slack reads. Reclamation planning is
@@ -11,7 +11,7 @@ operation and must never follow automatically from a plan.
 ## Measured recovery boundary
 
 The receipt's `rto_milliseconds` measures one exact interval: selection of the newest validated
-backup through isolated schema-19 restore, release-receipt validation, Control/Runner version
+backup through isolated schema-20 restore, release-receipt validation, Control/Runner version
 agreement, Runner registry/archive/absence reconciliation, GitHub Issue/PR/branch read-back, Slack
 permalink read-back, and reconstruction of an empty Control application filesystem root. The
 receipt records the backup age as the observed recovery point.
@@ -22,13 +22,13 @@ unmeasured. The isolated empty root does not replace either live `current` symli
 a service. It contains the exact release, secret-free Control config, systemd units, and restored
 database needed to prove the application reconstruction path.
 
-## Schema-19 isolated drill
+## Schema-20 isolated drill
 
 Preconditions:
 
 - leave the current Control and Runner environments in place;
 - require a committed schema-v2 release receipt for the exact current commit;
-- require the newest retained backup to be mode `0600`, schema 19, integral, and free of foreign-key
+- require the newest retained backup to be mode `0600`, schema 20, integral, and free of foreign-key
   violations;
 - require no unfinished Slack outbox row;
 - place copied inputs in a `codex-dispatcher`-owned mode-`0700` directory and never print secrets.
@@ -78,7 +78,7 @@ sudo systemd-run --wait --collect --pipe \
   --execute-isolated --json
 ```
 
-Acceptance requires `status=passed`, `database_schema_migrations=[1,...,19]`, identical Control and
+Acceptance requires `status=passed`, `database_schema_migrations=[1,...,20]`, identical Control and
 Runner commits, all recorded external counts reconciled, `online_state_modified=false`, and a
 mode-protected `receipt.json`. A failure writes `failed-receipt.json`; retain it and the source
 backup, and remove only that exact recovery directory after investigation. Do not retry by reusing
@@ -111,7 +111,7 @@ sudo install -o root -g root -m 0644 \
 sudo -u codex-dispatcher env PYTHONPATH=/opt/codex-dispatcher/current/src \
   /opt/codex-python/current/bin/python3 -P -s -c \
   'from pathlib import Path; import sys; from codex_dispatcher.state_store import StateStore; source=Path(sys.argv[1]); target=Path(sys.argv[2]); StateStore(source, read_only=True).backup(target)' \
-  <validated-schema18-backup> /var/lib/codex-dispatcher/state.db.recovered
+  <validated-current-schema-backup> /var/lib/codex-dispatcher/state.db.recovered
 sudo -u codex-dispatcher env PYTHONPATH=/opt/codex-dispatcher/current/src \
   /opt/codex-python/current/bin/python3 -P -s -m codex_dispatcher status \
   --database /var/lib/codex-dispatcher/state.db.recovered --json
@@ -126,6 +126,23 @@ If any check fails before the final `mv`, delete only
 database aside and restore the same validated backup again. Once any write-enabled sweep begins,
 binary-only rollback is forbidden: stop all Dispatcher timers and reconcile SQLite, Runner,
 GitHub, and Slack from the durable receipts before another attempt.
+
+## Terminal-storage evidence conflict response
+
+`status` or lifecycle health reporting `evidence_conflict` is an incident signal, not a cleanup
+request. Stop the Dispatcher timer, allow any already-active oneshot service to finish, and create a
+fresh verified Online Backup. Preserve the archive row, absence row, WorkItem identity, Runner
+registry/archive/absence files, release receipt, and current/rollback links before investigating.
+
+Compare only bounded identity fields: WorkItem ID, repository, Issue number, expected HEAD, archive
+status, and permanent receipt digests. Do not edit SQLite, delete a Runner file, synthesize an
+`ARCHIVED` response, repeat `PROVE_ABSENCE`, or use a prune command to make the projection healthy.
+An absence without its bound unfinished archive, mismatched WorkItem/HEAD identity, or simultaneous
+completed archive and absence receipt must remain blocked until the source of corruption is known.
+If recovery requires replacing online state, use a validated backup and the full external
+reconciliation workflow above; a binary or symlink rollback alone cannot resolve conflicting
+durable evidence. Re-enable the timer only after `status`, lifecycle health, Runner read-back, and
+an immediate ordinary sweep all agree, with the sweep producing no unexpected write.
 
 ## Runner release and image reference inventory
 

@@ -104,8 +104,8 @@ network denial, and isolated login-status probes were repeated successfully. The
 unchanged. Every START and RESUME must now pass `codex login status` in the exact WorkItem home;
 invalid authentication blocks before Codex starts and is never blindly retried. Token refresh is
 Codex-managed rather than a separate Dispatcher admission gate. Higher-value repositories remain
-prohibited pending the repository-class recovery and target-readback matrix in
-`deploy/runner/DOCKER.md`.
+prohibited: schema 20 records class-specific recovery and exact target-readback evidence, but its
+admission row stays hard-false pending dedicated live acceptance in `deploy/runner/DOCKER.md`.
 The Fixture-only Dispatcher, backup, restore-drill, health, and Runner-capacity timers are enabled
 on the dedicated hosts. This activation does not admit another repository class.
 

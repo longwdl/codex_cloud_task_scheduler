@@ -85,6 +85,8 @@ class SshPreflightPlanTests(unittest.TestCase):
         self.assertIs(SshRecoveryAction.RESUME_PREPARATION, plan.recovery_action)
         self.assertEqual(item, plan.work_item)
         self.assertIsNone(plan.turn)
+        self.assertIsNotNone(plan.repository_recovery_receipt)
+        self.assertIsNotNone(plan.repository_target_readback_verdict)
         self.assertFalse(any(call.method == "list_ready_tasks" for call in tracker.calls))
 
     def test_active_publication_recovery_preserves_the_exact_turn(self) -> None:

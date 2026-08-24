@@ -516,6 +516,22 @@ configuration staging, but the immutable code matrix keeps that row false until 
 release changes it. Existing WorkItem recovery runs before candidate selection and is never blocked
 by loss or downgrade of new-work admission.
 
+Schema 20 closes the claim-to-WorkItem crash window with an immutable pre-claim policy ledger. The
+ledger binds the exact repository, Issue number and node ID, repository class, recovery profile,
+target-readback profile, admission-matrix version, and matrix digest before the GitHub claim write.
+WorkItem creation atomically performs the ledger's only permitted update: binding that identity to
+one WorkItem. Historical rows remain explicitly `legacy_unbound`; they are recoverable but cannot be
+used as evidence for admitting a new claim.
+
+Every non-idle recovery plan now passes a pure class-specific evaluator. Fixture recovery permits
+the existing exact guarded lifecycle, while the staged higher-value profile excludes terminal
+archive, disposition, merge completion, and branch deletion. The resulting allowed/blocked receipt
+is deterministic and appended before a recovery mutation. The same plan passes a unified exact
+target-readback evaluator that binds the Issue, WorkItem, optional Turn and PR, plus bounded
+Runner/Slack/Actions ledger evidence. Its deterministic verdict is also append-only. A missing
+policy row for a policy-bound WorkItem, an identity mismatch, or a class-disallowed action changes
+the executable plan to `block`; it is never treated as a warning.
+
 The runner still contains no production secrets, personal data, deployment credentials, inbound
 SSH key to the Control Host, or mounted Control Host filesystem. Published commits, GitHub state,
 Control Host SQLite, and Slack metadata remain outside its failure domain. Higher-value repositories

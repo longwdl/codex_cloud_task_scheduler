@@ -98,6 +98,7 @@ def resolve_ssh_work_item(
     base_sha: str,
     existing_work_item: WorkItem | None = None,
     runner_preparation_acknowledged: bool | None = None,
+    repository_policy_sha256: str | None = None,
     runner_root: str = "/srv/codex-runner/work-items",
     created_at: str | None = None,
 ) -> WorkItemResolution:
@@ -113,6 +114,7 @@ def resolve_ssh_work_item(
             base_branch=repository.base_branch,
             base_sha=base_sha,
             runner_root=runner_root,
+            repository_policy_sha256=repository_policy_sha256,
             at=created_at,
         )
         return WorkItemResolution(

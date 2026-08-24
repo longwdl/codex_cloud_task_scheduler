@@ -37,7 +37,7 @@ from codex_dispatcher.work_items import WorkItemState, validate_work_item_id
 
 
 _SCHEMA_VERSION = 1
-_EXPECTED_DATABASE_SCHEMA = tuple(range(1, 20))
+_EXPECTED_DATABASE_SCHEMA = tuple(range(1, 21))
 _RELEASE_FILES = (
     "scripts/codex-dispatcher-v1",
     "scripts/codex-dispatcher-backup-v1",
@@ -110,7 +110,7 @@ class DisasterRecoveryResult:
             "slack_receipt_count": self.slack_receipt_count,
             "rto_milliseconds": self.rto_milliseconds,
             "rto_scope": (
-                "latest-backup selection through isolated schema-19 restore, "
+                "latest-backup selection through isolated schema-20 restore, "
                 "Control application-filesystem rebuild, and Runner/GitHub/Slack read-back"
             ),
             "infrastructure_provisioning_rto_measured": False,
@@ -226,7 +226,7 @@ def run_schema18_disaster_recovery_drill(
     slack_verifier: SlackReceiptVerifier | None,
     now: datetime | None = None,
 ) -> DisasterRecoveryResult:
-    """Restore and reconcile one exact schema-19 snapshot without touching live state."""
+    """Restore and reconcile one exact schema-20 snapshot without touching live state."""
     started = time.monotonic_ns()
     moment = datetime.now(timezone.utc) if now is None else now
     if not isinstance(moment, datetime) or moment.tzinfo is None:
@@ -265,7 +265,7 @@ def run_schema18_disaster_recovery_drill(
             if restored.foreign_key_violation_count():
                 raise DisasterRecoveryError("restored database has foreign-key violations")
             if restored.schema_migration_versions() != _EXPECTED_DATABASE_SCHEMA:
-                raise DisasterRecoveryError("restored database is not exact schema 19")
+                raise DisasterRecoveryError("restored database is not exact schema 20")
             work_items = restored.list_work_items()
             archive_count, absence_count = _verify_runner_snapshot(
                 restored, runner_snapshot

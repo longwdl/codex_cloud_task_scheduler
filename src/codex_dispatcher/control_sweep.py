@@ -10,6 +10,10 @@ from typing import Protocol
 from codex_dispatcher.config import Config, RepositoryConfig
 from codex_dispatcher.dispatcher_lock import DispatcherProcessLock
 from codex_dispatcher.github_delivery import GitHubDeliveryCoordinator
+from codex_dispatcher.repository_admission import (
+    RepositoryPolicyIdentity,
+    build_repository_policy_identity,
+)
 from codex_dispatcher.slack_delivery import SlackDeliveryCoordinator
 from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_dispatch_service import (
@@ -197,6 +201,9 @@ class SshControlSweep:
                 source_bundle = self._source.current(
                     task.repository, repository.base_branch
                 )
+                self._store.prepare_repository_claim_policy(
+                    self._build_claim_policy(task)
+                )
             elif preparation_retry:
                 source_bundle = self._source.exact(
                     existing.repository, existing.base_sha
@@ -303,6 +310,14 @@ class SshControlSweep:
         *,
         turn_id: str | None,
     ) -> ControlSweepResult:
+        if recovery.repository_recovery_receipt is not None:
+            self._store.record_repository_recovery_receipt(
+                recovery.repository_recovery_receipt
+            )
+        if recovery.repository_target_readback_verdict is not None:
+            self._store.record_repository_target_readback_verdict(
+                recovery.repository_target_readback_verdict
+            )
         if recovery.action is SshRecoveryAction.BLOCK:
             if recovery.work_item is not None and recovery.reason in {
                 "terminal_branch_head_conflict",
@@ -633,6 +648,9 @@ class SshControlSweep:
         if recovery.action is SshRecoveryAction.RECOVER_ORPHAN_CLAIM:
             assert recovery.task is not None
             repository = self._repository(recovery.task.repository)
+            self._store.prepare_repository_claim_policy(
+                self._build_claim_policy(recovery.task)
+            )
             bundle = self._source.current(
                 recovery.task.repository,
                 repository.base_branch,
@@ -1074,6 +1092,24 @@ class SshControlSweep:
             return self._repositories[slug]
         except KeyError as exc:
             raise ValueError("task repository is not configured") from exc
+
+    def _build_claim_policy(self, task: TrackerTask) -> RepositoryPolicyIdentity:
+        repository = self._repository(task.repository)
+        admission = self._config.repository_admission
+        return build_repository_policy_identity(
+            repository=task.repository,
+            issue_number=task.issue_number,
+            issue_node_id=task.issue_node_id,
+            repository_class=repository.repository_class,
+            recovery_profiles=(
+                frozenset() if admission is None else admission.recovery_profiles
+            ),
+            target_readback_profiles=(
+                frozenset()
+                if admission is None
+                else admission.target_readback_profiles
+            ),
+        )
 
 
 def _same_issue(first: TrackerTask, second: TrackerTask) -> bool:

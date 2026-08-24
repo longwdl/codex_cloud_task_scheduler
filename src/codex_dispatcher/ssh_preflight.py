@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from codex_dispatcher.config import Config
+from codex_dispatcher.repository_evidence import (
+    RepositoryRecoveryReceipt,
+    RepositoryTargetReadbackVerdict,
+)
 from codex_dispatcher.scheduler import DryRunPlan, Rejection, build_ssh_dry_run_plan
 from codex_dispatcher.ssh_recovery import (
     SshRecoveryAction,
@@ -36,6 +40,8 @@ class SshPreflightPlan:
     pull_request: PullRequest | None = None
     reason: str | None = None
     rejected: tuple[Rejection, ...] = ()
+    repository_recovery_receipt: RepositoryRecoveryReceipt | None = None
+    repository_target_readback_verdict: RepositoryTargetReadbackVerdict | None = None
 
 
 def build_ssh_preflight_plan(
@@ -81,6 +87,10 @@ def _from_recovery(
         turn=recovery.turn,
         pull_request=recovery.pull_request,
         reason=recovery.reason,
+        repository_recovery_receipt=recovery.repository_recovery_receipt,
+        repository_target_readback_verdict=(
+            recovery.repository_target_readback_verdict
+        ),
     )
 
 

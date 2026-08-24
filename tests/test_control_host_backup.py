@@ -160,7 +160,7 @@ class ControlHostBackupTests(unittest.TestCase):
             self.assertEqual(newest.path, result.source_path)
             self.assertEqual("ok", result.integrity)
             self.assertEqual(0, result.foreign_key_violations)
-            self.assertEqual(tuple(range(1, 20)), result.schema_migrations)
+            self.assertEqual(tuple(range(1, 21)), result.schema_migrations)
             self.assertEqual(3599, result.source_age_seconds)
             self.assertEqual([], list(root.glob(".state-restore-drill-*")))
 

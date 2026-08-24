@@ -154,11 +154,15 @@ blocks before Codex starts and requires explicit operator recovery. New claims n
 repository-class/runtime-profile matrix: only the Fixture recovery and exact-readback row is admitted
 by this release. `unclassified`, mismatched, and higher-value rows fail closed with bounded planner
 codes; configuration alone cannot admit the higher-value row, while existing recovery remains live.
+Schema 20 additionally freezes the exact admitted policy before the remote claim, binds it
+atomically to the WorkItem, and persists deterministic class-specific recovery receipts and unified
+exact-target-readback verdicts. Historical WorkItems remain explicit legacy-unbound recovery inputs;
+the migration does not synthesize policy history for them.
 
 Explicitly deferred:
 
-- changing the hard-false higher-value matrix row before repository-class recovery and exact
-  target-readback acceptance is independently completed;
+- changing the hard-false higher-value admission row before its restricted recovery action set and
+  exact target-readback profile receive dedicated live acceptance;
 - any dispatcher-initiated merge, deployment, release, or production access.
 
 The repository now includes the fixed Control Host wrapper, hardened `Type=oneshot` service,

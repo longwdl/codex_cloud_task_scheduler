@@ -3,6 +3,45 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Repository admission, effective storage, and current-schema recovery — 2026-08-24
+
+Commit `4aacd6ec85b506712b36fe57bfd10d7d902a7989` introduced the fail-closed
+repository-class/runtime-profile matrix. The protected Fixture configuration names class `fixture`
+plus `fixture-live-v1` and `fixture-exact-v1`; a synthetic `higher-value` evaluation remained hard
+false in code. Both Control and Runner passed all 608 tests before the Runner-first handoff. The
+release archive SHA-256 was
+`cd3a38d7d80eced793db12622c0fb535ef0b0e7bc2efa2b0a1bb42d3b07f8d7a` and the protected
+configuration SHA-256 was
+`03a9b23b07ee9134e959c29523eca85a9a3a61f72d84b7cb67531f660efa084d`.
+
+Commit `fc45a67a21d9e4ca0ec4d8a17202b286ea19f27d` added a read-only one-value terminal-storage
+projection without rewriting the archive or absence ledgers. Its release archive SHA-256 was
+`51af4a47bf3e1ca825a11130928064a8e0514f6cb04fc1f3b3c2e4303b1d3465`. All 612 tests passed
+locally and under both real Linux service accounts. Live `status` and lifecycle health reported 23
+WorkItems as exactly 21 `archived` plus two `absence_reconciled`; all other effective states,
+including `evidence_conflict`, were zero. The two bounded overrides were Issues #24 and #26, whose
+immutable raw `prepared` archive rows are superseded by exact permanent Runner absence receipts.
+The manual handoff and immediately timer-triggered sweeps were both `idle`, each with four GitHub
+reads, zero writes, and zero failures. Final health had zero alerts and approximately 74.39 GB
+available on the Runner.
+
+The current-schema isolated recovery receipt is
+`/var/lib/codex-dispatcher/disaster-recovery-drills/20260823T235517Z-fc45a67/receipt.json`. It used
+backup `state-20260823T235539.753045Z.db`, age 41 seconds, and measured an application RTO of exactly
+100,789 milliseconds. Migrations 1 through 19, 23 WorkItems, 21 Runner archives, two Runner
+absences, 23 GitHub Issues, 19 Pull Requests, and 39 Slack receipts all reconciled. Control and
+Runner agreed on `fc45a67`, the empty-host rebuild manifest SHA-256 was
+`7d70e61797be17da5416c26407a0103f371f51f3837fdfcd8104a1b95d6546cc`, and
+`online_state_modified=false`. After the Dispatcher timer was restored, the observed sweep was
+again idle with four reads and zero writes.
+
+The refreshed non-destructive Runner reclamation plan is
+`/srv/codex-runner/reclamation-plans/d16d4984f3b63e75101588310518d32639b19f3151bc8255a06f494aa3f4c6d8.json`.
+Inventory SHA-256 `da56611aad7060cc3d2c0e9bf5523dbcd5b6233321d2677dbe32b4459770c911`
+protects current `fc45a67`, rollback `4aacd6e`, and the configured image digest. It lists 11 exact
+old release trees, zero images, and an estimated 42,512,384 bytes. The plan explicitly reports
+`authorizes_apply=false`; no deletion was attempted or authorized.
+
 ## Live checkpoint, resume, and fresh-Audit Fixture — 2026-08-24
 
 The canary series used the dedicated private Fixture only. Runtime releases `28b19ca` and

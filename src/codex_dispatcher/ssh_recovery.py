@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from hashlib import sha256
 
 from codex_dispatcher.config import Config
+from codex_dispatcher.repository_admission import (
+    RepositoryPolicyIdentity,
+    build_repository_policy_identity,
+)
+from codex_dispatcher.repository_evidence import (
+    RepositoryRecoveryReceipt,
+    RepositoryTargetReadbackVerdict,
+    evaluate_repository_recovery,
+    evaluate_repository_target_readback,
+)
 from codex_dispatcher.scheduler import SSH_CLI_EXECUTOR_LABEL
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.terminal_retention import (
@@ -76,6 +86,8 @@ class SshRecoveryPlan:
     disposition_request_event_id: str | None = None
     disposition_requested_at: str | None = None
     branch_cleanup_eligible_at: str | None = None
+    repository_recovery_receipt: RepositoryRecoveryReceipt | None = None
+    repository_target_readback_verdict: RepositoryTargetReadbackVerdict | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +109,31 @@ def plan_ssh_recovery(
     audit_terminal: bool = True,
     terminal_branch_cleanup_fixture_target: TerminalBranchCleanupFixtureTarget
     | None = None,
+) -> SshRecoveryPlan:
+    """Return the next recovery with executable class and exact-target evidence."""
+    observed_at = now or datetime.now(timezone.utc)
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise ValueError("now must include a timezone")
+    planned = _plan_ssh_recovery_unchecked(
+        config,
+        store,
+        tracker,
+        now=observed_at,
+        audit_terminal=audit_terminal,
+        terminal_branch_cleanup_fixture_target=terminal_branch_cleanup_fixture_target,
+    )
+    return _attach_repository_evidence(config, store, planned, observed_at)
+
+
+def _plan_ssh_recovery_unchecked(
+    config: Config,
+    store: StateStore,
+    tracker: Tracker,
+    *,
+    now: datetime,
+    audit_terminal: bool,
+    terminal_branch_cleanup_fixture_target: TerminalBranchCleanupFixtureTarget
+    | None,
 ) -> SshRecoveryPlan:
     """Return the only safe next recovery action using provider reads only."""
     if type(audit_terminal) is not bool:
@@ -211,9 +248,7 @@ def plan_ssh_recovery(
         )
         return SshRecoveryPlan(action, task, work_item)
 
-    observed_at = now or datetime.now(timezone.utc)
-    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
-        raise ValueError("now must include a timezone")
+    observed_at = now
     completion = _plan_merged_completion(
         config,
         store,
@@ -280,6 +315,165 @@ def plan_ssh_recovery(
     if task.state is TaskState.RUNNING:
         return _blocked("orphan_running_issue")
     return SshRecoveryPlan(SshRecoveryAction.RECOVER_ORPHAN_CLAIM, task=task)
+
+
+def _attach_repository_evidence(
+    config: Config,
+    store: StateStore,
+    planned: SshRecoveryPlan,
+    observed_at: datetime,
+) -> SshRecoveryPlan:
+    if planned.action is SshRecoveryAction.IDLE or planned.task is None:
+        return planned
+    task = planned.task
+    policy = _recovery_policy(config, store, task, planned.work_item)
+    created_at = observed_at.astimezone(timezone.utc).isoformat()
+    receipt = evaluate_repository_recovery(
+        action=planned.action.value,
+        policy=policy,
+        task=task,
+        work_item=planned.work_item,
+        turn=planned.turn,
+        pull_request=planned.pull_request,
+        planning_code=planned.reason,
+        created_at=created_at,
+    )
+    verdict = None
+    if planned.work_item is not None:
+        verdict = evaluate_repository_target_readback(
+            action=planned.action.value,
+            policy=policy,
+            task=task,
+            work_item=planned.work_item,
+            turn=planned.turn,
+            pull_request=planned.pull_request,
+            ledger_evidence=_repository_ledger_evidence(
+                store, planned.work_item, planned.turn
+            ),
+            created_at=created_at,
+        )
+    enriched = replace(
+        planned,
+        repository_recovery_receipt=receipt,
+        repository_target_readback_verdict=verdict,
+    )
+    if receipt.decision == "blocked":
+        return replace(
+            enriched,
+            action=SshRecoveryAction.BLOCK,
+            reason=receipt.code or "repository_recovery_blocked",
+        )
+    if verdict is not None and verdict.status == "blocked":
+        return replace(
+            enriched,
+            action=SshRecoveryAction.BLOCK,
+            reason=verdict.code or "repository_target_readback_blocked",
+        )
+    return enriched
+
+
+def _recovery_policy(
+    config: Config,
+    store: StateStore,
+    task: TrackerTask,
+    work_item: WorkItem | None,
+) -> RepositoryPolicyIdentity | None:
+    if work_item is not None:
+        if work_item.repository_policy_sha256 is None:
+            return None
+        policy = store.get_work_item_repository_policy(work_item.work_item_id)
+        if policy is None or policy.policy_sha256 != work_item.repository_policy_sha256:
+            return None
+        return policy
+    policy = store.get_repository_claim_policy(task.repository, task.issue_number)
+    if policy is not None:
+        return policy
+    repository = next(
+        (item for item in config.repositories if item.slug == task.repository), None
+    )
+    admission = config.repository_admission
+    if repository is None or admission is None or task.issue_node_id is None:
+        return None
+    try:
+        return build_repository_policy_identity(
+            repository=task.repository,
+            issue_number=task.issue_number,
+            issue_node_id=task.issue_node_id,
+            repository_class=repository.repository_class,
+            recovery_profiles=admission.recovery_profiles,
+            target_readback_profiles=admission.target_readback_profiles,
+        )
+    except ValueError:
+        return None
+
+
+def _repository_ledger_evidence(
+    store: StateStore,
+    work_item: WorkItem,
+    turn: Turn | None,
+) -> dict[str, object]:
+    deliveries = tuple(
+        item
+        for item in store.list_slack_deliveries()
+        if item.work_item_id == work_item.work_item_id
+    )
+    gate = None if turn is None else store.get_turn_completion_gate(turn.turn_id)
+    archive = store.get_work_item_archive(work_item.work_item_id)
+    absence = store.get_work_item_absence_reconciliation(work_item.work_item_id)
+    return {
+        "schema_version": 1,
+        "slack_deliveries": [
+            {
+                "deduplication_key": item.deduplication_key,
+                "work_item_id": item.work_item_id,
+                "turn_id": item.turn_id,
+                "kind": item.kind.value,
+                "channel_id": item.channel_id,
+                "payload_sha256": item.payload_sha256,
+                "state": item.state.value,
+                "thread_ts": item.thread_ts,
+                "message_ts": item.message_ts,
+                "permalink": item.permalink,
+            }
+            for item in deliveries
+        ],
+        "actions_completion_gate": (
+            None
+            if gate is None
+            else {
+                "turn_id": gate.turn_id,
+                "work_item_id": gate.work_item_id,
+                "status": gate.status.value,
+                "head_sha": gate.head_sha,
+                "task_spec_sha256": gate.task_spec_sha256,
+                "evidence_sha256": gate.evidence_sha256,
+            }
+        ),
+        "runner_terminal_storage": {
+            "archive": (
+                None
+                if archive is None
+                else {
+                    "work_item_id": archive.work_item_id,
+                    "status": archive.status.value,
+                    "expected_head_sha": archive.expected_head_sha,
+                    "request_sha256": archive.request_sha256,
+                    "response_sha256": archive.response_sha256,
+                }
+            ),
+            "absence": (
+                None
+                if absence is None
+                else {
+                    "work_item_id": absence.work_item_id,
+                    "expected_head_sha": absence.expected_head_sha,
+                    "evidence_sha256": absence.evidence_sha256,
+                    "observed_by": absence.observed_by,
+                    "observed_at": absence.observed_at,
+                }
+            ),
+        },
+    }
 
 
 def _plan_work_item_disposition(

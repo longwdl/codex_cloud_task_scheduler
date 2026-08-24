@@ -545,6 +545,13 @@ class SshRecoveryTests(unittest.TestCase):
 
         self.assertEqual(SshRecoveryAction.RECONCILE_ACTIVE_TURN, plan.action)
         self.assertEqual(turn.turn_id, plan.turn.turn_id)
+        self.assertIsNotNone(plan.repository_recovery_receipt)
+        self.assertIsNotNone(plan.repository_target_readback_verdict)
+        assert plan.repository_recovery_receipt is not None
+        assert plan.repository_target_readback_verdict is not None
+        self.assertEqual("legacy-unbound-recovery-v1", plan.repository_recovery_receipt.recovery_profile)
+        self.assertEqual("allowed", plan.repository_recovery_receipt.decision)
+        self.assertEqual("passed", plan.repository_target_readback_verdict.status)
         self.assertEqual("get_task", self.tracker.calls[0].method)
         self.assertEqual(1, len(self.tracker.calls))
 

@@ -816,6 +816,16 @@ def _ssh_preflight(config_path: Path) -> tuple[int, dict[str, object]]:
         "turn_id": None if turn is None else turn.turn_id,
         "pr_number": None if pull_request is None else pull_request.number,
         "reason": plan.reason,
+        "repository_recovery_receipt": (
+            None
+            if plan.repository_recovery_receipt is None
+            else plan.repository_recovery_receipt.to_mapping()
+        ),
+        "repository_target_readback_verdict": (
+            None
+            if plan.repository_target_readback_verdict is None
+            else plan.repository_target_readback_verdict.to_mapping()
+        ),
         "database_preexisting": inspection.database_preexisting,
         "rejected": [
             {

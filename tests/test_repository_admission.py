@@ -4,9 +4,11 @@ import unittest
 
 from codex_dispatcher.repository_admission import (
     REPOSITORY_ADMISSION_MATRIX,
+    REPOSITORY_ADMISSION_MATRIX_SHA256,
     RepositoryClass,
     RepositoryRecoveryProfile,
     RepositoryTargetReadbackProfile,
+    build_repository_policy_identity,
     evaluate_repository_admission,
 )
 
@@ -59,3 +61,34 @@ class RepositoryAdmissionTests(unittest.TestCase):
         self.assertEqual(
             "repository_recovery_profile_mismatch", missing_profiles.code
         )
+
+    def test_preclaim_policy_freezes_exact_issue_and_matrix_identity(self) -> None:
+        first = build_repository_policy_identity(
+            repository="owner/repo",
+            issue_number=42,
+            issue_node_id="I_kwDOFixture42",
+            repository_class=RepositoryClass.FIXTURE,
+            recovery_profiles=frozenset(
+                {RepositoryRecoveryProfile.FIXTURE_LIVE_V1}
+            ),
+            target_readback_profiles=frozenset(
+                {RepositoryTargetReadbackProfile.FIXTURE_EXACT_V1}
+            ),
+        )
+        second = build_repository_policy_identity(
+            repository="owner/repo",
+            issue_number=42,
+            issue_node_id="I_kwDOFixture42-replaced",
+            repository_class=RepositoryClass.FIXTURE,
+            recovery_profiles=frozenset(
+                {RepositoryRecoveryProfile.FIXTURE_LIVE_V1}
+            ),
+            target_readback_profiles=frozenset(
+                {RepositoryTargetReadbackProfile.FIXTURE_EXACT_V1}
+            ),
+        )
+
+        self.assertEqual(REPOSITORY_ADMISSION_MATRIX_SHA256, first.admission_matrix_sha256)
+        self.assertNotEqual(first.policy_sha256, second.policy_sha256)
+        self.assertEqual("fixture-live-v1", first.recovery_profile.value)
+        self.assertEqual("fixture-exact-v1", first.target_readback_profile.value)

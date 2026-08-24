@@ -246,6 +246,7 @@ class WorkItem:
     slack_thread_ts: str | None = None
     pr_number: int | None = None
     last_published_sha: str | None = None
+    repository_policy_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.state, WorkItemState):
@@ -295,6 +296,10 @@ class WorkItem:
             _positive_int(self.pr_number, "pr_number")
         if self.last_published_sha is not None:
             validate_git_sha(self.last_published_sha, "last_published_sha")
+        if self.repository_policy_sha256 is not None:
+            validate_sha256(
+                self.repository_policy_sha256, "repository_policy_sha256"
+            )
 
     @classmethod
     def new(
@@ -306,6 +311,7 @@ class WorkItem:
         base_branch: str,
         base_sha: str,
         runner_root: str = "/srv/codex-runner/work-items",
+        repository_policy_sha256: str | None = None,
         at: str | None = None,
     ) -> "WorkItem":
         identity = stable_work_item_identity(
@@ -327,6 +333,7 @@ class WorkItem:
             base_sha=base_sha,
             created_at=now,
             updated_at=now,
+            repository_policy_sha256=repository_policy_sha256,
         )
 
     @classmethod
@@ -340,6 +347,7 @@ class WorkItem:
         base_sha: str,
         task_branch: str,
         runner_root: str = "/srv/codex-runner/work-items",
+        repository_policy_sha256: str | None = None,
         at: str | None = None,
     ) -> "WorkItem":
         """Import one previously persisted and externally verified task-branch binding."""
@@ -363,6 +371,7 @@ class WorkItem:
             created_at=now,
             updated_at=now,
             task_branch_source=TaskBranchSource.MIGRATED,
+            repository_policy_sha256=repository_policy_sha256,
         )
 
     def transition_to(self, state: WorkItemState, *, at: str | None = None) -> "WorkItem":

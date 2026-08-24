@@ -460,6 +460,14 @@ class SshControlSweepTests(unittest.TestCase):
         self.assertIsNotNone(persisted)
         assert persisted is not None
         self.assertEqual(WorkItemState.BLOCKED, persisted.state)
+        policy = self.store.get_work_item_repository_policy(persisted.work_item_id)
+        self.assertIsNotNone(policy)
+        assert policy is not None
+        self.assertEqual(policy.policy_sha256, persisted.repository_policy_sha256)
+        verdicts = self.store.list_repository_target_readback_verdicts()
+        self.assertEqual(1, len(verdicts))
+        self.assertEqual("claim_binding", verdicts[0].action)
+        self.assertEqual("passed", verdicts[0].status)
         turns = self.store.list_turns(persisted.work_item_id)
         self.assertEqual(("IC_fixture",), turns[0].included_comment_ids)
 

@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 from enum import StrEnum
+from hashlib import sha256
+
+
+REPOSITORY_ADMISSION_MATRIX_VERSION = 1
 
 
 class RepositoryClass(StrEnum):
@@ -59,6 +65,113 @@ REPOSITORY_ADMISSION_MATRIX = (
 )
 
 
+def _matrix_payload() -> dict[str, object]:
+    return {
+        "schema_version": REPOSITORY_ADMISSION_MATRIX_VERSION,
+        "rows": [
+            {
+                "repository_class": row.repository_class.value,
+                "recovery_profile": (
+                    None if row.recovery_profile is None else row.recovery_profile.value
+                ),
+                "target_readback_profile": (
+                    None
+                    if row.target_readback_profile is None
+                    else row.target_readback_profile.value
+                ),
+                "admitted_by_this_release": row.admitted_by_this_release,
+            }
+            for row in REPOSITORY_ADMISSION_MATRIX
+        ],
+    }
+
+
+REPOSITORY_ADMISSION_MATRIX_SHA256 = sha256(
+    json.dumps(
+        _matrix_payload(), ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryPolicyIdentity:
+    """Immutable pre-claim repository policy bound to one exact Issue identity."""
+
+    repository: str
+    issue_number: int
+    issue_node_id: str
+    repository_class: RepositoryClass
+    recovery_profile: RepositoryRecoveryProfile
+    target_readback_profile: RepositoryTargetReadbackProfile
+    admission_matrix_version: int
+    admission_matrix_sha256: str
+    policy_sha256: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.repository, str)
+            or re.fullmatch(
+                r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}", self.repository
+            )
+            is None
+        ):
+            raise ValueError("repository policy repository is invalid")
+        if type(self.issue_number) is not int or self.issue_number <= 0:
+            raise ValueError("repository policy issue_number is invalid")
+        if (
+            not isinstance(self.issue_node_id, str)
+            or not self.issue_node_id
+            or len(self.issue_node_id) > 256
+        ):
+            raise ValueError("repository policy issue_node_id is invalid")
+        if not isinstance(self.repository_class, RepositoryClass):
+            raise ValueError("repository policy class is invalid")
+        if not isinstance(self.recovery_profile, RepositoryRecoveryProfile):
+            raise ValueError("repository recovery profile is invalid")
+        if not isinstance(
+            self.target_readback_profile, RepositoryTargetReadbackProfile
+        ):
+            raise ValueError("repository target readback profile is invalid")
+        requirement = next(
+            row
+            for row in REPOSITORY_ADMISSION_MATRIX
+            if row.repository_class is self.repository_class
+        )
+        if (
+            requirement.recovery_profile is not self.recovery_profile
+            or requirement.target_readback_profile is not self.target_readback_profile
+        ):
+            raise ValueError("repository policy profiles conflict with its class")
+        if (
+            self.admission_matrix_version != REPOSITORY_ADMISSION_MATRIX_VERSION
+            or self.admission_matrix_sha256 != REPOSITORY_ADMISSION_MATRIX_SHA256
+        ):
+            raise ValueError("repository admission matrix identity is invalid")
+        expected = repository_policy_sha256(
+            repository=self.repository,
+            issue_number=self.issue_number,
+            issue_node_id=self.issue_node_id,
+            repository_class=self.repository_class,
+            recovery_profile=self.recovery_profile,
+            target_readback_profile=self.target_readback_profile,
+        )
+        if self.policy_sha256 != expected:
+            raise ValueError("repository policy digest is invalid")
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "repository": self.repository,
+            "issue_number": self.issue_number,
+            "issue_node_id": self.issue_node_id,
+            "repository_class": self.repository_class.value,
+            "recovery_profile": self.recovery_profile.value,
+            "target_readback_profile": self.target_readback_profile.value,
+            "admission_matrix_version": self.admission_matrix_version,
+            "admission_matrix_sha256": self.admission_matrix_sha256,
+            "policy_sha256": self.policy_sha256,
+        }
+
+
 def evaluate_repository_admission(
     repository_class: RepositoryClass,
     recovery_profiles: frozenset[RepositoryRecoveryProfile],
@@ -100,3 +213,69 @@ def evaluate_repository_admission(
             False, "repository_class_not_admitted", requirement
         )
     return RepositoryAdmissionDecision(True, None, requirement)
+
+
+def build_repository_policy_identity(
+    *,
+    repository: str,
+    issue_number: int,
+    issue_node_id: str,
+    repository_class: RepositoryClass,
+    recovery_profiles: frozenset[RepositoryRecoveryProfile],
+    target_readback_profiles: frozenset[RepositoryTargetReadbackProfile],
+) -> RepositoryPolicyIdentity:
+    """Build one admitted exact policy before the corresponding remote claim."""
+    decision = evaluate_repository_admission(
+        repository_class, recovery_profiles, target_readback_profiles
+    )
+    if not decision.admitted:
+        raise ValueError(decision.code or "repository policy is not admitted")
+    requirement = decision.requirement
+    assert requirement.recovery_profile is not None
+    assert requirement.target_readback_profile is not None
+    digest = repository_policy_sha256(
+        repository=repository,
+        issue_number=issue_number,
+        issue_node_id=issue_node_id,
+        repository_class=repository_class,
+        recovery_profile=requirement.recovery_profile,
+        target_readback_profile=requirement.target_readback_profile,
+    )
+    return RepositoryPolicyIdentity(
+        repository,
+        issue_number,
+        issue_node_id,
+        repository_class,
+        requirement.recovery_profile,
+        requirement.target_readback_profile,
+        REPOSITORY_ADMISSION_MATRIX_VERSION,
+        REPOSITORY_ADMISSION_MATRIX_SHA256,
+        digest,
+    )
+
+
+def repository_policy_sha256(
+    *,
+    repository: str,
+    issue_number: int,
+    issue_node_id: str,
+    repository_class: RepositoryClass,
+    recovery_profile: RepositoryRecoveryProfile,
+    target_readback_profile: RepositoryTargetReadbackProfile,
+) -> str:
+    payload = {
+        "schema_version": 1,
+        "repository": repository,
+        "issue_number": issue_number,
+        "issue_node_id": issue_node_id,
+        "repository_class": repository_class.value,
+        "recovery_profile": recovery_profile.value,
+        "target_readback_profile": target_readback_profile.value,
+        "admission_matrix_version": REPOSITORY_ADMISSION_MATRIX_VERSION,
+        "admission_matrix_sha256": REPOSITORY_ADMISSION_MATRIX_SHA256,
+    }
+    return sha256(
+        json.dumps(
+            payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()

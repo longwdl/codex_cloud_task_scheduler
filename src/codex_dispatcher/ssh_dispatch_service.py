@@ -26,6 +26,8 @@ from codex_dispatcher.git_publisher import (
     GitPublicationRejected,
 )
 from codex_dispatcher.publisher import PublicationError
+from codex_dispatcher.repository_admission import RepositoryPolicyIdentity
+from codex_dispatcher.repository_evidence import evaluate_repository_target_readback
 from codex_dispatcher.runner_protocol import (
     AcceptanceAssertionStatus,
     AgentResultStatus,
@@ -148,6 +150,7 @@ class OfflineSshDispatchService:
         """Persist/recover the unique WorkItem and idempotently prepare its Runner repo."""
         repository = self._repository(task.repository)
         existing = self._store.get_work_item_by_issue(task.repository, task.issue_number)
+        claim_policy = None if existing is not None else self._claim_policy(task)
         preparation_acknowledged = (
             self._store.runner_preparation_was_acknowledged(existing.work_item_id)
             if existing is not None
@@ -160,6 +163,9 @@ class OfflineSshDispatchService:
             base_sha=base_sha,
             existing_work_item=existing,
             runner_preparation_acknowledged=preparation_acknowledged,
+            repository_policy_sha256=(
+                None if claim_policy is None else claim_policy.policy_sha256
+            ),
             runner_root=runner_root,
             created_at=created_at,
         )
@@ -178,6 +184,22 @@ class OfflineSshDispatchService:
 
         if resolution.is_new:
             self._store.create_work_item(resolution.work_item)
+            if claim_policy is not None:
+                verdict = evaluate_repository_target_readback(
+                    action="claim_binding",
+                    policy=claim_policy,
+                    task=task,
+                    work_item=resolution.work_item,
+                    turn=None,
+                    pull_request=None,
+                    ledger_evidence={"stage": "pre_runner_prepare"},
+                    created_at=resolution.work_item.created_at,
+                )
+                self._store.record_repository_target_readback_verdict(verdict)
+                if verdict.status != "passed":
+                    raise SshDispatchPlanningError(
+                        verdict.code or "repository target readback blocked"
+                    )
         if resolution.action is WorkItemAction.REACTIVATE:
             return self._store.update_work_item_state(
                 resolution.work_item.work_item_id, WorkItemState.READY
@@ -196,6 +218,19 @@ class OfflineSshDispatchService:
                 source_bundle=source_bundle.artifact,
             )
         return resolution.work_item
+
+    def _claim_policy(self, task: TrackerTask) -> RepositoryPolicyIdentity | None:
+        """Return an exact pre-claim policy, or mark an explicit legacy binding."""
+        policy = self._store.get_repository_claim_policy(
+            task.repository, task.issue_number
+        )
+        if policy is None:
+            return None
+        if policy.issue_node_id != task.issue_node_id:
+            raise SshDispatchPlanningError(
+                "claimed Issue conflicts with its pre-claim repository policy"
+            )
+        return policy
 
     def run_claimed_turn(
         self,

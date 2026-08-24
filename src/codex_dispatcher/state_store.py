@@ -39,6 +39,16 @@ from codex_dispatcher.github_api_metrics import (
     GitHubApiSweepMetric,
     GitHubApiSweepOutcome,
 )
+from codex_dispatcher.repository_admission import (
+    RepositoryClass,
+    RepositoryPolicyIdentity,
+    RepositoryRecoveryProfile,
+    RepositoryTargetReadbackProfile,
+)
+from codex_dispatcher.repository_evidence import (
+    RepositoryRecoveryReceipt,
+    RepositoryTargetReadbackVerdict,
+)
 from codex_dispatcher.followup_intents import (
     FollowupCause,
     FollowupIntentState,
@@ -415,7 +425,7 @@ class StateStore:
 
     def create_work_item(self, work_item: WorkItem) -> None:
         """Persist one stable Issue-to-session identity."""
-        fields = (
+        fields = [
             "work_item_id",
             "repository",
             "issue_number",
@@ -433,7 +443,17 @@ class StateStore:
             "last_published_sha",
             "created_at",
             "updated_at",
-        )
+        ]
+        work_item_columns = {
+            str(row[1])
+            for row in self._connection.execute("PRAGMA table_info(work_items)")
+        }
+        if "repository_policy_sha256" in work_item_columns:
+            fields.insert(-2, "repository_policy_sha256")
+        elif work_item.repository_policy_sha256 is not None:
+            raise ValueError(
+                "repository policy cannot be bound before schema migration 20"
+            )
         values = tuple(
             getattr(work_item, field).value
             if field in {"state", "task_branch_source"}
@@ -446,6 +466,38 @@ class StateStore:
                 f"VALUES ({', '.join('?' for _ in fields)})",
                 values,
             )
+            if (
+                work_item.repository_policy_sha256 is not None
+                and "repository_policy_sha256" in work_item_columns
+            ):
+                policy_row = connection.execute(
+                    "SELECT * FROM repository_claim_policies "
+                    "WHERE repository = ? AND issue_number = ?",
+                    (work_item.repository, work_item.issue_number),
+                ).fetchone()
+                if policy_row is None:
+                    raise ValueError(
+                        "WorkItem repository policy was not persisted before claim"
+                    )
+                policy = self._row_to_repository_policy(policy_row)
+                if (
+                    policy.issue_node_id != work_item.issue_node_id
+                    or policy.policy_sha256 != work_item.repository_policy_sha256
+                    or policy_row["work_item_id"] is not None
+                ):
+                    raise ValueError("WorkItem repository policy identity conflicts")
+                cursor = connection.execute(
+                    "UPDATE repository_claim_policies SET work_item_id = ?, bound_at = ? "
+                    "WHERE repository = ? AND issue_number = ? AND work_item_id IS NULL",
+                    (
+                        work_item.work_item_id,
+                        work_item.created_at,
+                        work_item.repository,
+                        work_item.issue_number,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("concurrent repository policy binding detected")
             self._insert_work_item_event(
                 connection,
                 work_item.work_item_id,
@@ -456,9 +508,170 @@ class StateStore:
                     "issue_number": work_item.issue_number,
                     "task_branch": work_item.task_branch,
                     "task_branch_source": work_item.task_branch_source.value,
+                    "repository_policy_sha256": work_item.repository_policy_sha256,
                 },
                 work_item.created_at,
             )
+
+    def prepare_repository_claim_policy(
+        self,
+        policy: RepositoryPolicyIdentity,
+        *,
+        created_at: str | None = None,
+    ) -> RepositoryPolicyIdentity:
+        """Persist an immutable policy before the corresponding GitHub claim write."""
+        if not isinstance(policy, RepositoryPolicyIdentity):
+            raise TypeError("policy must be a RepositoryPolicyIdentity")
+        now = created_at or utc_now_iso()
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM repository_claim_policies "
+                "WHERE repository = ? AND issue_number = ?",
+                (policy.repository, policy.issue_number),
+            ).fetchone()
+            if existing is not None:
+                persisted = self._row_to_repository_policy(existing)
+                if persisted != policy:
+                    raise ValueError("repository claim policy is already different")
+                return persisted
+            connection.execute(
+                "INSERT INTO repository_claim_policies "
+                "(repository, issue_number, issue_node_id, repository_class, "
+                "recovery_profile, target_readback_profile, "
+                "admission_matrix_version, admission_matrix_sha256, policy_sha256, "
+                "work_item_id, created_at, bound_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL)",
+                (
+                    policy.repository,
+                    policy.issue_number,
+                    policy.issue_node_id,
+                    policy.repository_class.value,
+                    policy.recovery_profile.value,
+                    policy.target_readback_profile.value,
+                    policy.admission_matrix_version,
+                    policy.admission_matrix_sha256,
+                    policy.policy_sha256,
+                    now,
+                ),
+            )
+        return policy
+
+    def get_repository_claim_policy(
+        self, repository: str, issue_number: int
+    ) -> RepositoryPolicyIdentity | None:
+        row = self._connection.execute(
+            "SELECT * FROM repository_claim_policies "
+            "WHERE repository = ? AND issue_number = ?",
+            (repository, issue_number),
+        ).fetchone()
+        return self._row_to_repository_policy(row) if row is not None else None
+
+    def get_work_item_repository_policy(
+        self, work_item_id: str
+    ) -> RepositoryPolicyIdentity | None:
+        row = self._connection.execute(
+            "SELECT repository_claim_policies.* FROM repository_claim_policies "
+            "JOIN work_items USING(work_item_id) WHERE work_item_id = ?",
+            (work_item_id,),
+        ).fetchone()
+        return self._row_to_repository_policy(row) if row is not None else None
+
+    def record_repository_recovery_receipt(
+        self, receipt: RepositoryRecoveryReceipt
+    ) -> RepositoryRecoveryReceipt:
+        """Append one deterministic class-specific recovery decision."""
+        if not isinstance(receipt, RepositoryRecoveryReceipt):
+            raise TypeError("receipt must be a RepositoryRecoveryReceipt")
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM repository_recovery_receipts "
+                "WHERE receipt_sha256 = ?",
+                (receipt.receipt_sha256,),
+            ).fetchone()
+            if existing is not None:
+                persisted = self._row_to_repository_recovery_receipt(existing)
+                if replace(persisted, created_at=receipt.created_at) != receipt:
+                    raise ValueError("repository recovery receipt digest conflicts")
+                return persisted
+            connection.execute(
+                "INSERT INTO repository_recovery_receipts "
+                "(receipt_sha256, work_item_id, repository, issue_number, "
+                "policy_sha256, recovery_profile, action, decision, code, "
+                "evidence_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    receipt.receipt_sha256,
+                    receipt.work_item_id,
+                    receipt.repository,
+                    receipt.issue_number,
+                    receipt.policy_sha256,
+                    receipt.recovery_profile,
+                    receipt.action,
+                    receipt.decision,
+                    receipt.code,
+                    receipt.evidence_json,
+                    receipt.created_at,
+                ),
+            )
+        return receipt
+
+    def list_repository_recovery_receipts(
+        self,
+    ) -> tuple[RepositoryRecoveryReceipt, ...]:
+        return tuple(
+            self._row_to_repository_recovery_receipt(row)
+            for row in self._connection.execute(
+                "SELECT * FROM repository_recovery_receipts "
+                "ORDER BY created_at, receipt_sha256"
+            )
+        )
+
+    def record_repository_target_readback_verdict(
+        self, verdict: RepositoryTargetReadbackVerdict
+    ) -> RepositoryTargetReadbackVerdict:
+        """Append one exact-target verdict before the corresponding mutation."""
+        if not isinstance(verdict, RepositoryTargetReadbackVerdict):
+            raise TypeError("verdict must be a RepositoryTargetReadbackVerdict")
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM repository_target_readback_verdicts "
+                "WHERE verdict_sha256 = ?",
+                (verdict.verdict_sha256,),
+            ).fetchone()
+            if existing is not None:
+                persisted = self._row_to_repository_target_readback_verdict(existing)
+                if replace(persisted, created_at=verdict.created_at) != verdict:
+                    raise ValueError("repository target-readback verdict digest conflicts")
+                return persisted
+            connection.execute(
+                "INSERT INTO repository_target_readback_verdicts "
+                "(verdict_sha256, work_item_id, policy_sha256, "
+                "target_readback_profile, action, status, code, evidence_json, "
+                "evidence_sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    verdict.verdict_sha256,
+                    verdict.work_item_id,
+                    verdict.policy_sha256,
+                    verdict.target_readback_profile,
+                    verdict.action,
+                    verdict.status,
+                    verdict.code,
+                    verdict.evidence_json,
+                    verdict.evidence_sha256,
+                    verdict.created_at,
+                ),
+            )
+        return verdict
+
+    def list_repository_target_readback_verdicts(
+        self,
+    ) -> tuple[RepositoryTargetReadbackVerdict, ...]:
+        return tuple(
+            self._row_to_repository_target_readback_verdict(row)
+            for row in self._connection.execute(
+                "SELECT * FROM repository_target_readback_verdicts "
+                "ORDER BY created_at, verdict_sha256"
+            )
+        )
 
     def get_work_item(self, work_item_id: str) -> WorkItem | None:
         row = self._connection.execute(
@@ -5310,6 +5523,63 @@ class StateStore:
         values["state"] = WorkItemState(values["state"])
         values["task_branch_source"] = TaskBranchSource(values["task_branch_source"])
         return WorkItem(**values)
+
+    @staticmethod
+    def _row_to_repository_policy(row: sqlite3.Row) -> RepositoryPolicyIdentity:
+        return RepositoryPolicyIdentity(
+            repository=str(row["repository"]),
+            issue_number=int(row["issue_number"]),
+            issue_node_id=str(row["issue_node_id"]),
+            repository_class=RepositoryClass(str(row["repository_class"])),
+            recovery_profile=RepositoryRecoveryProfile(str(row["recovery_profile"])),
+            target_readback_profile=RepositoryTargetReadbackProfile(
+                str(row["target_readback_profile"])
+            ),
+            admission_matrix_version=int(row["admission_matrix_version"]),
+            admission_matrix_sha256=str(row["admission_matrix_sha256"]),
+            policy_sha256=str(row["policy_sha256"]),
+        )
+
+    @staticmethod
+    def _row_to_repository_recovery_receipt(
+        row: sqlite3.Row,
+    ) -> RepositoryRecoveryReceipt:
+        return RepositoryRecoveryReceipt(
+            receipt_sha256=str(row["receipt_sha256"]),
+            work_item_id=(
+                None if row["work_item_id"] is None else str(row["work_item_id"])
+            ),
+            repository=str(row["repository"]),
+            issue_number=int(row["issue_number"]),
+            policy_sha256=(
+                None if row["policy_sha256"] is None else str(row["policy_sha256"])
+            ),
+            recovery_profile=str(row["recovery_profile"]),
+            action=str(row["action"]),
+            decision=str(row["decision"]),
+            code=None if row["code"] is None else str(row["code"]),
+            evidence_json=str(row["evidence_json"]),
+            created_at=str(row["created_at"]),
+        )
+
+    @staticmethod
+    def _row_to_repository_target_readback_verdict(
+        row: sqlite3.Row,
+    ) -> RepositoryTargetReadbackVerdict:
+        return RepositoryTargetReadbackVerdict(
+            verdict_sha256=str(row["verdict_sha256"]),
+            work_item_id=str(row["work_item_id"]),
+            policy_sha256=(
+                None if row["policy_sha256"] is None else str(row["policy_sha256"])
+            ),
+            target_readback_profile=str(row["target_readback_profile"]),
+            action=str(row["action"]),
+            status=str(row["status"]),
+            code=None if row["code"] is None else str(row["code"]),
+            evidence_json=str(row["evidence_json"]),
+            evidence_sha256=str(row["evidence_sha256"]),
+            created_at=str(row["created_at"]),
+        )
 
     @staticmethod
     def _row_to_session_generation(row: sqlite3.Row) -> SessionGeneration:

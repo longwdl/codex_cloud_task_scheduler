@@ -289,7 +289,7 @@ class DisasterRecoveryTests(unittest.TestCase):
             )
 
             self.assertEqual(COMMIT, result.release_commit)
-            self.assertEqual(tuple(range(1, 20)), tuple(
+            self.assertEqual(tuple(range(1, 21)), tuple(
                 json.loads(result.receipt_path.read_text())["database_schema_migrations"]
             ))
             self.assertEqual(1, result.work_item_count)
@@ -304,7 +304,7 @@ class DisasterRecoveryTests(unittest.TestCase):
             )
             with StateStore(rebuilt, read_only=True) as store:
                 self.assertEqual("ok", store.integrity_check())
-                self.assertEqual(tuple(range(1, 20)), store.schema_migration_versions())
+                self.assertEqual(tuple(range(1, 21)), store.schema_migration_versions())
             self.assertTrue((recovery / "empty-control-host-manifest.json").is_file())
 
     def test_runner_tombstone_drift_fails_without_touching_online_database(self) -> None:
