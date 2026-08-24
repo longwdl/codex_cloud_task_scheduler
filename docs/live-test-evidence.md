@@ -87,6 +87,61 @@ The receipt ended `status=rolled_back`, `phase=rollback_observed`, and both host
 ten finished Turns, seven unique delivered Slack receipts, three exact mounts, and zero containers
 were unchanged. This successor evidence commit is the forward release target.
 
+### Terminal discard, archive, and exact reclamation
+
+Commit `2a07275daf436ee6e2bb2e19d1382768d6537a08` enabled only the identity-bound
+`record_work_item_disposition`, `archive_disposed_work_item`, and
+`reconcile_work_item_archive` recovery actions for the manual higher-value canary. Ordinary
+higher-value admission remained false and higher-value `delete_terminal_branch` remained denied.
+The release archive SHA-256 was
+`8caf1dad6b4fe7d49e8cb5ea161b120b168e46321dcdd89e50e23069fce372c9`; all 625 tests passed
+locally and on both hosts before receipt
+`/opt/codex-dispatcher/release-receipts/2a07275daf436ee6e2bb2e19d1382768d6537a08.json`
+committed the same release on Control and Runner.
+
+After exact repository, PR, head, base, Issue node, and WorkItem read-back, the owner closed
+unmerged Draft PRs `#2`, `#4`, and `#6` without deleting their task branches. Issues `#1`, `#3`,
+and `#5` remained open and each received the exact state label `agent:discard` together with
+`priority:p1` and `exec:ssh-cli`. The mode-`0600` pre-discard SQLite backup was
+`/var/lib/codex-dispatcher/higher-value-canary/backups/state-pre-discard-20260824T040611Z.db`;
+its integrity check was `ok` with zero foreign-key violations.
+
+The manual canary then recorded `superseded` dispositions requested by `longwdl` and archived the
+three exact WorkItems in newest-first recovery order:
+
+- Issue `#5`: `wi_2ce24ca00a2845603017ea7b`;
+- Issue `#3`: `wi_f461ddb337ba9dce04d34da5`;
+- Issue `#1`: `wi_8918e5a9ab73fd0ee4d179b5`.
+
+Each Runner image was re-listed immediately before its exact `ARCHIVE` request. Each permanent
+Control archive row ended `archived` with `8,589,934,592` reclaimed bytes; each exact image was
+absent afterward while its mode-`0600` registry and permanent archive tombstone remained. Total
+WorkItem image reclamation was `25,769,803,776` bytes. Six recovery receipts were `allowed`, all
+six target read-back verdicts passed, and a repeated canary sweep returned strict `idle` with
+three archived WorkItems and no active, retained, ambiguous, blocked, or conflicting archive.
+
+Release reclamation first failed closed because the Runner rollback-reference file still named an
+older current release; no deletion occurred. After replacing it with exact current release
+`2a07275daf436ee6e2bb2e19d1382768d6537a08`, immediate rollback release
+`9f7d235899dd1c0422bf39afae2927915a154e6d`, and configured image digest
+`sha256:da3662343e86ebeeba97f54f1c7f03faf03b988e07677cbd171a80d9903c772d`, plan
+`a18843dd880c90ebdf3812e1f7c1ca0ead06cec8917308f1114a87aa777ce03a` was independently
+re-inspected with `state_writes=0` and exact agreement. Its permanent mode-`0600` receipt at
+`/srv/codex-runner/reclamation-receipts/a18843dd880c90ebdf3812e1f7c1ca0ead06cec8917308f1114a87aa777ce03a.json`
+has SHA-256 `e5ad6d5fe2b7aec7417c667004999e619fa60a2fdbc5794e604a670dd38bce5b` and records deletion of
+exactly 18 unreferenced release directories, `70,668,288` bytes, and zero images. Post-plan
+`6646cf4e03ca2db18d5ba4e2508aefa3435a0d17d4fd00730baab85dc136bcf2` had no deletion targets;
+only the current and immediate rollback releases remained. No broad prune command was used.
+
+The final production sweep was strict `idle`, with four GitHub reads, zero writes, and zero
+failures. The lifecycle check at `2026-08-24T04:20:25Z` reported integrity `ok`, zero alerts, zero
+active Turns, zero planned or cross-role follow-ups, zero no-progress exhaustions, and Runner
+capacity `ok` with `74,404,679,680` available bytes. Dispatcher, health, backup, and restore-drill
+timers were all enabled and active. GitHub private-repository rulesets remain unavailable on the
+current account plan; the owner explicitly accepted that Fixture-2-only residual risk on
+2026-08-24. It does not authorize ordinary higher-value admission, merge, task-branch deletion, or
+use against a production-connected repository.
+
 ## Repository admission, effective storage, and current-schema recovery — 2026-08-24
 
 Commit `4aacd6ec85b506712b36fe57bfd10d7d902a7989` introduced the fail-closed
