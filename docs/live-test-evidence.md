@@ -3,6 +3,80 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Exact two-host reclamation apply, Control planner, and off-host bundle lifecycle — 2026-08-24
+
+Runner plan `93c8ce14c146df68d4506c6eb69254f815041e2c59df41d24b59c94f721c87ae`
+was re-inspected under the global maintenance lock with zero active Turns and zero containers. Its
+three exact old release targets still matched their tree digests and allocated-byte estimates, so
+the separately authorized apply removed only those three direct children and reclaimed
+`12,275,712` bytes. The permanent receipt is
+`/srv/codex-runner/reclamation-receipts/93c8ce14c146df68d4506c6eb69254f815041e2c59df41d24b59c94f721c87ae.json`,
+file SHA-256 `03c28ef085f08a9a3345ddb581e431db95250a91cebe345c0c44129ad778dff0`.
+Current and rollback release trees remained present, and the following automatic inventory had no
+target or threshold trigger.
+
+Commits `c2fd2a5191bcbcc4d55985b94fa384c196c84551`,
+`2f1323f70947081d0930ebde8abd927dc4ee634a`, and
+`867d5cb685d617a33b17ab77e7a46d459d0191b9` added the exact Control lifecycle. Two pre-sweep live
+acceptance checks deliberately rolled back the first two release identities. The first found that
+new planner units had incorrectly become mandatory when loading retained older DR bundles; the
+second found that the root-only confirmation writer had not explicitly trusted the fixed
+`codex-dispatcher` owner of live bundles. Both transaction receipts remain `rolled_back`, both host
+links and the Runner reference ledger returned to `4ae9ad45645a30e3dd233ac044f9fb97fc132389`,
+and no Dispatcher sweep, bundle confirmation, or deletion occurred in either attempt. The fixes
+keep the manifest's complete artifact inventory authoritative and add only an explicit fixed-UID
+read boundary; symlink, mode, hard-link, per-file digest, release, evidence, and SQLite checks remain
+unchanged.
+
+The final release archive SHA-256 was
+`3f980adc1d1a67c4f176fe2342730c8ba1eef7de78245d0dea888ad213e6388e`.
+The complete 620-test suite passed locally and under both Linux service-account validation paths.
+Release `867d5cb` committed Runner first and Control second; its receipt file SHA-256 is
+`f3abacc6657e198b3aafb11a041d96cd1c66fef39928dbbcfcef4367f8615ffd`.
+The post-release sweep was `idle` with four GitHub reads and zero writes, the protected Online
+Backup reported integrity `ok`, and the isolated restore verified migrations 1 through 20, zero
+foreign-key violations, and temporary-file removal. The immutable operational handoff receipt file
+SHA-256 is `0e5f6f58f1796699c26aa36d61f913afd5f72ff65450230b7ab8cad4fab69f01`;
+its evidence SHA-256 is `fa530cb6af0302481b93950efc8e20f980111907b9a7b3fde668a942571803a6`.
+
+All four protected Mac bundles and all eight matching Control source/reimported directories passed
+complete offline bundle validation. Four root-owned mode-`0600` off-host confirmation receipts now
+bind manifest SHA-256 values
+`816dc6176e2717aab7bbb7ececb37e5e65209bed908536cd981cb7bb440d5971`,
+`fd237c2cadffe2abb4cf58a97a34158167d8e3edd9e05218bf7befb2fb4e08c6`,
+`271c74a467d19cfa38a49ca466c51bab6bc256bcdaed0c12f9370f791cb4261d`, and
+`0fbe4fb75ded683417eac67973be691186f0741f583fc11986deebcd5c7c38f2` to their exact Mac copy
+identities. Their receipt file SHA-256 values are, respectively,
+`0403f9e6e98770d75a21b558035e581a0dc92d3f7e3d9f86335e670036ced712`,
+`f744865478e581eea0321cb47cc904368ee8fd6c3bb44e0737a0eb3c4e92a6f1`,
+`66393ae1476afd42a4bba7129ef48025bfad800ceca606d686d8e56ddbd4f75f`, and
+`3ee4b5f446c5c21608468d717aa0bbb1df64a2cbdf46b6257b887ec762bb700a`.
+No confirmation command copied or deleted a bundle, and
+`unconfirmed_bundle_count=0`.
+
+The six-hour Control timer produced non-authorizing plan
+`60c30e53a1f05ce664827838fb9b0ca730b0c8ce48ca3620b8d38343468abaab`;
+the immutable plan file SHA-256 is
+`661fa11c8abd119869ccf76a6dce2c42f575efa5beb79498f264d38395855853`.
+Its exact reinspection matched with `state_writes=0`: 51 old release trees (`198,926,336` bytes),
+13 old DR roots (`72,691,712` bytes), 28 superseded DR inputs (`204,800` bytes), and seven
+manifest-confirmed bundles (`39,903,232` bytes), totaling 99 targets and `311,726,080` bytes. It
+protects current `867d5cb`, immediate rollback `4ae9ad4`, the current release receipt, rollback DR
+root `20260824T114000Z-4ae9ad4`, its exact `113900Z` reimported source bundle, and the three matching
+rollback DR inputs. The plan contains every exact absolute path and content digest. No Control
+reclamation apply was authorized or executed.
+
+The release also produced a separate Runner plan,
+`b0b801d56ef197ae77122a0e4250b5920ad224230742e3f1884354b9c465d66c`,
+whose current reinspection matched three old release trees: `2f1323f` (`4,214,784` bytes),
+`31688e2` (`4,132,864` bytes), and `c2fd2a5` (`4,214,784` bytes). Its immutable file SHA-256 is
+`dcfaf23187240cc608972e3cbc06a1bde077448ab6d5da3245e182a159a9bdf8`.
+It has no image target and does not authorize apply. Final available space was
+`12,135,493,632` bytes on Control and `74,369,286,144` bytes on Runner. All five Control timers and
+both Runner maintenance timers were active. Lifecycle health was `ok`; its only alerts were the two
+exact non-authorizing plan identities above, delivered in the system-channel episode at
+[`1787580695.192839`](https://codex-nt54555.slack.com/archives/C0BS3LPG43G/p1787580695192839).
+
 ## Transactional release references and automatic read-only reclamation — 2026-08-24
 
 Commits `29b27b751a2116504a6670a51f9853f1802fbf7a`,
