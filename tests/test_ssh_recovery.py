@@ -375,6 +375,17 @@ class SshRecoveryTests(unittest.TestCase):
                     self.tracker.pull_requests[
                         (work_item.repository, work_item.task_branch)
                     ] = pull_request_for(work_item, PullRequestState.CLOSED)
+                pending_closure = plan_ssh_recovery(
+                    self.config,
+                    self.store,
+                    self.tracker,
+                    audit_terminal=False,
+                )
+                self.assertEqual(
+                    SshRecoveryAction.CLOSE_TERMINAL_ISSUE,
+                    pending_closure.action,
+                )
+                self.assertEqual(work_item.work_item_id, pending_closure.work_item.work_item_id)
                 complete_issue_closure(
                     self.store,
                     self.tracker,
@@ -399,6 +410,50 @@ class SshRecoveryTests(unittest.TestCase):
                 for call in self.tracker.calls
             )
         )
+
+    def test_incremental_sweep_closes_completed_issue_before_periodic_terminal_audit(self) -> None:
+        work_item = review_item()
+        self.store.create_work_item(work_item)
+        completed = self.store.update_work_item_state(
+            work_item.work_item_id,
+            WorkItemState.COMPLETED,
+            updated_at="2026-01-10T00:00:00+00:00",
+        )
+        archive_request = RunnerRequest(
+            RunnerOperation.ARCHIVE,
+            completed.work_item_id,
+            version=NEXT_PROTOCOL_VERSION,
+            expected_head_sha=completed.last_published_sha,
+        )
+        self.store.prepare_work_item_archive(
+            completed.work_item_id,
+            expected_head_sha=completed.last_published_sha,
+            eligible_at="2026-01-10T00:00:00+00:00",
+            request_sha256=sha256(
+                archive_request.to_json().encode("utf-8")
+            ).hexdigest(),
+        )
+        self.store.record_work_item_absence_reconciliation(
+            completed.work_item_id,
+            expected_head_sha=completed.last_published_sha,
+            evidence_sha256="1" * 64,
+            observed_by="operator",
+            observed_at="2026-01-10T01:00:00+00:00",
+        )
+        self.tracker.tasks["42"] = task_in(TaskState.COMPLETED)
+        self.tracker.pull_requests[(completed.repository, completed.task_branch)] = (
+            pull_request_for(completed, PullRequestState.MERGED)
+        )
+
+        plan = plan_ssh_recovery(
+            self.config,
+            self.store,
+            self.tracker,
+            audit_terminal=False,
+        )
+
+        self.assertEqual(SshRecoveryAction.CLOSE_TERMINAL_ISSUE, plan.action)
+        self.assertEqual(completed.work_item_id, plan.work_item.work_item_id)
 
     def test_completed_retention_plans_one_archive_and_reconciles_ambiguity(self) -> None:
         work_item = review_item()

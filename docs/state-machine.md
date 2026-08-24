@@ -117,6 +117,8 @@ discard: request -> optional PR close -> disposition -> Issue close -> Runner ar
 ```
 
 Every GitHub close is prepared in `terminal_github_closures` before the write and completed only
-after exact read-back. A `blocked` closure receipt is permanent and requires reviewed operator
-repair; it is never silently retried as a different target. Broad deletion or prune commands are
-outside this state machine.
+after exact read-back. A missing or unfinished terminal Issue closure receipt remains immediate
+recovery work even when Runner archive/absence evidence already exists; only completed receipts
+move into the periodic terminal re-audit cadence. A `blocked` closure receipt is permanent and
+requires reviewed operator repair; it is never silently retried as a different target. Broad
+deletion or prune commands are outside this state machine.

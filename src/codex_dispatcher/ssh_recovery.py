@@ -600,7 +600,17 @@ def _plan_work_item_disposition(
         work_item = store.get_work_item(disposition.work_item_id)
         if work_item is None:
             return _blocked("disposed_work_item_missing")
-        if not audit_terminal and _has_terminal_runner_evidence(store, work_item):
+        terminal_issue_closure = store.get_terminal_github_closure(
+            work_item.work_item_id,
+            TerminalGithubClosureKind.DISCARDED_ISSUE,
+        )
+        if (
+            not audit_terminal
+            and _has_terminal_runner_evidence(store, work_item)
+            and terminal_issue_closure is not None
+            and terminal_issue_closure.state
+            is TerminalGithubClosureState.COMPLETED
+        ):
             continue
         task = tracker.get_task(work_item.repository, str(work_item.issue_number))
         error = _binding_error(task, work_item, configured)
@@ -1128,10 +1138,17 @@ def _plan_merged_completion(
             continue
         if work_item.state not in {WorkItemState.REVIEW, WorkItemState.COMPLETED}:
             continue
+        terminal_issue_closure = store.get_terminal_github_closure(
+            work_item.work_item_id,
+            TerminalGithubClosureKind.COMPLETED_ISSUE,
+        )
         if (
             not audit_terminal
             and work_item.state is WorkItemState.COMPLETED
             and _has_terminal_runner_evidence(store, work_item)
+            and terminal_issue_closure is not None
+            and terminal_issue_closure.state
+            is TerminalGithubClosureState.COMPLETED
         ):
             continue
         task = tracker.get_task(work_item.repository, str(work_item.issue_number))
