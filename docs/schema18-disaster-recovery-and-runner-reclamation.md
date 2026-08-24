@@ -101,8 +101,10 @@ operator workstation, transfers opaque bytes, and does not display the protected
 install -d -m 0700 <off-host-bundle-parent>
 ssh s2 sudo tar -C /var/lib/codex-dispatcher/disaster-recovery-bundles \
   -cf - <UTC-bundle-id> | tar -C <off-host-bundle-parent> -xf -
-chmod -R go-rwx <off-host-bundle-parent>/<UTC-bundle-id>
 ```
+
+Keep `<off-host-bundle-parent>` mode `0700` and preserve the release tree's executable/read modes;
+do not recursively normalize artifact modes after export.
 
 For a real drill, copy the off-host bundle back into a new protected Control path and validate that
 copy. Do not reuse the on-host source bundle as evidence of independent recovery. Run the drill

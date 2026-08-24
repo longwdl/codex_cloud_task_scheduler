@@ -167,19 +167,18 @@ class DisasterRecoveryResult:
             "slack_receipt_count": self.slack_receipt_count,
             "rto_milliseconds": self.rto_milliseconds,
             "rto_scope": (
-                "latest-backup selection through isolated schema-20 restore, "
-                "Control and Runner application-filesystem rebuilds, and exact "
-                "Runner/GitHub/Slack read-back"
+                "complete independent-bundle validation through isolated schema-20 "
+                "restore, Control and Runner application-filesystem rebuilds, and "
+                "exact Runner/GitHub/Slack read-back"
             ),
             "infrastructure_provisioning_rto_measured": False,
             "online_state_modified": False,
             "recovery_commands": [
                 "sudo systemctl stop codex-dispatcher.timer codex-dispatcher-health.timer",
-                f"git clone --filter=blob:none https://github.com/longwdl/"
-                f"codex_cloud_task_scheduler.git && git -C codex_cloud_task_scheduler "
-                f"checkout --detach {self.release_commit}",
-                f"restore {self.source_backup} to a new state.db candidate with "
-                "the SQLite Online Backup API; never overwrite the online database in place",
+                f"verify the independent bundle manifest and install its exact release tree "
+                f"as commit {self.release_commit}",
+                f"copy validated bundled database {self.source_backup} to a new state.db "
+                "candidate; never overwrite the online database in place",
                 "install the exact release on Runner first and Control second",
                 "run the schema18 disaster-recovery reconciliation before enabling writes",
                 "run codex-dispatcher ssh-preflight --config "
@@ -189,7 +188,7 @@ class DisasterRecoveryResult:
                 "never replace the online Control database during the drill",
                 "never switch either live current symlink during the drill",
                 "never start, resume, stop, or archive a Runner Turn during reconciliation",
-                "on failure retain the source backup and remove only this exact recovery_root",
+                "on failure retain the source bundle and remove only this exact recovery_root",
             ],
         }
 
