@@ -355,7 +355,11 @@ def _validate_health_alert_boundary(
 def _systemd_state(
     run: CommandRunner, unit: str, *, remote: bool = False
 ) -> dict[str, str]:
-    fields = ("Id", "ActiveState", "UnitFileState", "Result", "ExecMainStatus")
+    fields = (
+        ("Id", "ActiveState", "UnitFileState")
+        if unit.endswith(".timer")
+        else ("Id", "ActiveState", "UnitFileState", "Result", "ExecMainStatus")
+    )
     command = ["/usr/bin/systemctl", "show", unit]
     for field in fields:
         command.extend(("-p", field))

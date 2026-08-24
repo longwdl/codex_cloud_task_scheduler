@@ -100,14 +100,22 @@ class _Commands:
             is_timer = unit.endswith(".timer")
             active = "active" if not is_timer or self.timer_active else "inactive"
             enabled = "enabled" if is_timer else "static"
+            values = {
+                "Id": unit,
+                "ActiveState": active,
+                "UnitFileState": enabled,
+                "Result": "success",
+                "ExecMainStatus": "0",
+            }
+            requested = {
+                command[index + 1]
+                for index, value in enumerate(command[:-1])
+                if value == "-p"
+            }
             return "\n".join(
-                (
-                    f"Id={unit}",
-                    f"ActiveState={active}",
-                    f"UnitFileState={enabled}",
-                    "Result=success",
-                    "ExecMainStatus=0",
-                )
+                f"{field}={value}"
+                for field, value in values.items()
+                if field in requested
             ) + "\n"
         if command[0] == "/usr/bin/journalctl":
             unit = command[command.index("-u") + 1]
