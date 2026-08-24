@@ -458,12 +458,25 @@ def create_disaster_recovery_bundle(
         raise
 
 
-def load_disaster_recovery_bundle(root: Path) -> DisasterRecoveryBundle:
+def load_disaster_recovery_bundle(
+    root: Path, *, trusted_owner_uid: int | None = None
+) -> DisasterRecoveryBundle:
     """Validate every bundle byte without consulting either original Linux host."""
-    _protected_directory(root, "disaster recovery bundle")
+    if trusted_owner_uid is not None and (
+        type(trusted_owner_uid) is not int or trusted_owner_uid < 0
+    ):
+        raise ValueError("trusted_owner_uid must be a non-negative integer or None")
+    _protected_directory(
+        root,
+        "disaster recovery bundle",
+        trusted_owner_uid=trusted_owner_uid,
+    )
     manifest_path = root / "manifest.json"
     manifest = _read_json_file(
-        manifest_path, "disaster recovery bundle manifest", maximum=2 * 1024 * 1024
+        manifest_path,
+        "disaster recovery bundle manifest",
+        maximum=2 * 1024 * 1024,
+        trusted_owner_uid=trusted_owner_uid,
     )
     evidence = manifest.get("evidence_sha256")
     body = dict(manifest)
@@ -507,7 +520,12 @@ def load_disaster_recovery_bundle(root: Path) -> DisasterRecoveryBundle:
         if (
             path.is_symlink()
             or not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid not in {0, os.geteuid()}
+            or metadata.st_uid
+            not in {
+                0,
+                os.geteuid(),
+                *(set() if trusted_owner_uid is None else {trusted_owner_uid}),
+            }
             or metadata.st_mode & 0o022
             or metadata.st_nlink != 1
             or metadata.st_size != size
@@ -565,7 +583,9 @@ def load_disaster_recovery_bundle(root: Path) -> DisasterRecoveryBundle:
     ):
         if required.relative_to(root).as_posix() not in expected_paths:
             raise DisasterRecoveryError("disaster recovery bundle is incomplete")
-    _validate_release_tree(bundle.control_release)
+    _validate_release_tree(
+        bundle.control_release, trusted_owner_uid=trusted_owner_uid
+    )
     with tempfile.TemporaryDirectory() as raw:
         validation_copy = Path(raw) / "state.db"
         shutil.copy2(bundle.source_backup, validation_copy, follow_symlinks=False)
@@ -1341,8 +1361,12 @@ def _validate_runner_snapshot(snapshot: dict[str, object]) -> str:
     return commit
 
 
-def _validate_release_tree(path: Path) -> None:
-    _protected_directory(path, "Control release")
+def _validate_release_tree(
+    path: Path, *, trusted_owner_uid: int | None = None
+) -> None:
+    _protected_directory(
+        path, "Control release", trusted_owner_uid=trusted_owner_uid
+    )
     root_device = path.stat(follow_symlinks=False).st_dev
     for candidate in sorted(path.rglob("*")):
         try:
@@ -1352,7 +1376,12 @@ def _validate_release_tree(path: Path) -> None:
         if (
             candidate.is_symlink()
             or metadata.st_dev != root_device
-            or metadata.st_uid not in {0, os.geteuid()}
+            or metadata.st_uid
+            not in {
+                0,
+                os.geteuid(),
+                *(set() if trusted_owner_uid is None else {trusted_owner_uid}),
+            }
             or metadata.st_mode & 0o022
             or not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode))
         ):

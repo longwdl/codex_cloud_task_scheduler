@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from codex_dispatcher.control_host_backup import create_state_backup
 from codex_dispatcher.disaster_recovery import (
@@ -13,6 +15,7 @@ from codex_dispatcher.disaster_recovery import (
     collect_runner_recovery_snapshot,
     create_disaster_recovery_bundle,
     DisasterRecoveryError,
+    load_disaster_recovery_bundle,
     run_schema18_disaster_recovery_drill,
 )
 from codex_dispatcher.runner_protocol import RunnerOperation, RunnerRequest
@@ -530,6 +533,14 @@ class DisasterRecoveryTests(unittest.TestCase):
             verifier = _SlackVerifier()
             recovery = root / "recovery"
             bundle = self._bundle(root, fixture)
+            with patch(
+                "codex_dispatcher.disaster_recovery.os.geteuid",
+                return_value=os.getuid() + 1,
+            ):
+                trusted = load_disaster_recovery_bundle(
+                    bundle.root, trusted_owner_uid=os.getuid()
+                )
+            self.assertEqual(bundle.manifest_sha256, trusted.manifest_sha256)
 
             result = run_schema18_disaster_recovery_drill(
                 bundle=bundle,

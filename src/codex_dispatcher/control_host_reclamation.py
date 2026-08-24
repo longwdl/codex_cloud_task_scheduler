@@ -10,6 +10,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import shutil
 import stat
@@ -442,6 +443,7 @@ def confirm_offhost_bundle(
     bundle_root: Path,
     confirmation_root: Path,
     now: datetime | None = None,
+    trusted_bundle_owner_uid: int | None = None,
     trusted_confirmation_owner_uid: int = 0,
 ) -> dict[str, object]:
     """Record an operator-confirmed, hash-equal copy outside both Linux hosts."""
@@ -462,7 +464,9 @@ def confirm_offhost_bundle(
         raise ControlHostReclamationError("off-host manifest differs from Control bundle")
     from codex_dispatcher.disaster_recovery import load_disaster_recovery_bundle
 
-    loaded = load_disaster_recovery_bundle(bundle)
+    loaded = load_disaster_recovery_bundle(
+        bundle, trusted_owner_uid=trusted_bundle_owner_uid
+    )
     if loaded.manifest_sha256 != manifest_sha256:
         raise ControlHostReclamationError("confirmed bundle failed integral validation")
     _protected_directory(
@@ -956,12 +960,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     try:
         if args.command == "bundle-confirm":
+            bundle_owner_uid = pwd.getpwnam("codex-dispatcher").pw_uid
             payload = confirm_offhost_bundle(
                 bundle_id=args.bundle_id,
                 manifest_sha256=args.manifest_sha256,
                 off_host_copy_id=args.off_host_copy_id,
                 bundle_root=DR_BUNDLES,
                 confirmation_root=BUNDLE_CONFIRMATION_DIRECTORY,
+                trusted_bundle_owner_uid=bundle_owner_uid,
             )
         else:
             observed = _live_plan()

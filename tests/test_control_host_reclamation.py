@@ -307,7 +307,7 @@ class ControlHostReclamationTests(unittest.TestCase):
             with patch(
                 "codex_dispatcher.disaster_recovery.load_disaster_recovery_bundle",
                 return_value=loaded,
-            ):
+            ) as load_bundle:
                 first = confirm_offhost_bundle(
                     bundle_id="bundle-1",
                     manifest_sha256=digest,
@@ -315,6 +315,7 @@ class ControlHostReclamationTests(unittest.TestCase):
                     bundle_root=bundles,
                     confirmation_root=confirmations,
                     now=datetime(2026, 8, 24, tzinfo=timezone.utc),
+                    trusted_bundle_owner_uid=1234,
                     trusted_confirmation_owner_uid=os.geteuid(),
                 )
                 second = confirm_offhost_bundle(
@@ -324,6 +325,7 @@ class ControlHostReclamationTests(unittest.TestCase):
                     bundle_root=bundles,
                     confirmation_root=confirmations,
                     now=datetime(2026, 8, 25, tzinfo=timezone.utc),
+                    trusted_bundle_owner_uid=1234,
                     trusted_confirmation_owner_uid=os.geteuid(),
                 )
 
@@ -333,6 +335,10 @@ class ControlHostReclamationTests(unittest.TestCase):
             path = Path(str(first["receipt_path"]))
             self.assertEqual(os.geteuid(), path.stat().st_uid)
             self.assertEqual(0o600, path.stat().st_mode & 0o777)
+            self.assertEqual(
+                1234,
+                load_bundle.call_args_list[0].kwargs["trusted_owner_uid"],
+            )
 
 
 if __name__ == "__main__":
