@@ -13,6 +13,7 @@ from codex_dispatcher.runner_asset_reclamation import (
     RunnerAssetReclamationError,
     RunnerAssetSnapshot,
     _collect_active_work_item_images,
+    _read_protected_json,
     apply_runner_asset_reclamation,
     collect_runner_asset_snapshot,
     delete_exact_release,
@@ -48,6 +49,66 @@ def image(reference: str, image_id: str, *, unique: int = 100) -> DockerImageAss
 
 
 class RunnerAssetReclamationTests(unittest.TestCase):
+    def _collect_from_mocked_child(
+        self, payload: bytes
+    ) -> tuple[set[str], tuple[str, ...]]:
+        registry = {
+            WORK_ITEM: {
+                "repository": "owner/repository",
+                "issue_number": 1,
+            }
+        }
+        with (
+            patch(
+                "codex_dispatcher.runner_asset_reclamation._process_uids",
+                return_value=(0, 0, 0),
+            ),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation._process_gids",
+                return_value=(0, 0, 0),
+            ),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation._process_supplementary_gids",
+                return_value=(),
+            ),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation.os.setresuid",
+                create=True,
+            ),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation.os.setresgid",
+                create=True,
+            ),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation.os.setgroups",
+                create=True,
+            ),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation.os.pipe",
+                return_value=(10, 11),
+            ),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation.os.fork",
+                return_value=1234,
+            ),
+            patch("codex_dispatcher.runner_asset_reclamation.os.close"),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation.os.read",
+                side_effect=(payload, b""),
+            ),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation.os.waitpid",
+                return_value=(1234, 0),
+            ),
+        ):
+            return _collect_active_work_item_images(
+                registry=registry,
+                archived_work_item_ids=frozenset(),
+                work_items_root=Path("/runner/work-items"),
+                work_items_owner_uid=1002,
+                work_items_owner_gid=1002,
+            )
+
     def test_work_item_inventory_requires_root_or_full_owner_credentials(self) -> None:
         registry = {
             WORK_ITEM: {
@@ -123,6 +184,105 @@ class RunnerAssetReclamationTests(unittest.TestCase):
                     work_items_root=Path("/runner/work-items"),
                     work_items_owner_uid=1002,
                     work_items_owner_gid=1002,
+                )
+
+    def test_owner_inventory_rejects_foreign_supplementary_group(self) -> None:
+        registry = {
+            WORK_ITEM: {
+                "repository": "owner/repository",
+                "issue_number": 1,
+            }
+        }
+        with (
+            patch(
+                "codex_dispatcher.runner_asset_reclamation._process_uids",
+                return_value=(1002, 1002, 1002),
+            ),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation._process_gids",
+                return_value=(1002, 1002, 1002),
+            ),
+            patch(
+                "codex_dispatcher.runner_asset_reclamation._process_supplementary_gids",
+                return_value=(27, 1002),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RunnerAssetReclamationError,
+                "foreign supplementary groups",
+            ):
+                _collect_active_work_item_images(
+                    registry=registry,
+                    archived_work_item_ids=frozenset(),
+                    work_items_root=Path("/runner/work-items"),
+                    work_items_owner_uid=1002,
+                    work_items_owner_gid=1002,
+                )
+
+    def test_inventory_pipe_rejects_oversized_or_extended_payload(self) -> None:
+        with self.assertRaisesRegex(
+            RunnerAssetReclamationError,
+            "exceeds its size boundary",
+        ):
+            self._collect_from_mocked_child(b"x" * (1024 * 1024 + 1))
+
+        payload = json.dumps(
+            {
+                "schema_version": 1,
+                "images": [WORK_ITEM_IMAGE],
+                "blocked_work_item_ids": [],
+                "unexpected": True,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        with self.assertRaisesRegex(
+            RunnerAssetReclamationError,
+            "inventory child is invalid",
+        ):
+            self._collect_from_mocked_child(payload)
+
+    def test_protected_json_uses_bounded_non_symlink_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            valid = root / "valid.json"
+            valid.write_text('{"ok":true}', encoding="utf-8")
+            owner_uid = valid.stat().st_uid
+
+            self.assertEqual(
+                {"ok": True},
+                _read_protected_json(
+                    valid,
+                    "fixture",
+                    maximum=4096,
+                    trusted_owner_uid=owner_uid,
+                ),
+            )
+
+            link = root / "link.json"
+            link.symlink_to(valid)
+            with self.assertRaisesRegex(
+                RunnerAssetReclamationError,
+                "unavailable|protected boundary",
+            ):
+                _read_protected_json(
+                    link,
+                    "fixture",
+                    maximum=4096,
+                    trusted_owner_uid=owner_uid,
+                )
+
+            oversized = root / "oversized.json"
+            oversized.write_bytes(b"x" * 4097)
+            with self.assertRaisesRegex(
+                RunnerAssetReclamationError,
+                "protected boundary",
+            ):
+                _read_protected_json(
+                    oversized,
+                    "fixture",
+                    maximum=4096,
+                    trusted_owner_uid=owner_uid,
                 )
 
     def _releases(self, root: Path) -> tuple:

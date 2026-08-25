@@ -3,6 +3,59 @@
 > The Codex Cloud-oriented sections are retained as historical evidence only. `exec:cloud` and the
 > Cloud Environment are not part of the current SSH CLI target architecture.
 
+## Authorized exact reclamation and supplementary-group hardening — 2026-08-24
+
+The owner authorized execution of the two latest exact plans after both hosts reported release
+`dfdef2ca333b8a49aebe865565e6506c2a7686c9`, immediate rollback
+`e26539b16d02dd0321505e2573498cd86dc5cd60`, zero active Turns, zero containers, SQLite integrity
+`ok`, and zero foreign-key violations. Both read-only rechecks returned
+`reinspection_matches=true` and `state_writes=0` immediately before apply.
+
+Runner plan `f489bedfbb87f4dbb60f2cd7ee973d6cd2854599a2e3a4363740f09ba80e80e8`
+deleted only old release trees `4ae9ad4`, `867d5cb`, and `9e58e4f`. Its permanent `reclaimed`
+receipt is
+`/srv/codex-runner/reclamation-receipts/f489bedfbb87f4dbb60f2cd7ee973d6cd2854599a2e3a4363740f09ba80e80e8.json`,
+file SHA-256 `562430f395daf9f36f154afada981b3645d283545662553fbc79c314c28e41fb`,
+and records `12,681,216` reclaimed bytes and zero image deletions.
+
+Control plan `ce0a21f21b8cb5835f6f2db0df3da405c8c36fcca72053315be07e4ea8488175`
+deleted the same three old Control release trees, old `4ae9ad4` recovery root, its three DR inputs,
+and its independently confirmed old reimported bundle. Its permanent `reclaimed` receipt is
+`/var/lib/codex-dispatcher/control-reclamation-receipts/ce0a21f21b8cb5835f6f2db0df3da405c8c36fcca72053315be07e4ea8488175.json`,
+file SHA-256 `b16e348055a67f1c35d85797a041dabebaf7dfcb45e1c36ec2e9c968e7a0309d`,
+and records `30,367,744` reclaimed bytes. Every target was absent afterward; current and rollback
+release trees and the complete current DR chain remained present on both hosts.
+
+The retained Mac off-host copy of the current bundle then independently passed complete artifact,
+release-tree, and schema-21 database validation with manifest SHA-256
+`e11757bd1f8289beebcc8e1cdef21fbcfc826af44046733f13b4b620fd50a8d9`. The root-owned mode-`0600`
+confirmation receipt has file SHA-256
+`079d283213667812235b1144979dd86b9bcb39ee29a205795f18cebd3df923e0`. Once this permanent fact
+made the redundant original Control source bundle eligible, exact plan
+`270fa5203ec92071737aa447c488f77a6da4e8c0fd373d2cae3790b82c444183`
+rechecked without writes and reclaimed only that `6,483,968`-byte source copy. Its receipt file
+SHA-256 is `9494f81c5aceac7faffd89b5399c6cf0d59b0d9f3ad14fe2916e2067ca66e2bc`.
+The protected reimported bundle, Mac copy, current recovery root, inputs, release, and rollback
+release remain available.
+
+The final Control planner status contains two releases, one recovery root, zero target, zero
+unconfirmed bundle, zero expected bytes, and no trigger or plan identity. Runner contains two
+releases and zero release/image target. Its `65,757,605,888` available bytes remain below the fixed
+64-GiB alert boundary solely while completed Fixture WorkItem
+`wi_c793ec7c6b2f1cae535619c3` retains its exact 8-GiB image. The reviewed seven-day retention makes
+that WorkItem first eligible at `2026-08-31T18:18:00.193126Z`; no archive intent was written early.
+Health therefore reports one accurate Runner plan-ready alert while Turn and provisioning capacity
+remain admissible. The alert update was delivered only to system channel `C0BS3LPG43G` at
+[`1787615700.163719`](https://codex-nt54555.slack.com/archives/C0BS3LPG43G/p1787615700163719).
+
+The follow-up security review found that real/effective/saved GID dropping did not itself clear
+supplementary groups. The hardened collector now clears and verifies that list before dropping the
+three GID/UID credentials, rejects an already-unprivileged owner with a foreign supplementary
+group, requires a strict success-pipe field set, and opens protected JSON with `O_NOFOLLOW` and one
+bounded, metadata-stable descriptor. The planner unit explicitly resets `SupplementaryGroups` and
+does not add a capability. Focused group, oversized-pipe, extended-JSON, symlink, and oversized-file
+attacks passed together with the complete 636-test local suite and compilation.
+
 ## Schema-21 terminal closure, concurrent discard, and current-schema recovery — 2026-08-24
 
 Release-line commit `49e3be78258eb5699bbcfd54c7b3898f26e6fc81` introduced schema 21 and the

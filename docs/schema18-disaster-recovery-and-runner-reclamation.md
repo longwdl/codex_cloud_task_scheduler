@@ -221,9 +221,13 @@ The planner unit retains `CAP_SETUID` and `CAP_SETGID` in its bounding set, with
 capabilities, solely so
 the root-owned collector can fork a one-shot inventory child and irreversibly set that child's
 real, effective, and saved UID/GID to the trusted WorkItem owner before reading owner-only FUSE
-session bindings. The trusted UID/GID must match both the WorkItem root and active-lock owner. The
-root parent revalidates the child's bounded digest/blocked-ID result before inspecting releases or
-writing a plan; do not replace this boundary with `allow_other` or a broader FUSE mount policy.
+session bindings. Before that transition it clears and verifies the complete supplementary-group
+list; an already-unprivileged owner process is rejected if it retains any foreign supplementary
+group. The trusted UID/GID must match both the WorkItem root and active-lock owner. Protected JSON
+is opened with `O_NOFOLLOW`, read through one bounded descriptor, and rejected if its inode or
+metadata changes during the read. The root parent revalidates the child's strict, bounded
+digest/blocked-ID result before inspecting releases or writing a plan; do not replace this boundary
+with `allow_other` or a broader FUSE mount policy.
 On the deployed systemd version, `PrivateDevices`, `RestrictAddressFamilies`,
 `RestrictNamespaces`, `RestrictSUIDSGID`, and the other seccomp-generating directives shown absent
 in the checked-in unit also block the irreversible credential drop. This unit therefore replaces

@@ -601,12 +601,20 @@ def _collect_active_work_item_images(
         return set(), ()
     user_credentials = _process_uids()
     group_credentials = _process_gids()
+    supplementary_group_credentials = _process_supplementary_gids()
     owner_user_credentials = (work_items_owner_uid,) * 3
     owner_group_credentials = (work_items_owner_gid,) * 3
     if (
         user_credentials == owner_user_credentials
         and group_credentials == owner_group_credentials
     ):
+        if any(
+            group_id != work_items_owner_gid
+            for group_id in supplementary_group_credentials
+        ):
+            raise RunnerAssetReclamationError(
+                "Runner WorkItem owner has foreign supplementary groups"
+            )
         return _inspect_active_work_item_images(
             registry=registry,
             active_work_item_ids=active_ids,
@@ -619,7 +627,12 @@ def _collect_active_work_item_images(
         )
     set_resuid = getattr(os, "setresuid", None)
     set_resgid = getattr(os, "setresgid", None)
-    if not callable(set_resuid) or not callable(set_resgid):
+    set_groups = getattr(os, "setgroups", None)
+    if (
+        not callable(set_resuid)
+        or not callable(set_resgid)
+        or not callable(set_groups)
+    ):
         raise RunnerAssetReclamationError(
             "Runner WorkItem child requires Linux credential isolation"
         )
@@ -634,8 +647,14 @@ def _collect_active_work_item_images(
     if child_pid == 0:
         os.close(read_descriptor)
         exit_code = 1
-        failure_stage = "credential_group_drop"
+        failure_stage = "credential_supplementary_group_drop"
         try:
+            set_groups([])
+            if _process_supplementary_gids():
+                raise RunnerAssetReclamationError(
+                    "Runner WorkItem child retained supplementary groups"
+                )
+            failure_stage = "credential_group_drop"
             if _process_gids() != owner_group_credentials:
                 set_resgid(*owner_group_credentials)
                 if _process_gids() != owner_group_credentials:
@@ -717,6 +736,7 @@ def _collect_active_work_item_images(
     if child_failed:
         error_code = payload.get("error_code") if isinstance(payload, dict) else None
         allowed_error_codes = {
+            "credential_supplementary_group_drop_failed",
             "credential_group_drop_failed",
             "credential_user_drop_failed",
             "inventory_inspection_failed",
@@ -728,7 +748,15 @@ def _collect_active_work_item_images(
         raise RunnerAssetReclamationError(
             f"Runner WorkItem inventory child failed: {error_code}"
         )
-    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {
+            "schema_version",
+            "images",
+            "blocked_work_item_ids",
+        }
+        or payload.get("schema_version") != 1
+    ):
         raise RunnerAssetReclamationError("Runner WorkItem inventory child is invalid")
     images = payload.get("images")
     blocked_ids = payload.get("blocked_work_item_ids")
@@ -830,6 +858,10 @@ def _process_gids() -> tuple[int, int, int]:
     real_gid = os.getgid()
     effective_gid = os.getegid()
     return real_gid, effective_gid, effective_gid
+
+
+def _process_supplementary_gids() -> tuple[int, ...]:
+    return tuple(sorted(os.getgroups()))
 
 
 def inspect_release_assets(releases_root: Path) -> tuple[ReleaseAsset, ...]:
@@ -1051,14 +1083,38 @@ def _read_protected_json(
     maximum: int,
     trusted_owner_uid: int | None = None,
 ) -> dict[str, object]:
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if not isinstance(no_follow, int):
+        raise RunnerAssetReclamationError(f"{field} exceeds its protected boundary")
+    descriptor: int | None = None
     try:
-        metadata = path.stat(follow_symlinks=False)
-        raw = path.read_bytes()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | no_follow | getattr(os, "O_CLOEXEC", 0),
+        )
+        metadata = os.fstat(descriptor)
+        if not 0 < metadata.st_size <= maximum:
+            raise RunnerAssetReclamationError(
+                f"{field} exceeds its protected boundary"
+            )
+        raw = bytearray()
+        while chunk := os.read(
+            descriptor,
+            min(65536, maximum + 1 - len(raw)),
+        ):
+            raw.extend(chunk)
+            if len(raw) > maximum:
+                raise RunnerAssetReclamationError(
+                    f"{field} exceeds its protected boundary"
+                )
+        observed = os.fstat(descriptor)
     except OSError as exc:
         raise RunnerAssetReclamationError(f"{field} is unavailable") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
     if (
         not stat.S_ISREG(metadata.st_mode)
-        or path.is_symlink()
         or metadata.st_uid
         not in (
             {0, os.geteuid()}
@@ -1067,7 +1123,21 @@ def _read_protected_json(
         )
         or metadata.st_mode & 0o022
         or metadata.st_nlink != 1
-        or not 0 < len(raw) <= maximum
+        or (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+        != (
+            observed.st_dev,
+            observed.st_ino,
+            observed.st_size,
+            observed.st_mtime_ns,
+            observed.st_ctime_ns,
+        )
+        or len(raw) != observed.st_size
         or b"\x00" in raw
     ):
         raise RunnerAssetReclamationError(f"{field} exceeds its protected boundary")

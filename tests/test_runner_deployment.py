@@ -136,6 +136,7 @@ class RunnerDeploymentTests(unittest.TestCase):
 
         self.assertIn("User=root", service)
         self.assertIn("Group=codex-runner", service)
+        self.assertIn("SupplementaryGroups=\n", service)
         self.assertIn("reclamation-auto-plan", service)
         self.assertIn("PrivateNetwork=yes", service)
         self.assertIn("DevicePolicy=closed", service)

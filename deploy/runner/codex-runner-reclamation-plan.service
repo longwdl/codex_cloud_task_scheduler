@@ -10,6 +10,7 @@ ConditionPathIsDirectory=/srv/codex-runner/reclamation-status
 Type=oneshot
 User=root
 Group=codex-runner
+SupplementaryGroups=
 UMask=0027
 WorkingDirectory=/srv/codex-runner
 ExecStart=/srv/codex-runner/bin/codex-runner-maintenance-v1 reclamation-auto-plan
