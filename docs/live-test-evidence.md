@@ -2906,3 +2906,69 @@ integrity `ok`, zero foreign-key violations, zero active Turns, zero alerts, and
 capacity. It sent one
 [threaded system-channel recovery](https://codex-nt54555.slack.com/archives/C0BS3LPG43G/p1787582028768009?thread_ts=1787580695.192839&cid=C0BS3LPG43G);
 the next health projection was `healthy` and produced no duplicate Slack write.
+
+## Development-host migration and live Fixture lifecycle — 2026-09-15 (Asia/Hong_Kong)
+
+Control `s2` and Runner `codex-runner` remained on release
+`0ea55a9eb9c6a4bff5ac171f7d8b637a0753ccc4`. No runtime release, model-policy change, merge, or
+production operation was performed. The Fixture base branch remained exactly
+`de0af45094026d8cab699ff376fc25c5d1474884` throughout the test.
+
+The migrated macOS development environment now uses an ignored project `.venv` with Homebrew
+Python 3.12.14 and a mode-`0700` project temporary directory whose group matches the process's
+effective group. Activating/deactivating the environment selects/restores the interpreter and
+TMPDIR; global shell Python/TMPDIR settings were restored unchanged. All 636 tests and compilation
+passed inside the project environment. The same 636 tests and compilation also passed on the
+Control Host from a short service-owned copy under `umask 077`. The four copied August 24 recovery
+bundles passed artifact hash, SQLite integrity, and foreign-key checks. They contain schema 20;
+the current schema-21 bundle loader rejects them as current-state recovery inputs, so these are
+retained historical recovery artifacts rather than a new current-release recovery drill.
+
+The first new [Issue #50](https://github.com/longwdl/codex-dispatcher-fixture/issues/50), node
+`I_kwDOT3NfX88AAAABRPL8aQ`, mapped to WorkItem `wi_8bfdd88492b72385257f2abf` and branch
+`codex/issue-50-8bfdd88492b7`. Its first Turn
+`turn_6d37c3f4cf1b41b7bc3d408c116c4383` failed closed as `codex_turn_failed`: the actual provider
+request rejected the old login as unauthorized/revoked despite local login-status readiness.
+No task branch or PR was published. The operator securely replaced the protected Runner auth seed
+from the same account's local login cache, retaining the old protected file and never exposing
+credential contents. A ready-label recovery was rejected because the WorkItem had no live
+generation; no internal ledger or immutable session binding was rewritten. Its residual
+`agent:dispatching` label had to be removed so `agent:discard` was the sole state label. Control
+then recorded the discard, closed the Issue as `not_planned`, and archived its exact base-HEAD
+Runner storage. The permanent archive response SHA-256 is
+`b67b9a4d36f42e27c6e96d2271f01817cacf686d7a2199adf8309bfbe1ca6d9b`.
+
+The post-authentication [Issue #51](https://github.com/longwdl/codex-dispatcher-fixture/issues/51),
+node `I_kwDOT3NfX88AAAABRPUexg`, mapped to exactly one WorkItem
+`wi_6b6e084db4b3966fc6a705d7`, branch `codex/issue-51-6b6e084db4b3`, and Runner directory
+`/srv/codex-runner/work-items/longwdl__codex-dispatcher-fixture/issue-51`. The only change replaced
+the README Fixture value with `host-migration-smoke-20260915-v1`; independent read-back verified
+one added/deleted value line, unique unchanged markers, and no other file change.
+
+Implementation Turn `turn_c3fb4d8c1b42423b8e8c2e85c3d5eb72` published exactly one
+[Draft PR #52](https://github.com/longwdl/codex-dispatcher-fixture/pull/52) at HEAD
+`ccbd130785acea37e930932078fa813cd29bb3f3`. The exact-head
+[Actions run 34868752528](https://github.com/longwdl/codex-dispatcher-fixture/actions/runs/34868752528)
+and its required `fixture` job succeeded. Control retired implementation generation 1 and created
+fresh Audit generation 2 with Turn `turn_203c2501c7a34682aa4d73dc9bea21fc`. Both Turns completed;
+the final gate passed AC-1 through AC-4 and the WorkItem entered `review`. Audit gate evidence
+SHA-256 is `8e2dff613d171224ad6799ad304700dc2f3c1d18fe54c8c8b69f63a9052a8a2a`.
+Both trusted delegation receipts identify `gpt-5.6-sol`, `xhigh`, and zero direct children for this
+one-line task; no delegated-agent execution is claimed.
+
+One [Issue-channel root](https://codex-nt54555.slack.com/archives/C0BR2D0MS8Y/p1789403167087769)
+and one [threaded result](https://codex-nt54555.slack.com/archives/C0BR2D0MS8Y/p1789403459806879?thread_ts=1789403167.087769&cid=C0BR2D0MS8Y)
+were durably delivered. After review, the operator applied only `agent:discard`. Control closed the
+exact PR without merging, recorded the disposition, closed Issue #51 as `not_planned`, and archived
+its exact HEAD. Both closure receipts are `completed`/`closed`. Archive response SHA-256 is
+`90da72453df4613c09c03f65fbd3f1dbd3b26293ce2775f4e4d8a5e54e903a3c`; each of #50 and #51 reclaimed
+its own 8,589,934,592-byte WorkItem image. No broad cleanup or task-branch deletion was requested.
+
+Post-archive sweeps 15070 and 15071 were both `idle`/`success`, each with four GitHub reads, zero
+writes, and zero failures. GitHub read-back showed no open Fixture Issues or PRs and unchanged main.
+Final health at `2026-09-14T16:35:30.701286Z` reported `ok=true`, integrity `ok`, zero foreign-key
+violations, zero active Turns, zero blocked WorkItems or pending archives, zero alerts, all five
+Control timers enabled/active, and admissible Runner capacity with 74,223,333,376 bytes available. Its Slack action
+was `healthy`, with no new health notification.
+The final read-only `ssh-preflight` passed its pinned Git/gh/SSH checks and returned `idle`,
+`authorizes_apply=false`, and `external_writes=false`.
