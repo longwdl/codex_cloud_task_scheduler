@@ -8,6 +8,33 @@ The repository has one runtime path: GitHub -> Control Host -> SSH protocol v2 -
 Python 3.12+ and the standard library are the dependency baseline. Adding a dependency, service,
 network call, telemetry path, migration, or external write requires an explicit design and approval.
 
+## Local Python environment
+
+Use a project virtual environment instead of changing the system Python or global shell PATH:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python3 --version
+```
+
+On macOS, the default temporary directory can inherit a group different from the process's
+effective group. Runner tests intentionally reject that ownership mismatch. Use a protected
+project-local temporary directory for the test invocation; do not weaken the ownership checks:
+
+```bash
+mkdir -p .venv/tmp
+chmod 700 .venv/tmp
+chgrp "$(id -g)" .venv/tmp
+TMPDIR="$PWD/.venv/tmp" PYTHONPATH=src python3 -m unittest discover -s tests -v
+PYTHONPATH=src python3 -m compileall -q src tests
+deactivate
+```
+
+The virtual environment is ignored by Git. On a Linux service account, run deployment checks from
+a short service-owned copy under `umask 077`, as required by the release procedure, rather than
+from the protected live release directory.
+
 ## Code map
 
 - `config.py`: strict secret-free Control configuration.
