@@ -2972,3 +2972,62 @@ Control timers enabled/active, and admissible Runner capacity with 74,223,333,37
 was `healthy`, with no new health notification.
 The final read-only `ssh-preflight` passed its pinned Git/gh/SSH checks and returned `idle`,
 `authorizes_apply=false`, and `external_writes=false`.
+
+## Schema-21 off-host recovery after workstation migration — 2026-09-19
+
+Both live hosts remained on `0ea55a9eb9c6a4bff5ac171f7d8b637a0753ccc4`. Initial health was
+`ok=true`, with no active Turn, blocked WorkItem, pending archive, or alert. A fresh successful
+protected backup preceded the new Runner snapshot. All 27 online WorkItems were terminal, and
+there was no unfinished WorkItem Slack outbox row. No live database replacement, release switch,
+Runner execution, Fixture write, model-policy change, or asset deletion was part of this drill.
+
+Bundle `20260919T113800Z-0ea55a9` was created from the current release/handoff receipts, protected
+Control configuration, schema-v3 Runner snapshot, fresh schema-21 state backup, retained schema-21
+provenance database for five Runner-only terminal canaries, and the permanent system-Slack canary
+receipt. Manifest SHA-256 is
+`aaf28bec666a14761435840a4cacee3c4b60133cfcfa18c3216a85528d696c27`; source database SHA-256 is
+`f32ff6dd3cd24740bfbc2482f8408f58a6741481a478918aa51152fa1afeab4e`.
+
+The opaque bundle was exported to the protected workstation directory
+`/Users/wdl/.codex/disaster-recovery-bundles/20260919T113800Z-0ea55a9`. Complete manifest/artifact
+and release-tree validation passed, as did SQLite integrity, foreign keys, and migrations 1–21.
+The four historical schema-20 workstation bundles were retained unchanged.
+
+An additional direct read-only SQLite inspection created a zero-byte `state.db-wal` and a
+32,768-byte `state.db-shm` beside the workstation database. The first reimport correctly failed
+strict bundle validation for unknown artifacts before an isolated restore began. The source DB
+still matched its manifest, no process held the inspected files open, and only those generated
+sidecars were removed locally. The failed reimport was preserved outside the canonical inventory
+at `/var/lib/codex-dispatcher/disaster-recovery-import-failures/20260919T113800Z-0ea55a9-reimported`.
+The manifest validation was not relaxed. The runbook now requires temporary database copies for
+additional SQL inspection.
+
+The independently revalidated workstation copy was then imported into distinct protected path
+`/var/lib/codex-dispatcher/disaster-recovery-bundles/20260919T113800Z-0ea55a9-reimported-2`.
+The successful isolated drill receipt is
+`/var/lib/codex-dispatcher/disaster-recovery-drills/20260919T113800Z-0ea55a9-retry1/receipt.json`,
+with file SHA-256 `1710de53707eff87fa2b821e29f049fc77c2a530c752764882fda93795913051`.
+It reports `status=passed`, migrations 1–21, `online_state_modified=false`, and application RTO
+`143194` milliseconds. The measured backup age was 750 seconds. Reconciliation covered 27 online
+WorkItems, 27 GitHub Issues, 22 PRs, 25 Runner archives, two absence receipts, five database-proven
+Runner-only terminal histories, 46 WorkItem Slack receipts, and 76 system Slack receipts.
+
+The reconstructed Control and Runner manifest SHA-256 values are respectively
+`d717011ab36c4a6aa2732b9068585720206fc87a303c9b369572743c847c6806` and
+`6400b5f259ade2e31a3fec95ba3da11fa08d152102856347bce4c0459aefc626`. Infrastructure/VM provisioning
+remains outside the measured RTO. The receipt was also copied to the protected workstation file
+`/Users/wdl/.codex/disaster-recovery-receipts/20260919T113800Z-0ea55a9-drill.json`, outside the
+immutable bundle.
+
+The permanent off-host confirmation is
+`/var/lib/codex-dispatcher/offhost-bundle-confirmations/aaf28bec666a14761435840a4cacee3c4b60133cfcfa18c3216a85528d696c27.json`,
+with file SHA-256 `69539aca31822471f19f2959e4d4984013a5752743a6f1c98e60a51e4d4e6f9d`. Its local
+copy is `/Users/wdl/.codex/disaster-recovery-receipts/20260919T113800Z-0ea55a9-offhost-confirmation.json`.
+This confirms the independently checked bytes; it neither authorizes nor performs reclamation.
+
+Final health at `2026-09-19T11:54:21.908284Z` remained `ok=true`, with SQLite integrity `ok`,
+zero foreign-key violations, active Turns, blocked WorkItems, or pending archives, and all five
+timers enabled/active. The planner reported one `control_reclamation_plan_ready` notification
+to the system channel after the off-host confirmation: two targets totaling 10,395,648 bytes,
+plan SHA-256 `5689a246657c1dbd0a68bc6dc448f2a65a9a4ae47d52255575f230e7615b3621`.
+This is a ready plan, not a failed health check; no reclamation apply or deletion was performed.

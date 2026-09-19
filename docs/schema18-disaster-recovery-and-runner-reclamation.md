@@ -24,7 +24,7 @@ service. They contain the exact release, protected Control config, systemd units
 database, permanent handoff/release receipts, Runner reference ledger/apply receipt, and strict
 planner status needed to prove both application reconstruction paths.
 
-## Schema-20 isolated drill
+## Schema-21 isolated drill
 
 Preconditions:
 
@@ -71,8 +71,8 @@ sudo install -o codex-dispatcher -g codex-dispatcher -m 0600 \
 
 Create one new bundle through a transient service. The bundle includes the protected Control
 configuration, so its directory and every non-release artifact remain mode `0700`/`0600`. The
-source canary database below is the retained schema-21 backup that owns the three higher-value
-WorkItems; replace paths only with exact reviewed equivalents:
+provenance database must be a verified schema-21 backup that binds every Runner-only terminal
+WorkItem in the snapshot; replace placeholders with exact reviewed paths:
 
 ```bash
 sudo systemd-run --wait --collect --pipe \
@@ -89,7 +89,7 @@ sudo systemd-run --wait --collect --pipe \
   --release-receipt /var/lib/codex-dispatcher/disaster-recovery-inputs/release-<40-hex-current-commit>.json \
   --handoff-receipt /var/lib/codex-dispatcher/disaster-recovery-inputs/handoff-<40-hex-current-commit>.json \
   --runner-snapshot /var/lib/codex-dispatcher/disaster-recovery-inputs/runner-<40-hex-current-commit>.json \
-  --provenance-database /var/lib/codex-dispatcher/higher-value-canary/backups/state-pre-discard-20260824T040611Z.db \
+  --provenance-database /var/lib/codex-dispatcher/disaster-recovery-bundles/<verified-schema21-bundle>/provenance-databases/source-00.db \
   --system-slack-receipt /var/lib/codex-dispatcher/reclamation-canaries/<fixture-id>/receipt.json \
   --create --json
 ```
@@ -105,6 +105,14 @@ ssh s2 sudo tar -C /var/lib/codex-dispatcher/disaster-recovery-bundles \
 
 Keep `<off-host-bundle-parent>` mode `0700` and preserve the release tree's executable/read modes;
 do not recursively normalize artifact modes after export.
+
+Validate the exported copy with `load_disaster_recovery_bundle` before reimporting it. That loader
+checks all manifest hashes and validates a temporary database copy. Do not open the bundled
+`state.db` directly with a normal SQLite `mode=ro` connection: a WAL database can still gain
+`-wal`/`-shm` sidecars, and strict bundle validation correctly rejects those extra files. Use a
+separate temporary copy for additional SQL inspection. If an import is rejected, retain that
+exact failed copy outside the canonical bundle directory, diagnose it, and use a new import path;
+do not relax the manifest check or reuse the failed path.
 
 For a real drill, copy the off-host bundle back into a new protected Control path and validate that
 copy. Do not reuse the on-host source bundle as evidence of independent recovery. Run the drill
@@ -127,7 +135,7 @@ sudo systemd-run --wait --collect --pipe \
   --execute-isolated --json
 ```
 
-Acceptance requires `status=passed`, `database_schema_migrations=[1,...,20]`, identical Control and
+Acceptance requires `status=passed`, `database_schema_migrations=[1,...,21]`, identical Control and
 Runner commits, exact reference and planner digests, all recorded external counts reconciled,
 `online_state_modified=false`, distinct Control/Runner rebuild-manifest SHA-256 values, and a
 mode-protected `receipt.json`. A failure writes `failed-receipt.json`; retain it and the source
