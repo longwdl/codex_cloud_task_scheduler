@@ -5,6 +5,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
+from codex_dispatcher.config import SessionRuntimeConfig
 from codex_dispatcher.repository_admission import RepositoryClass
 from codex_dispatcher.ssh_preflight import (
     SshPreflightStatus,
@@ -14,7 +15,13 @@ from codex_dispatcher.ssh_recovery import SshRecoveryAction
 from codex_dispatcher.state_store import StateStore
 from codex_dispatcher.testing.fakes import FakeTracker
 from codex_dispatcher.trackers.base import TaskState
-from codex_dispatcher.work_items import TurnState, WorkItem, WorkItemState
+from codex_dispatcher.work_items import (
+    SessionGenerationRole,
+    SessionGenerationState,
+    TurnState,
+    WorkItem,
+    WorkItemState,
+)
 from tests.test_scheduler import make_config, make_task
 from tests.test_ssh_dispatch_planning import BASE_SHA, claimed_task
 
@@ -165,6 +172,89 @@ class SshPreflightPlanTests(unittest.TestCase):
         self.assertIs(SshRecoveryAction.SYNC_TRACKER_STATE, plan.recovery_action)
         self.assertEqual(terminal, plan.work_item)
         self.assertIs(TaskState.DISPATCHING, plan.task.state if plan.task else None)
+
+    def test_non_retryable_failed_generation_blocks_candidate_with_stable_reason(self) -> None:
+        tracker = FakeTracker()
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        item = WorkItem.new(
+            repository=task.repository,
+            issue_number=task.issue_number,
+            issue_node_id=task.issue_node_id or "missing",
+            base_branch="main",
+            base_sha=BASE_SHA,
+        )
+        self.store.create_work_item(item)
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.PREPARING)
+        self.store.update_work_item_state(item.work_item_id, WorkItemState.READY)
+        generation = self.store.plan_session_generation(
+            item.work_item_id,
+            role=SessionGenerationRole.IMPLEMENTATION,
+            policy_sha256="d" * 64,
+        )
+        self.store.record_session_generation_baseline(
+            generation.session_generation_id,
+            issue_revision="fixture-revision",
+            issue_content_sha256="a" * 64,
+            task_spec_sha256="b" * 64,
+            prompt_sha256="c" * 64,
+            approved_comment_ids=(),
+            approved_context_sha256="d" * 64,
+        )
+        self.store.transition_session_generation(
+            generation.session_generation_id, SessionGenerationState.STARTING
+        )
+        self.store.transition_session_generation(
+            generation.session_generation_id, SessionGenerationState.FAILED
+        )
+        blocked = self.store.update_work_item_state(
+            item.work_item_id, WorkItemState.BLOCKED
+        )
+        config = replace(self.config, session_runtime=_session_runtime_config())
+
+        plan = build_ssh_preflight_plan(config, self.store, tracker)
+
+        self.assertIs(SshPreflightStatus.BLOCKED, plan.status)
+        self.assertIs(SshRecoveryAction.BLOCK, plan.recovery_action)
+        self.assertEqual("session_generation_recovery_required", plan.reason)
+        self.assertEqual(blocked, plan.work_item)
+        legacy_plan = build_ssh_preflight_plan(self.config, self.store, tracker)
+        self.assertIs(SshPreflightStatus.BLOCKED, legacy_plan.status)
+        self.assertEqual("session_generation_recovery_required", legacy_plan.reason)
+        self.assertFalse(
+            any(
+                call.method
+                in {"claim", "set_state", "upsert_run_comment", "create_draft_pr"}
+                for call in tracker.calls
+            )
+        )
+
+
+def _ready_task():
+    return replace(
+        claimed_task(),
+        state=TaskState.READY,
+        labels=("agent:ready", "exec:ssh-cli", "priority:p1"),
+    )
+
+
+def _session_runtime_config() -> SessionRuntimeConfig:
+    return SessionRuntimeConfig(
+        protocol_version=2,
+        agent_policy_digest="d" * 64,
+        max_turns_per_session=4,
+        rotate_after_input_tokens=120_000,
+        rotate_after_session_age_seconds=14_400,
+        rotate_before_final_audit=False,
+        use_incremental_resume_prompts=True,
+        max_session_generations=3,
+        max_total_turns=10,
+        max_no_progress_turns=2,
+        max_repair_cycles=3,
+        max_audit_cycles=3,
+        max_total_tokens=1_000_000,
+        max_work_item_age_seconds=604_800,
+    )
 
 
 if __name__ == "__main__":

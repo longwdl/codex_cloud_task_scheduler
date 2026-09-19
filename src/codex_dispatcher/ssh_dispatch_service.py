@@ -49,6 +49,10 @@ from codex_dispatcher.scheduler import (
 from codex_dispatcher.handoffs import build_publication_evidence
 from codex_dispatcher.prompt_builder import build_canonical_input_snapshot
 from codex_dispatcher.source_bundle import SourceBundle
+from codex_dispatcher.session_generation_recovery import (
+    pre_session_rejection_history_is_retryable,
+    session_generation_recovery_reason,
+)
 from codex_dispatcher.ssh_dispatch_planning import (
     SshDispatchPlanningError,
     WorkItemAction,
@@ -203,6 +207,17 @@ class OfflineSshDispatchService:
             raise SshDispatchPlanningError(
                 "source bundle base SHA conflicts with persisted WorkItem"
             )
+        recovery_reason = (
+            None
+            if resolution.is_new
+            else session_generation_recovery_reason(
+                self._store,
+                resolution.work_item,
+                session_runtime=self._config.session_runtime,
+            )
+        )
+        if recovery_reason is not None:
+            raise SshDispatchPlanningError(recovery_reason)
 
         if resolution.is_new:
             self._store.create_work_item(resolution.work_item)
@@ -269,6 +284,13 @@ class OfflineSshDispatchService:
         )
         if work_item is None:
             raise SshDispatchPlanningError("Issue does not have a persisted WorkItem")
+        recovery_reason = session_generation_recovery_reason(
+            self._store,
+            work_item,
+            session_runtime=self._config.session_runtime,
+        )
+        if recovery_reason is not None:
+            raise SshDispatchPlanningError(recovery_reason)
         turn_number = self._store.next_turn_number(work_item.work_item_id)
         followup_intent = self._store.get_planned_work_item_followup(
             work_item.work_item_id
@@ -300,8 +322,8 @@ class OfflineSshDispatchService:
             )
             if generation is None:
                 retryable_pre_session_history = bool(generations) and (
-                    self._pre_session_rejection_history_is_retryable(
-                        work_item, generations
+                    pre_session_rejection_history_is_retryable(
+                        self._store, work_item, generations
                     )
                 )
                 if generations and not retryable_pre_session_history:
@@ -357,8 +379,8 @@ class OfflineSshDispatchService:
                         pre_session_retry = (
                             generation.rotation_reason
                             in {None, PRE_SESSION_RETRY_ROTATION_REASON}
-                            and self._pre_session_rejection_history_is_retryable(
-                                work_item, previous_generations
+                            and pre_session_rejection_history_is_retryable(
+                                self._store, work_item, previous_generations
                             )
                         )
                         if not pre_session_retry:
@@ -692,49 +714,6 @@ class OfflineSshDispatchService:
         )
         work_item, turn, _ = self._store.record_agent_followup_intent(intent)
         return TurnProgress(work_item, turn)
-
-    def _pre_session_rejection_history_is_retryable(
-        self,
-        work_item: WorkItem,
-        generations: tuple[SessionGeneration, ...],
-    ) -> bool:
-        """Prove every earlier generation ended before Codex created a session."""
-        if (
-            not generations
-            or work_item.last_published_sha is not None
-            or self._store.list_work_item_publication_checkpoints(work_item.work_item_id)
-        ):
-            return False
-        for generation in generations:
-            if (
-                generation.state is not SessionGenerationState.FAILED
-                or generation.role is not SessionGenerationRole.IMPLEMENTATION
-                or generation.codex_session_id is not None
-                or generation.last_published_sha is not None
-                or generation.start_head_sha != work_item.base_sha
-                or generation.rotation_reason
-                not in {None, PRE_SESSION_RETRY_ROTATION_REASON}
-            ):
-                return False
-            turns = self._store.list_session_generation_turns(
-                generation.session_generation_id
-            )
-            if len(turns) != 1:
-                return False
-            turn = turns[0]
-            if (
-                turn.state is not TurnState.BLOCKED
-                or turn.error_code != "runner_request_rejected"
-                or turn.input_head_sha != work_item.base_sha
-                or turn.output_sha256 is not None
-                or turn.output_head_sha is not None
-                or turn.result_status is not None
-                or turn.result_summary is not None
-                or self._store.get_turn_agent_result(turn.turn_id) is not None
-                or self._store.get_turn_usage(turn.turn_id) is not None
-            ):
-                return False
-        return True
 
     def _rotation_reason(
         self,

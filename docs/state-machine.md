@@ -36,6 +36,10 @@ The detailed transition sets are defined by `WorkItemState`, `TurnState`, and
 paused, or waiting-input WorkItem back to an allowed preparation/ready state only through an exact
 reviewed recovery path.
 
+For authentication failures and established failed sessions without a live generation, follow
+[Runner authentication and failed-session recovery](runner-auth-and-session-recovery.md).
+A ready label alone does not authorize a replacement session or new handoff evidence.
+
 ## Completion
 
 `agent:completed` is produced by the Control plane; it is not an operator authorization label.

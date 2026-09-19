@@ -17,6 +17,9 @@ from codex_dispatcher.scheduler import (
     build_ssh_dry_run_plan,
     build_ssh_higher_value_canary_plan,
 )
+from codex_dispatcher.session_generation_recovery import (
+    session_generation_recovery_reason,
+)
 from codex_dispatcher.ssh_recovery import (
     SshRecoveryAction,
     SshRecoveryPlan,
@@ -109,6 +112,27 @@ def _build_ssh_preflight_plan(
             target=target,
             active_turn_exists=False,
         )
+    if candidates.selected:
+        task = candidates.selected[0]
+        work_item = store.get_work_item_by_issue(task.repository, task.issue_number)
+        recovery_reason = (
+            None
+            if work_item is None
+            else session_generation_recovery_reason(
+                store,
+                work_item,
+                session_runtime=config.session_runtime,
+            )
+        )
+        if recovery_reason is not None:
+            return SshPreflightPlan(
+                status=SshPreflightStatus.BLOCKED,
+                recovery_action=SshRecoveryAction.BLOCK,
+                task=task,
+                work_item=work_item,
+                reason=recovery_reason,
+                rejected=candidates.rejected,
+            )
     return _from_candidates(candidates)
 
 

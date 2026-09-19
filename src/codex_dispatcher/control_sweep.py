@@ -18,6 +18,9 @@ from codex_dispatcher.repository_admission import (
 )
 from codex_dispatcher.slack_delivery import SlackDeliveryCoordinator
 from codex_dispatcher.source_bundle import SourceBundle
+from codex_dispatcher.session_generation_recovery import (
+    session_generation_recovery_reason,
+)
 from codex_dispatcher.ssh_dispatch_service import (
     AutonomyBudgetError,
     CheckpointPublicationInterrupted,
@@ -198,22 +201,39 @@ class SshControlSweep:
                 self._store.record_sweep_cursor(
                     "terminal_github_audit", completed_at=now.isoformat()
                 )
-
             candidates = self._dispatch.plan_candidates(self._tracker)
+            if candidates.selected:
+                task = candidates.selected[0]
+                repository = self._repository(task.repository)
+                existing = self._store.get_work_item_by_issue(
+                    task.repository, task.issue_number
+                )
+                if existing is not None and existing.state is WorkItemState.COMPLETED:
+                    return _task_result(
+                        ControlSweepStatus.BLOCKED,
+                        task,
+                        work_item=existing,
+                        reason="completed_work_item_cannot_be_reactivated",
+                    )
+                recovery_reason = (
+                    None
+                    if existing is None
+                    else session_generation_recovery_reason(
+                        self._store,
+                        existing,
+                        session_runtime=self._config.session_runtime,
+                    )
+                )
+                if recovery_reason is not None:
+                    return _task_result(
+                        ControlSweepStatus.BLOCKED,
+                        task,
+                        work_item=existing,
+                        reason=recovery_reason,
+                    )
             if not candidates.selected:
                 return ControlSweepResult(ControlSweepStatus.IDLE)
-            task = candidates.selected[0]
-            repository = self._repository(task.repository)
-            existing = self._store.get_work_item_by_issue(
-                task.repository, task.issue_number
-            )
-            if existing is not None and existing.state is WorkItemState.COMPLETED:
-                return _task_result(
-                    ControlSweepStatus.BLOCKED,
-                    task,
-                    work_item=existing,
-                    reason="completed_work_item_cannot_be_reactivated",
-                )
+            assert task is not None
             preparation_retry = (
                 existing is not None
                 and existing.state in {WorkItemState.BLOCKED, WorkItemState.PAUSED}

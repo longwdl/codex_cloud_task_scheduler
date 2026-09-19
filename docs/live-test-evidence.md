@@ -3031,3 +3031,19 @@ timers enabled/active. The planner reported one `control_reclamation_plan_ready`
 to the system channel after the off-host confirmation: two targets totaling 10,395,648 bytes,
 plan SHA-256 `5689a246657c1dbd0a68bc6dc448f2a65a9a4ae47d52255575f230e7615b3621`.
 This is a ready plan, not a failed health check; no reclamation apply or deletion was performed.
+
+## Failed-session recovery guard — 2026-09-19
+
+Source validation on project-local Python 3.12.14 passed all 642 unit tests, compileall, and
+`git diff --check`. Targeted independent review found no remaining actionable defect after repair.
+The shared pre-claim guard covers failed established sessions, absent v2 runtime configuration,
+and exhausted pre-session retry generation/Turn budgets. Strict migrated v1 session identity
+remains resumable; terminal audit cursor progress is preserved. Service entry points retain
+an independent guard, and preflight exposes the same bounded reason codes.
+
+The authentication/manual-recovery runbook records protected seed replacement, actual Fixture
+provider verification, existing failure notifications, and discard-before-replacement handling.
+No new paid probe, database migration, dependency, or general failed-session revival CLI was added.
+These source changes were not deployed during this operation: both live hosts remain on
+`0ea55a9eb9c6a4bff5ac171f7d8b637a0753ccc4`. No new live Fixture was run for this guard; the previous
+Fixture #50 failure and #51 -> Draft PR #52 successful lifecycle remain the operational evidence.

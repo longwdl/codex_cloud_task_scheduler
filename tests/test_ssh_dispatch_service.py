@@ -22,6 +22,7 @@ from codex_dispatcher.publisher import VerifiedBundle
 from codex_dispatcher.runner_protocol import RunnerOperation, parse_agent_result
 from codex_dispatcher.source_bundle import SourceBundle
 from codex_dispatcher.ssh_dispatch_planning import SshDispatchPlanningError
+from codex_dispatcher.ssh_preflight import SshPreflightStatus, build_ssh_preflight_plan
 from codex_dispatcher.ssh_recovery import SshRecoveryAction, plan_ssh_recovery
 from codex_dispatcher.ssh_dispatch_service import (
     AutonomyBudgetError,
@@ -951,17 +952,144 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
             (rejected.turn.turn_id,),
         )
         self.store._connection.commit()
-        service.resolve_and_prepare(claimed_task(), base_sha=BASE_SHA)
+        before = self.store.get_work_item(item.work_item_id)
+        before_generations = self.store.list_session_generations(item.work_item_id)
+        before_operations = tuple(call.operation for call in self.transport.calls)
 
+        for _ in range(2):
+            with self.assertRaisesRegex(
+                SshDispatchPlanningError, "session_generation_recovery_required"
+            ):
+                service.resolve_and_prepare(claimed_task(), base_sha=BASE_SHA)
         with self.assertRaisesRegex(
-            SshDispatchPlanningError, "requires explicit recovery"
+            SshDispatchPlanningError, "session_generation_recovery_required"
         ):
-            service.run_claimed_turn(
-                replace(claimed_task(), updated_at="2026-08-13T03:00:00Z"),
-                turn_id="turn_" + "d" * 32,
-            )
+            service.run_claimed_turn(claimed_task())
+
+        self.assertEqual(before, self.store.get_work_item(item.work_item_id))
+        self.assertEqual(
+            before_generations,
+            self.store.list_session_generations(item.work_item_id),
+        )
+        self.assertEqual(
+            before_operations,
+            tuple(call.operation for call in self.transport.calls),
+        )
+
+    def test_v2_pre_session_retry_respects_generation_budget_before_reactivation(self) -> None:
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(max_session_generations=1),
+        )
+        service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+        item = service.resolve_and_prepare(
+            claimed_task(), base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        self.transport.reject_next(RunnerOperation.START)
+        service.run_claimed_turn(claimed_task())
+        before = self.store.get_work_item(item.work_item_id)
+        before_generations = self.store.list_session_generations(item.work_item_id)
+
+        tracker = FakeTracker()
+        tracker.ready_tasks = (replace(
+            claimed_task(), state=TaskState.READY,
+            labels=("agent:ready", "exec:ssh-cli", "priority:p1"),
+        ),)
+        plan = build_ssh_preflight_plan(config, self.store, tracker)
+        self.assertIs(SshPreflightStatus.BLOCKED, plan.status)
+        self.assertEqual("session_generation_budget_exhausted", plan.reason)
+        self.assertFalse(any(
+            call.method in {"claim", "set_state", "upsert_run_comment", "create_draft_pr"}
+            for call in tracker.calls
+        ))
+
+        for operation in (
+            lambda: service.resolve_and_prepare(claimed_task(), base_sha=BASE_SHA),
+            lambda: service.run_claimed_turn(claimed_task()),
+        ):
+            with self.assertRaisesRegex(
+                SshDispatchPlanningError, "session_generation_budget_exhausted"
+            ):
+                operation()
+
+        self.assertEqual(before, self.store.get_work_item(item.work_item_id))
+        self.assertEqual(
+            before_generations,
+            self.store.list_session_generations(item.work_item_id),
+        )
+
+    def test_v2_pre_session_retry_respects_total_turn_budget_before_reactivation(self) -> None:
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=session_runtime_config(max_total_turns=1),
+        )
+        service = OfflineSshDispatchService(
+            config=config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+        item = service.resolve_and_prepare(
+            claimed_task(), base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        self.transport.reject_next(RunnerOperation.START)
+        service.run_claimed_turn(claimed_task())
+
+        tracker = FakeTracker()
+        tracker.ready_tasks = (replace(
+            claimed_task(), state=TaskState.READY,
+            labels=("agent:ready", "exec:ssh-cli", "priority:p1"),
+        ),)
+        plan = build_ssh_preflight_plan(config, self.store, tracker)
+        self.assertIs(SshPreflightStatus.BLOCKED, plan.status)
+        self.assertEqual("total_turn_budget_exhausted", plan.reason)
+        self.assertFalse(any(
+            call.method in {"claim", "set_state", "upsert_run_comment", "create_draft_pr"}
+            for call in tracker.calls
+        ))
+
+        for operation in (
+            lambda: service.resolve_and_prepare(claimed_task(), base_sha=BASE_SHA),
+            lambda: service.run_claimed_turn(claimed_task()),
+        ):
+            with self.assertRaisesRegex(
+                SshDispatchPlanningError, "total_turn_budget_exhausted"
+            ):
+                operation()
 
         self.assertEqual(1, len(self.store.list_session_generations(item.work_item_id)))
+
+    def test_persisted_v2_history_cannot_fall_back_to_legacy_dispatch(self) -> None:
+        v2_config = replace(
+            make_config(global_max_active=4), session_runtime=session_runtime_config()
+        )
+        v2_service = OfflineSshDispatchService(
+            config=v2_config,
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+        v2_service.resolve_and_prepare(
+            claimed_task(), base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        self.transport.reject_next(RunnerOperation.START)
+        v2_service.run_claimed_turn(claimed_task())
+        legacy_service = OfflineSshDispatchService(
+            config=make_config(global_max_active=4),
+            store=self.store,
+            orchestrator=self.orchestrator,
+        )
+
+        for operation in (
+            lambda: legacy_service.resolve_and_prepare(claimed_task(), base_sha=BASE_SHA),
+            lambda: legacy_service.run_claimed_turn(claimed_task()),
+        ):
+            with self.assertRaisesRegex(
+                SshDispatchPlanningError, "session_generation_recovery_required"
+            ):
+                operation()
 
     def test_turn_runs_from_frozen_plan_and_reactivation_reuses_session(self) -> None:
         item = self.service.resolve_and_prepare(
@@ -1246,6 +1374,58 @@ class OfflineSshDispatchServiceTests(unittest.TestCase):
         self.assertEqual(POLICY_DIGEST, generations[0].policy_sha256)
         self.assertEqual(POLICY_DIGEST_2, generations[1].policy_sha256)
         self.assertEqual("policy_changed", generations[1].rotation_reason)
+
+    def test_migrated_legacy_session_remains_resumable_without_v2_runtime(self) -> None:
+        item = self.service.resolve_and_prepare(
+            claimed_task(), base_sha=BASE_SHA, source_bundle=source_bundle()
+        )
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, blocked_result()),
+        )
+        legacy_turn = self.service.run_claimed_turn(
+            claimed_task(), turn_id="turn_" + "f" * 32
+        )
+        legacy_generation_id = "sg_" + "f" * 32
+        now = "2026-08-13T02:00:00Z"
+        with self.store._transaction() as connection:
+            connection.execute(
+                "INSERT INTO session_generations ("
+                "session_generation_id, work_item_id, generation_number, state, role, "
+                "codex_session_id, start_head_sha, policy_sha256, rotation_reason, "
+                "created_at, started_at, updated_at"
+                ") VALUES (?, ?, 1, 'active', 'implementation', ?, ?, NULL, "
+                "'legacy_migration', ?, ?, ?)",
+                (
+                    legacy_generation_id,
+                    item.work_item_id,
+                    SESSION,
+                    BASE_SHA,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO turn_session_generations (turn_id, session_generation_id) "
+                "VALUES (?, ?)",
+                (legacy_turn.turn.turn_id, legacy_generation_id),
+            )
+
+        reactivated = self.service.resolve_and_prepare(claimed_task(), base_sha=BASE_SHA)
+        self.assertEqual(SESSION, reactivated.codex_session_id)
+        self.transport.queue_turn(
+            item.work_item_id,
+            FakeTurnFixture(SESSION, BASE_SHA, blocked_result()),
+        )
+        resumed = self.service.run_claimed_turn(
+            replace(claimed_task(), updated_at="2026-08-13T03:00:00Z"),
+            turn_id="turn_" + "0" * 32,
+        )
+        self.assertEqual(2, resumed.turn.turn_number)
+        self.assertEqual(SESSION, resumed.work_item.codex_session_id)
+        self.assertEqual(RunnerOperation.RESUME, self.transport.calls[-1].operation)
+        self.assertEqual(1, len(self.store.list_session_generations(item.work_item_id)))
 
     def test_v2_activation_rotates_imported_legacy_session(self) -> None:
         item = self.service.resolve_and_prepare(

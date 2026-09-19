@@ -14,7 +14,7 @@ from codex_dispatcher.control_sweep import (
     SourceSnapshotProvider,
     SshControlSweep,
 )
-from codex_dispatcher.config import RepositoryAdmissionConfig
+from codex_dispatcher.config import RepositoryAdmissionConfig, SessionRuntimeConfig
 from codex_dispatcher.dispatcher_lock import (
     DispatcherLockUnavailable,
     DispatcherProcessLock,
@@ -63,7 +63,13 @@ from codex_dispatcher.trackers.base import (
     TrackerTask,
 )
 from codex_dispatcher.turn_orchestration import OfflineTurnOrchestrator, TurnProgress
-from codex_dispatcher.work_items import Turn, TurnState, WorkItemState
+from codex_dispatcher.work_items import (
+    SessionGenerationRole,
+    SessionGenerationState,
+    Turn,
+    TurnState,
+    WorkItemState,
+)
 from codex_dispatcher.work_item_lifecycle import (
     TerminalGithubClosureKind,
     TerminalGithubClosureState,
@@ -148,6 +154,25 @@ def _ready_task(issue_number: int = 42) -> TrackerTask:
         claimed_task(issue_number),
         state=TaskState.READY,
         labels=("agent:ready", "exec:ssh-cli", "priority:p1"),
+    )
+
+
+def _session_runtime_config() -> SessionRuntimeConfig:
+    return SessionRuntimeConfig(
+        protocol_version=2,
+        agent_policy_digest="d" * 64,
+        max_turns_per_session=4,
+        rotate_after_input_tokens=120_000,
+        rotate_after_session_age_seconds=14_400,
+        rotate_before_final_audit=False,
+        use_incremental_resume_prompts=True,
+        max_session_generations=3,
+        max_total_turns=10,
+        max_no_progress_turns=2,
+        max_repair_cycles=3,
+        max_audit_cycles=3,
+        max_total_tokens=1_000_000,
+        max_work_item_age_seconds=604_800,
     )
 
 
@@ -564,6 +589,83 @@ class SshControlSweepTests(unittest.TestCase):
                 size_bytes=len(artifact),
             )
         )
+
+    def test_failed_generation_ready_reselection_blocks_before_claim_or_reactivation(self) -> None:
+        tracker = FakeTracker()
+        task = _ready_task()
+        tracker.ready_tasks = (task,)
+        tracker.tasks[task.task_id] = task
+        item = self.dispatch.resolve_and_prepare(
+            claimed_task(), base_sha=BASE_SHA, source_bundle=_bundle()
+        )
+        generation = self.store.plan_session_generation(
+            item.work_item_id,
+            role=SessionGenerationRole.IMPLEMENTATION,
+            policy_sha256="d" * 64,
+        )
+        self.store.record_session_generation_baseline(
+            generation.session_generation_id,
+            issue_revision="fixture-revision",
+            issue_content_sha256="a" * 64,
+            task_spec_sha256="b" * 64,
+            prompt_sha256="c" * 64,
+            approved_comment_ids=(),
+            approved_context_sha256="d" * 64,
+        )
+        self.store.transition_session_generation(
+            generation.session_generation_id, SessionGenerationState.STARTING
+        )
+        self.store.transition_session_generation(
+            generation.session_generation_id, SessionGenerationState.FAILED
+        )
+        blocked = self.store.update_work_item_state(
+            item.work_item_id, WorkItemState.BLOCKED
+        )
+        before_generations = self.store.list_session_generations(item.work_item_id)
+        before_operations = tuple(call.operation for call in self.transport.calls)
+        source = _RecordingSource()
+        config = replace(
+            make_config(global_max_active=4),
+            session_runtime=_session_runtime_config(),
+        )
+
+        sweep = self._sweep(tracker, source, config=config)
+        first = sweep.run_once()
+        cursor = self.store.get_sweep_cursor("terminal_github_audit")
+        self.assertIsNotNone(cursor)
+        results = (first, sweep.run_once())
+        legacy_result = self._sweep(
+            tracker, source, config=make_config(global_max_active=4)
+        ).run_once()
+
+        self.assertEqual(
+            (ControlSweepStatus.BLOCKED, ControlSweepStatus.BLOCKED),
+            tuple(result.status for result in results),
+        )
+        self.assertEqual(
+            ("session_generation_recovery_required",) * 2,
+            tuple(result.reason for result in results),
+        )
+        self.assertEqual(ControlSweepStatus.BLOCKED, legacy_result.status)
+        self.assertEqual("session_generation_recovery_required", legacy_result.reason)
+        self.assertEqual(blocked, self.store.get_work_item(item.work_item_id))
+        self.assertEqual(
+            before_generations,
+            self.store.list_session_generations(item.work_item_id),
+        )
+        self.assertEqual([], source.calls)
+        self.assertEqual(
+            before_operations,
+            tuple(call.operation for call in self.transport.calls),
+        )
+        self.assertFalse(
+            any(
+                call.method
+                in {"claim", "set_state", "upsert_run_comment", "create_draft_pr"}
+                for call in tracker.calls
+            )
+        )
+        self.assertEqual(cursor, self.store.get_sweep_cursor("terminal_github_audit"))
 
     def test_idle_full_terminal_audit_records_a_bounded_cursor(self) -> None:
         tracker = FakeTracker()

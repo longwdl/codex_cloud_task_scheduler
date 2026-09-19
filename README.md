@@ -114,6 +114,7 @@ git diff --check
 - [Development](docs/development.md)
 - [Implementation, deployment, and acceptance](docs/implementation-deployment-test-plan.md)
 - [Owner preparation checklist](docs/owner-preparation-checklist.md)
+- [Runner authentication and failed-session recovery](docs/runner-auth-and-session-recovery.md)
 - [Current-schema disaster recovery and exact reclamation](docs/schema18-disaster-recovery-and-runner-reclamation.md)
 - [Higher-value manual canary](docs/higher-value-canary.md)
 - [Live test evidence](docs/live-test-evidence.md)
