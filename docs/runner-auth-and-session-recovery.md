@@ -105,6 +105,15 @@ For the authorized Fixture discard-and-replace path:
    pre-close the Issue/PR, delete storage, or repeatedly toggle labels to accelerate this process.
 4. Require completed closure receipts and exact Runner archive/absence evidence. A failed or
    ambiguous receipt remains a blocker; no new Issue is a substitute for reconciling it.
+   A stopped process may leave an uncommitted worktree even when HEAD still equals the approved
+   checkpoint. Archive can then remain ambiguous because Runner refuses the dirty tree. Preserve
+   the exact dirty files, patch, and hashes in a mode-protected operator-only evidence directory
+   outside the WorkItem, and verify the saved copies before changing the originals. Only under
+   explicit discard authorization, after proving no active execution, unchanged expected HEAD,
+   exact task identity, and exclusively task-owned allowed-path changes, may an operator replace
+   those tracked dirty paths with the bytes from the unchanged expected HEAD. Untracked or unknown
+   paths remain blocked; this does not authorize their deletion or cleanup. Do not reset history,
+   delete receipts, or change the database. Let normal ARCHIVE_STATUS/ARCHIVE prove the outcome.
 5. After the cause has been corrected, create a new reviewed Fixture Issue with the current exact
    base SHA, allowed paths, acceptance criteria, and its own identity. If old unmerged changes are
    needed, review and specify them explicitly; do not silently adopt the old branch or session.

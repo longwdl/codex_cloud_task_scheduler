@@ -3047,3 +3047,139 @@ No new paid probe, database migration, dependency, or general failed-session rev
 These source changes were not deployed during this operation: both live hosts remain on
 `0ea55a9eb9c6a4bff5ac171f7d8b637a0753ccc4`. No new live Fixture was run for this guard; the previous
 Fixture #50 failure and #51 -> Draft PR #52 successful lifecycle remain the operational evidence.
+
+## Recovery guard rollout and live Fixture acceptance — 2026-09-20
+
+Release `6609484f44e0669c2691bc59658007fb2a900e8d` was deployed through the transactional two-host
+release tool. The source archive SHA-256 was
+`94eedd588223addd12587488fd50ec07a26d31a5c899884b1f4d3cfb201df0c0`. The read-only plan observed no
+active service and matching prior release `0ea55a9eb9c6a4bff5ac171f7d8b637a0753ccc4`, which remains
+the immediate rollback reference. No runtime configuration or model-policy change was requested.
+Control and Runner each passed all 642 unit tests, compileall, and the required script validation.
+
+The committed release receipt SHA-256 is
+`9fd7e01b1c6a1a0c8103fd10c1bbbc48dc61b264582f0e4cd029381d1362d4df`. The permanent handoff receipt
+at `/opt/codex-dispatcher/release-handoff-receipts/6609484f44e0669c2691bc59658007fb2a900e8d.json`
+reported `operational`; its evidence digest is
+`8e27a10712d6c03ec3c627fe0b220ce59e471c36c49668a270707a154f111028`. Post-release backup and isolated
+SQLite restore passed schema 1–21, integrity, and foreign-key checks. Sweep 18519 was idle with
+four reads, zero writes, and zero API failures. All five Control timers and the Runner planner
+timer were enabled/active at handoff. The existing system notification reported a ready reclamation
+plan, not a lifecycle failure; no reclamation apply was executed.
+
+Fixture Issue #53 / WorkItem `wi_6fabcf8ef9c1d4c0d207358d` completed implementation and independent
+Audit, producing Draft PR #54 at exact HEAD `51c079dee27f0cccf0d09900ea1646920e95ead7`. Both
+completion gates passed, and both model receipts recorded `gpt-5.6-sol` / `xhigh`.
+The `fixture` Actions run `35458613212` succeeded at that exact HEAD. The local token could not read
+the GraphQL status-check rollup; the Actions REST read-back and durable completion gates supplied
+the successful check evidence instead. Root and result Slack deliveries were both `delivered`,
+with root permalink `https://codex-nt54555.slack.com/archives/C0BR2D0MS8Y/p1789839302041649`.
+
+The initially intended negative injection did not stop either #53 container. The implementation
+container had already exited before the first stop attempt; the subsequent observer used an
+incorrect WorkItem-ID directory instead of the repository/Issue directory, so it never reached its
+stop action. The exact Audit container had also exited before the corrected one-shot attempt.
+These attempts are not counted as fault injection. The successful normal execution was retained,
+and #53 / PR #54 followed the regular discard flow without merging.
+
+A separate Issue #55 / WorkItem `wi_9b395b3c338f78343e99a1a9` provided the live negative case.
+A bounded Runner-local transient service watched only that exact repository/Issue workspace,
+verified all container WorkItem/Turn/generation/policy labels and a durable session binding, then
+stopped exactly container `3f43a24398813a153d4fcc8532cc8595a699b39358a5ec5ea7e2df5084624495` once.
+The fault receipt `/srv/codex-runner/run/fixture-55-stop.json` reports `status=finished` and
+`stop_returncode=0`. Normal Runner/Control processing recorded generation
+`sg_eb189cb57c854073b268d8ab758e46c0` as `failed` and Turn
+`turn_d3774cd678a941369977e959dadd2ec8` as `blocked`, with `codex_output_missing_terminal` and an
+established session identity. No credential, model configuration, or database record was edited to
+manufacture the failure; no unrelated container was stopped.
+
+The operator then replaced the observed `agent:blocked` label with `agent:ready` once. The live
+write-enabled sweep returned `blocked` / `session_generation_recovery_required` with seven reads,
+zero GitHub writes, and zero API failures. The Issue remained ready, without `agent:dispatching`.
+Sweeps 18528 and 18529 both had seven reads, zero writes, and zero failures.
+The repeated sweep preserved the entire bounded WorkItem/generation/Turn snapshot: one generation,
+one Turn, unchanged state and identities. Read-only `ssh-preflight` independently returned the
+same reason, `authorizes_apply=false`, and `external_writes=false`. Its expected exit status 1 was
+a negative-test result, not a service rollout failure. No PR was created for #55. Root and failure
+Slack deliveries were delivered; the root is
+`https://codex-nt54555.slack.com/archives/C0BR2D0MS8Y/p1789840210589609`.
+
+Intermittent operator SSH disconnects were handled by reading durable service/receipt state.
+Long-running fault observation and preflight checks used named transient services; ambiguous
+transport loss was not treated as permission to repeat a stop action. After guard verification,
+#55 was moved directly from the observed ready label to discard for ordinary closure and archive.
+
+The fault receipt file SHA-256 is
+`ede978f138500bfb4e028e59137272f198051a6e62a7298439f6a6e6ec7cc22b`. The stopped #55 process had
+already changed README before termination. Its Git HEAD still matched the base, but the worktree
+was dirty, so ARCHIVE and ARCHIVE_STATUS correctly refused to assert clean terminal storage;
+Control retained `ambiguous`. Read-only inspection proved that the only change was the requested
+single README value replacement, with no staged changes or running canary container.
+
+Under the explicit Fixture discard authorization, the exact README and patch were preserved in
+Runner mode-protected `/srv/codex-runner/run/fixture-55-discard-evidence/`. The discarded README
+SHA-256 is `f4c91fe8b7b4e1d82e28d39de2806f01b4d41dda4c1303a83fb24c043b36caa8`; its reviewed base
+SHA-256 is `6d952b2b504eb68517f9065188efe1623ef5db493a630271dfb8bd6022f937dc`. Only that discarded
+README was restored to the unchanged Git HEAD. No Git history, generation/Turn receipt, archive
+receipt, or Control database record was rewritten. Normal recovery-first sweeps then resumed
+ARCHIVE_STATUS/ARCHIVE reconciliation; no ambiguous archive was forced complete.
+
+Both WorkItems ultimately archived successfully. #53's archive response SHA-256 is
+`9f9bd31b7e2a8e7c9cb80fd832f223249ae7d43b193b626e2ec01e0b2d1b66fd`; #55's is
+`da86a7d55639d1b1effabcc79dd8c35512ccfefc722e2dff2cc1d8e51e9d2d8e`. #55 reclaimed its exact
+8,589,934,592-byte image after the supported reconciliation. GitHub read-back found no open Fixture
+Issue or PR, PR #54 closed and unmerged, and unchanged main
+`de0af45094026d8cab699ff376fc25c5d1474884`.
+
+Health at `2026-09-19T18:03:09.127063Z` reported `ok=true`, integrity `ok`, zero foreign-key
+violations, active Turns, effective blocked WorkItems, pending/ambiguous archives, or pending GitHub
+closures. There were 29 WorkItems, 27 archives, and two absence reconciliations. All five Control
+timers were enabled/active. Sweep 18540 was idle with four reads, zero writes, and zero failures.
+The only alert was the existing ready Control reclamation plan; no exact-plan reclamation apply
+was performed.
+
+## Post-rollout schema-21 off-host drill — 2026-09-20
+
+Bundle `20260919T180000Z-6609484` captures the deployed `6609484` release, its permanent release and
+handoff receipts, a fresh schema-21 backup, the Runner schema-v3 snapshot, five retained
+Runner-only canaries' provenance, and the permanent system-Slack canary receipt. Its manifest
+SHA-256 is `0f312d3245fb8b40941722a043568df8778adca879af275eb11b35f6d9577d68`; source database
+SHA-256 is `330432a6ae5996cb757796bddbe0d5670b89cdc79a92d020a2cf14fe96d0709b`.
+
+The protected independent copy is
+`/Users/wdl/.codex/disaster-recovery-bundles/20260919T180000Z-6609484`. Transfer archive hash,
+complete manifest/release validation, database integrity, foreign keys, and migrations 1–21 all
+passed. The four schema-20 historical bundles and previous `20260919T113800Z-0ea55a9` schema-21
+bundle were retained. The interrupted initial streaming export was not used; a protected complete
+archive was transferred and hash-verified before extraction. Temporary transport archives were
+removed after the verified bundle and receipts had been retained.
+
+A new archive made from the validated workstation directory was reimported at the distinct path
+`/var/lib/codex-dispatcher/disaster-recovery-bundles/20260919T180000Z-6609484-reimported`.
+The independent isolated drill passed with `online_state_modified=false`, application RTO
+`155420` milliseconds, and source-backup age 194 seconds. It reconciled 29 WorkItems, 29 Issues,
+23 PRs, 27 Runner archives, two absence receipts, five provenance-bound Runner-only histories,
+and 129 Slack receipts (50 WorkItem and 79 system). Infrastructure provisioning is outside this
+RTO measurement.
+
+The reconstructed Control and Runner manifest SHA-256 values are respectively
+`4631a930f2dd2c6fe503c75b28a1373c4a017c3bffaece2a6709a623d3a6d5d0` and
+`c4a89167b5d338227558e12a79eab36ee27ce0628b25077b2d4d93dc95671ded`.
+The successful receipt is
+`/var/lib/codex-dispatcher/disaster-recovery-drills/20260919T180000Z-6609484/receipt.json`,
+SHA-256 `da762584840bd7ce5cb7613df7e6f18ac08ac6d7c0e956c35e651e4027481207`.
+Its verified workstation copy is
+`/Users/wdl/.codex/disaster-recovery-receipts/20260919T180000Z-6609484-drill.json`.
+
+The immutable off-host confirmation, keyed by the new manifest digest, records storage identity
+`wdl-macos:20260919T180000Z-6609484`. Its receipt SHA-256 is
+`2871197cb829e5f9fc18c3f5304652cd43be8fee4c2c75856cac104e99ec8caa`; the workstation copy is
+`/Users/wdl/.codex/disaster-recovery-receipts/20260919T180000Z-6609484-offhost-confirmation.json`.
+Confirmation authorizes no asset deletion. This operation did not change global Python, the
+existing Runner authentication seed, the execution model policy, Fixture main, or production assets.
+
+The final post-confirmation health observation at `2026-09-19T18:11:13.603529Z` remained `ok=true`,
+with zero active Turns, effective blocked WorkItems, pending/ambiguous archives, foreign-key
+violations, or unconfirmed bundles. All five timers were enabled/active. The only alert remained
+`control_reclamation_plan_ready`, now bound to plan
+`f4bea92f717688a9bafda97aef2bc3468188856640b2328c5cea7d03b6a6057e`; it was not applied.
