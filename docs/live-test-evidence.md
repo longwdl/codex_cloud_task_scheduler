@@ -3183,3 +3183,51 @@ with zero active Turns, effective blocked WorkItems, pending/ambiguous archives,
 violations, or unconfirmed bundles. All five timers were enabled/active. The only alert remained
 `control_reclamation_plan_ready`, now bound to plan
 `f4bea92f717688a9bafda97aef2bc3468188856640b2328c5cea7d03b6a6057e`; it was not applied.
+
+## September 20: bounded SSH investigation and Fixture operator candidate
+
+The workstation route to `s2` includes an `assh`-managed `s1` SSH gateway. Five
+Control-to-Runner short probes passed. Two 25-second quiet first-hop probes and
+two 40-second quiet probes also passed, including a comparison with multiplexing
+disabled on both SSH layers. No global SSH settings were changed. The earlier
+intermittent disconnect was not reproduced or attributed to a proven cause;
+the [SSH diagnostic record](ssh-operator-diagnostics.md) states the coverage and
+journal limitations.
+
+The standalone `fixture_runner_cli` candidate has source SHA-256
+`2d4b5ce5884bfc3ebbe4833ddb885baedb908a16349f2f30af819b4f77d451a3` and was installed
+as a root-owned mode-0644 file under the matching root-owned directory
+`/srv/codex-runner/operator-candidates/2d4b5ce5884bfc3ebbe4833ddb885baedb908a16349f2f30af819b4f77d451a3/`.
+The separate evidence root `/srv/codex-runner/fixture-operator-evidence` was
+provisioned as `codex-runner`-owned mode 0700. It remained empty during read-only
+acceptance. No service wrapper, timer, configuration, or runtime release link was
+replaced; both hosts still referenced `6609484f44e0669c2691bc59658007fb2a900e8d`,
+and the Control Dispatcher timer was observed active.
+
+The real Runner check executed `diagnose` as `codex-runner`, with a clean
+environment, bytecode writes disabled, and the protected current-release imports
+and configuration. Its exact target was Fixture #55,
+`wi_9b395b3c338f78343e99a1a9`, expected HEAD
+`de0af45094026d8cab699ff376fc25c5d1474884`. It returned exit 0,
+`archive_status=archived`, `cleanup_verified=true`, `active_container_count=0`,
+and `state_writes=0`. Before/after SHA-256 comparisons of the configuration,
+exact registry row, and exact archive receipt matched. The runtime release link
+also remained unchanged.
+
+The final local snapshot passed all 661 unit tests in 47.867 seconds, including
+19 new operator tests, plus `compileall` and `git diff --check`. Checks used the
+project's Python 3.12 virtual environment; global Python was unchanged.
+
+Offline acceptance covers actual temporary Git repositories and CLI entry points,
+strict Runner metadata/session/tool/Turn formats, one-time stop with Docker auto
+removal, concurrent attempts, timeout intent with no retry, full-identity replay
+conflicts, hostile Git configuration, read-only dirty/untracked diagnostics,
+nonblocking locks, unsafe paths, and archive/absence storage checks. A targeted
+independent review found no remaining blocker after fixes. This candidate's
+Docker stop was not exercised against a new live model session; Fixture #55's
+earlier ad hoc stop remains the separate live fault evidence, not proof that the
+new entry point was run. No new paid model Turn or GitHub/Slack write was made.
+
+Use the [operator runbook](fixture-runner-operator.md) for explicit fault
+enablement and the separate manual evidence-preservation/recovery path. Unknown
+dirty files are never automatically copied, restored, or deleted by this tool.

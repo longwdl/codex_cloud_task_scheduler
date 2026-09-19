@@ -114,6 +114,8 @@ For the authorized Fixture discard-and-replace path:
    those tracked dirty paths with the bytes from the unchanged expected HEAD. Untracked or unknown
    paths remain blocked; this does not authorize their deletion or cleanup. Do not reset history,
    delete receipts, or change the database. Let normal ARCHIVE_STATUS/ARCHIVE prove the outcome.
+   The [Fixture Runner operator tool](fixture-runner-operator.md) provides bounded read-only
+   diagnosis for the two test repositories; it does not authorize or perform file restoration.
 5. After the cause has been corrected, create a new reviewed Fixture Issue with the current exact
    base SHA, allowed paths, acceptance criteria, and its own identity. If old unmerged changes are
    needed, review and specify them explicitly; do not silently adopt the old branch or session.

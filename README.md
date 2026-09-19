@@ -115,6 +115,8 @@ git diff --check
 - [Implementation, deployment, and acceptance](docs/implementation-deployment-test-plan.md)
 - [Owner preparation checklist](docs/owner-preparation-checklist.md)
 - [Runner authentication and failed-session recovery](docs/runner-auth-and-session-recovery.md)
+- [Operator SSH transport diagnostics](docs/ssh-operator-diagnostics.md)
+- [Fixture Runner fault injection and read-only diagnostics](docs/fixture-runner-operator.md)
 - [Current-schema disaster recovery and exact reclamation](docs/schema18-disaster-recovery-and-runner-reclamation.md)
 - [Higher-value manual canary](docs/higher-value-canary.md)
 - [Live test evidence](docs/live-test-evidence.md)
