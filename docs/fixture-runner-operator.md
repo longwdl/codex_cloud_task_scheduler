@@ -6,12 +6,12 @@ the two authorized repositories, `longwdl/codex-dispatcher-fixture` and
 control surface. It does not update GitHub, SQLite, model configuration, or
 authentication, and it never restores or deletes dirty worktree files.
 
-The September 20 acceptance used a root-owned standalone candidate on the Runner
-at `/srv/codex-runner/operator-candidates/2d4b5ce5884bfc3ebbe4833ddb885baedb908a16349f2f30af819b4f77d451a3/fixture_runner_cli.py`.
-Its filename may replace `-m codex_dispatcher.fixture_runner_cli` in the examples
-when using the protected current release for imports. The ordinary runtime
-remains release `6609484`; this candidate is not a two-host release rollout.
-See the [acceptance record](live-test-evidence.md) for the limited live coverage.
+The September 22 two-host release
+`1c9caad9335ce408ef00698135ca78c66541dd5a` includes this entry point. Fixture #58
+exercised a real identity-bound stop, status/readback, duplicate-stop protection,
+failed-generation pre-claim guard, and normal discard/archive cleanup. The earlier
+September 20 standalone candidate supplied only read-only live coverage. See the
+[acceptance record](live-test-evidence.md) for identities and receipt hashes.
 
 Use this tool only from a reviewed source release on the Runner, as the
 `codex-runner` service account. Root execution is rejected. Keep the protected

@@ -3231,3 +3231,104 @@ new entry point was run. No new paid model Turn or GitHub/Slack write was made.
 Use the [operator runbook](fixture-runner-operator.md) for explicit fault
 enablement and the separate manual evidence-preservation/recovery path. Unknown
 dirty files are never automatically copied, restored, or deleted by this tool.
+
+## September 22: real operator stop and streamed-session correction
+
+Fixture #56 exposed a test setup error: the waiting instruction was in an
+unrecognized heading and therefore absent from the parsed TaskSpec. Its operator
+plan correctly rejected `workspace_head_mismatch` without stopping anything.
+The ordinary implementation and independent Audit instead completed at
+`e7d3681562f26cb4e60104159006e4513226de43`; Draft PR #57 and exact-HEAD Actions run
+`35694383837` passed their completion gates. Root/result Slack receipts were
+delivered. Normal discard closed the PR unmerged and the Issue, then archived
+the Runner workspace. This was not a successful fault injection.
+
+Investigation also reproduced a subprocess streaming defect independently:
+buffered `read(8192)` could withhold a flushed short `thread.started` event until
+EOF or a full buffer. A real child-process handshake regression failed against
+the old code (exit 7) and passed after changing the bounded pipe drain to
+`read1(8192)`. Commit `1c9caad9335ce408ef00698135ca78c66541dd5a`,
+`Deliver flushed subprocess events before exit`, passed 662 local tests,
+compileall, diff checks, and targeted independent review. No global Python was
+changed. The setup error and reproduced buffering defect are separate findings;
+the original failed injection does not isolate one as its sole cause.
+
+The two-host transaction deployed that commit using archive SHA-256
+`3b7bc832bc615261bd12e14d31676999d59db9016887a335256567bc6f526ced`.
+Control and Runner service-account validation passed 662 tests each (93.129 and
+53.813 seconds), with compile and wrapper/unit validation. The prior release
+`6609484f44e0669c2691bc59658007fb2a900e8d` is the rollback reference. The initial
+post-release preflight was `ok=true`, `idle`, with no external writes.
+
+Fixture #58 put the waiting instruction inside the recognized Scope section.
+Its WorkItem `wi_eefe61eac2adcaa57b4bf4ee`, Turn
+`turn_54da247826e5434ab2c893c406d94386`, generation
+`sg_63cab9f2e6b14d45b52ca9afb88751a8`, and real session
+`01a0c7d9-98bb-7c70-a01a-90936f0cabf2` were bound before injection. The current
+release's operator entry point returned `stop_ready`, then `stopped`; `status`
+and a repeated `stop` both returned `already_stopped` with zero state writes.
+The one durable intent and completion receipt remained byte-identical. Their
+SHA-256 values are respectively
+`e08b7183ebb5581347eca56a95c9bda63d19464f869a69269d3c849d3235987b` and
+`228b31a0551cf7c3e89ab33ef79f4befccd10983f7b848b20c4c70a7445b5f05`.
+The bounded observer report remains at
+`/srv/codex-runner/run/fixture-58-operator-check.json`.
+
+Normal Control processing recorded the failed generation and blocked Turn with
+`codex_output_missing_terminal`, and delivered the Slack failure receipt.
+After the maintainer changed blocked to ready, preflight returned
+`session_generation_recovery_required`. Sweep 20241 at
+`2026-09-22T06:45:35.480679+00:00` also blocked with seven GitHub reads, zero
+writes, and zero API failures. The original one Turn/generation remained; no PR
+was created and no new `agent:dispatching` label appeared. Read-only diagnosis
+found baseline HEAD `de0af45094026d8cab699ff376fc25c5d1474884`, zero dirty or
+untracked paths, and zero matching containers. No manual file cleanup was needed.
+
+Normal discard closed Issue #58 and returned `archived`, with archive response
+SHA-256 `a30063b82358175855ab0212850f3a3e2d799dcf83cb7e2a7a839dcb7f9cbb95`.
+Post-archive diagnosis returned `cleanup_verified=true`, zero matching containers,
+and zero writes. Sweep 20246 was idle with four reads and zero writes. The
+immutable operational handoff receipt was recorded at `2026-09-22T06:50:10.128871Z`;
+all five Control timers were enabled/active. Health at
+`2026-09-22T07:05:26.519571+00:00` was integral and healthy with 31 WorkItems,
+29 archives, two retained absence histories, and no active Turns, effective
+blocked WorkItems, pending/ambiguous archives, or unconfirmed bundles. The only
+alerts were the reviewed Control and Runner reclamation plans; neither was applied.
+
+The new protected off-host bundle is
+`/Users/wdl/.codex/disaster-recovery-bundles/20260922T071000Z-1c9caad`.
+Its manifest SHA-256 is
+`87f4fa25488ee5166ebd77e594a80ae5df3e9ac19f2bb259802029177fd6fb26`; the source
+database SHA-256 is
+`e26af64f7bf12fd1013dd1458bd89827ef83da84e62504f9237d6c0b7be4b229`.
+All manifest bytes, the exact release, database integrity/foreign keys, and
+migrations 1–21 passed workstation validation. A new archive made from those
+verified workstation bytes was reimported into the separate Control directory
+`20260922T071000Z-1c9caad-reimported` and validated again. Historical bundles
+were retained; protected transport tar files were removed after verification.
+
+The independent isolated drill passed with `online_state_modified=false`,
+application RTO 169070 milliseconds, and source-backup age 1271 seconds.
+It reconciled 31 WorkItems/Issues, 24 PRs, 29 Runner archives, two absence
+receipts, five provenance-bound Runner-only histories, and 136 Slack receipts
+(54 WorkItem and 82 system). Infrastructure provisioning is outside this RTO.
+Control and Runner rebuild digests were respectively
+`797a350c8ea6d3d7f415ce19795a8ff511b0e2d3a1b0a4b5dd1e4b403fda2f16` and
+`688e844db1b46a2e370b323670f089f102e46f4682db4069772a6c022fa3260a`.
+
+The mode-0600 workstation drill receipt is
+`/Users/wdl/.codex/disaster-recovery-receipts/20260922T071000Z-1c9caad-drill.json`,
+SHA-256 `0cf13aaf399501ca1c2047721ba3c6f905263e5f9d44d48a59af059264abfb8b`.
+The immutable off-host confirmation records
+`wdl-macos:20260922T071000Z-1c9caad`; its corresponding workstation receipt is
+`20260922T071000Z-1c9caad-offhost-confirmation.json` in the same directory,
+SHA-256 `471d9d1ebb5ccbc8107902fceaf96559af649331cea9928560e22d36838bfebd`.
+Both hashes matched their retained Control receipts. Confirmation permits no
+asset deletion.
+
+Final post-confirmation health at `2026-09-22T07:14:38.145552+00:00` remained
+`ok=true`, with zero active Turns, effective blocked WorkItems, pending/ambiguous
+archives, foreign-key violations, and unconfirmed bundles. All five Control
+timers were enabled/active. The two remaining informational reclamation plans
+were not applied. Intermittent SSH transport symptoms remain unresolved; see
+the updated [diagnostic record](ssh-operator-diagnostics.md).

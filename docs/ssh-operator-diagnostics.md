@@ -37,6 +37,24 @@ existing master connections terminated.
 
 ## Collect evidence on recurrence
 
+On September 22, an uncompressed workstation-to-Control release upload failed
+with `lost connection`. The remote file contained 783,360 of the expected
+4,003,840 bytes. After checking the incomplete file's size and digest, a
+command-scoped compressed SCP transfer completed in 9.85 seconds; its remote
+SHA-256 matched the local archive. The protected client trace was retained.
+A bounded Control sshd sample contained a preauthentication connection closure,
+but it could not be bound to the failed transfer. A separate remote
+`journalctl` query itself exceeded a ten-second subprocess timeout while the
+same SSH session successfully returned database metadata. Neither observation
+establishes the failed hop or root cause. Compression is a successful transfer
+workaround in this sample, not a demonstrated SSH repair. Release execution used
+a named systemd job and durable transaction receipt so transport loss would not
+require blindly repeating a deployment.
+Later, a read-only status connection emitted `muxclient: master hello exchange
+failed` before successfully returning the requested unit states with exit 0.
+That identifies another multiplexing-related symptom, not the cause of the
+earlier incomplete transfer.
+
 1. Record UTC start/end, which hop was running, command exit status, expected
    marker presence, and whether the remote operation has its own durable receipt.
    Do not infer that a remote write failed merely because its SSH connection ended.
