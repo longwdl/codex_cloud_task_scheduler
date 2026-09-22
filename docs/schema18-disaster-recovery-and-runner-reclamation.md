@@ -329,6 +329,37 @@ removing it. It writes a mode-`0600` permanent receipt before the first removal 
 target. A partial failure is terminal evidence; do not rerun or edit it. Never translate a plan into
 `rm` globs, `find -delete`, or broad filesystem cleanup.
 
+### September 22 retention review: defer reclamation
+
+The reviewed Control plan
+`4d7f377f606acab84f27eead8f036805b09e9c4ebe1b5b36f4bb6314171d086a`
+contains 14 targets totaling 89,538,560 allocated bytes: five bundles, five DR
+inputs, two historical drill roots, and two old release trees. It protects current
+`1c9caad9335ce408ef00698135ca78c66541dd5a`, rollback
+`6609484f44e0669c2691bc59658007fb2a900e8d`, and their successful reimported
+bundle/drill chains. However, its candidates include the original
+`20260919T180000Z-6609484` and `20260922T071000Z-1c9caad` bundles. Protecting a
+reimported copy does not satisfy the operator's instruction to retain historical
+bundles. This plan must not be applied under that retention instruction.
+
+Runner plan
+`5f9b9cce12d0a54eb4d5ab8a0efa152a772bd1e5ad2f60a08e40a29cd5946447`
+contains only the `0ea55a9eb9c6a4bff5ac171f7d8b637a0753ccc4` and
+`dfdef2ca333b8a49aebe865565e6506c2a7686c9` release trees, totaling 8,736,768
+allocated bytes; it has no image candidates. Both plans passed read-only
+reinspection without asset drift and remain non-authorizing. Control had
+11,962,105,856 available filesystem bytes and Runner 74,260,443,136 bytes, so
+there was no immediate capacity need for deletion. Both were left unapplied.
+
+During this review, `plan --write-plan` / `reclamation-plan --write-plan` were
+mistakenly invoked during an intended read-only inspection. Those operations
+can create immutable plans and a Runner inventory snapshot. They do not update
+the authoritative rollback reference file. Its SHA-256 remained
+`a4c10821745fc73183eada87109b8d8a7a7f9b525fe99d03303a74941e32a06d`, matching
+the release handoff; the reference apply receipt also matched. No asset was
+deleted and no service configuration changed. For a read-only review, inspect
+the existing status/plan and use `recheck`; do not use a write-plan command.
+
 ## Runner release and image reference inventory
 
 After every successful release sweep, backup, restore drill, health check, and timer activation,

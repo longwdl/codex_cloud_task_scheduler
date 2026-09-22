@@ -55,6 +55,31 @@ failed` before successfully returning the requested unit states with exit 0.
 That identifies another multiplexing-related symptom, not the cause of the
 earlier incomplete transfer.
 
+A follow-up on September 22 reproduced one failure at
+`2026-09-22T07:18:53.715807+00:00`: a 4 MiB stdin upload to a read-only remote
+SHA-256 calculator over the default Control connection exited 255 after 0.170
+seconds, with no stderr and no expected checksum. No remote files were written.
+The remaining bounded comparisons were:
+
+| Check | Result |
+|---|---|
+| Same-size data through Control to Runner | Hash matched, exit 0, 13.987 seconds |
+| Control upload with multiplexing disabled on both client/gateway layers | Hash matched, exit 0, 12.993 seconds |
+| Two additional default Control uploads with client debug capture | Hashes matched, exit 0, 9.381 and 10.424 seconds |
+| Default Control connection, 40 seconds quiet | Marker matched, exit 0, 40.345 seconds |
+| Both-layer nonmultiplexed connection, 40 seconds quiet | Marker matched, exit 0, 42.695 seconds |
+
+The client reported an existing Control master after the failed upload. Debug
+traces from the successful retries confirmed reuse of that master. Bounded
+Control/Runner sshd samples returned no reset, broken-pipe, key-exchange, or
+session-limit error; their sparse records do not exclude a gateway or client
+failure. No gateway server journal was available in this investigation. These
+results establish an intermittent failure on the workstation-to-Control route,
+but do not isolate multiplexing, the gateway, or the network as its cause.
+Keep using durable remote job receipts and verified transfer hashes. A
+command-scoped comparison that disables both layers is a diagnostic option;
+there is insufficient evidence to change global SSH configuration.
+
 1. Record UTC start/end, which hop was running, command exit status, expected
    marker presence, and whether the remote operation has its own durable receipt.
    Do not infer that a remote write failed merely because its SSH connection ended.
