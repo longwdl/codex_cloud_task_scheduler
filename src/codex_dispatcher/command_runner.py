@@ -303,7 +303,9 @@ def _drain_bounded(
     partial_line = bytearray()
     observe_lines = line_hook is not None
     try:
-        while chunk := stream.read(8192):
+        # Popen pipes are buffered readers. read() can wait for the entire
+        # requested size, delaying a short flushed session event until EOF.
+        while chunk := stream.read1(8192):
             remaining = maximum - len(buffer)
             if remaining > 0:
                 buffer.extend(chunk[:remaining])

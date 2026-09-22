@@ -156,6 +156,36 @@ class CommandRunnerTests(unittest.TestCase):
         self.assertEqual([b"first", b"second", b"final"], observed)
         self.assertIsNone(result.error)
 
+    def test_stdout_hook_receives_short_flushed_line_before_process_exits(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            acknowledgement = Path(temp_dir) / "observed"
+
+            def acknowledge(line: bytes) -> None:
+                if line == b"thread.started":
+                    acknowledgement.write_bytes(b"observed")
+
+            result = run_binary_command(
+                [
+                    sys.executable,
+                    "-c",
+                    "import pathlib,sys,time\n"
+                    "ack=pathlib.Path(sys.argv[1])\n"
+                    "print('thread.started', flush=True)\n"
+                    "deadline=time.monotonic()+3\n"
+                    "while not ack.exists() and time.monotonic()<deadline:\n"
+                    "    time.sleep(0.01)\n"
+                    "sys.exit(0 if ack.exists() else 7)\n",
+                    str(acknowledgement),
+                ],
+                timeout_seconds=5,
+                stdout_line_hook=acknowledge,
+            )
+
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(b"thread.started\n", result.stdout)
+        self.assertIsNone(result.error)
+        self.assertFalse(result.timed_out)
+
     def test_stdout_line_hook_failure_does_not_stop_drain_or_process(self) -> None:
         observed = []
 
