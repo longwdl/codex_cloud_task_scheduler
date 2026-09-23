@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import Mapping
 from urllib.parse import urlsplit
 
+from codex_dispatcher.runner_policy import AgentRuntimePolicy
 from codex_dispatcher.work_items import validate_session_id
 
 
@@ -17,17 +18,6 @@ _FIXED_AUTH_CONFIG = (
     "-c",
     'cli_auth_credentials_store="file"',
 )
-_RUNNER_POLICY_CONFIG = (
-    "--strict-config",
-    "--model",
-    "gpt-5.6-sol",
-    "-c",
-    'model_reasoning_effort="xhigh"',
-    "--enable",
-    "multi_agent",
-)
-
-
 @dataclass(frozen=True, slots=True)
 class CodexInvocationPlan:
     argv: tuple[str, ...]
@@ -65,6 +55,7 @@ def build_codex_invocation(
     session_id: str | None = None,
     egress_proxy_url: str | None = None,
     enable_runner_policy: bool = False,
+    agent_policy: AgentRuntimePolicy | None = None,
 ) -> CodexInvocationPlan:
     """Build fixed argv; the prompt is deliberately absent and must use standard input."""
     _validate_paths(
@@ -77,7 +68,13 @@ def build_codex_invocation(
     )
     if not isinstance(enable_runner_policy, bool):
         raise ValueError("enable_runner_policy must be a bool")
-    policy = _RUNNER_POLICY_CONFIG if enable_runner_policy else ()
+    if agent_policy is not None and not isinstance(agent_policy, AgentRuntimePolicy):
+        raise ValueError("agent_policy must be a resolved AgentRuntimePolicy")
+    if agent_policy is not None and not enable_runner_policy:
+        raise ValueError("resolved agent policy requires runner policy mode")
+    policy = ("--strict-config",) if enable_runner_policy else ()
+    if agent_policy is not None and agent_policy.config_profile is not None:
+        policy += ("--profile", agent_policy.config_profile)
     common = (
         "--json",
         "--dangerously-bypass-approvals-and-sandbox",

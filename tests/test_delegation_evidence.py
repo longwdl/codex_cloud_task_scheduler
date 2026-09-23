@@ -30,7 +30,7 @@ def policy_bundle(root: Path) -> PolicyBundle:
     return PolicyBundle.load(destination, manifest["policy_digest"])
 
 
-def create_state_database(codex_home: Path, *, agent_role: str = "terra_worker") -> Path:
+def create_state_database(codex_home: Path, *, agent_role: str = "luna_worker") -> Path:
     database = codex_home / "state_5.sqlite"
     with closing(sqlite3.connect(database)) as connection:
         connection.execute(
@@ -44,7 +44,7 @@ def create_state_database(codex_home: Path, *, agent_role: str = "terra_worker")
         )
         connection.execute(
             "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?)",
-            (ROOT_SESSION, "0.147.0", None, "gpt-5.6-sol", "xhigh", 100),
+            (ROOT_SESSION, "0.147.0", None, "gpt-6-sol", "medium", 100),
         )
         connection.execute(
             "INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?)",
@@ -52,7 +52,7 @@ def create_state_database(codex_home: Path, *, agent_role: str = "terra_worker")
                 CHILD_SESSION,
                 "0.147.0",
                 agent_role,
-                "gpt-5.6-terra",
+                "gpt-6-luna",
                 "medium",
                 42,
             ),
@@ -67,12 +67,38 @@ def create_state_database(codex_home: Path, *, agent_role: str = "terra_worker")
 
 
 class DelegationEvidenceTests(unittest.TestCase):
+    def test_audit_requires_high_root_and_no_delegation(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root = Path(temp_dir)
+            codex_home = root / "codex-home"
+            codex_home.mkdir(mode=0o700)
+            policy = policy_bundle(root).runtime_policy("audit")
+            baseline = snapshot_delegations(codex_home, database_required=False)
+            create_state_database(codex_home)
+            with closing(sqlite3.connect(codex_home / "state_5.sqlite")) as connection:
+                connection.execute("UPDATE threads SET reasoning_effort = 'high' WHERE id = ?", (ROOT_SESSION,))
+                connection.commit()
+            with self.assertRaisesRegex(DelegationEvidenceError, "forbidden"):
+                observe_delegation_receipt(
+                    codex_home, baseline=baseline,
+                    root_thread_id=ROOT_SESSION, policy=policy,
+                )
+            with closing(sqlite3.connect(codex_home / "state_5.sqlite")) as connection:
+                connection.execute("DELETE FROM thread_spawn_edges")
+                connection.commit()
+            receipt = observe_delegation_receipt(
+                codex_home, baseline=baseline,
+                root_thread_id=ROOT_SESSION, policy=policy,
+            )
+            self.assertEqual("high", receipt.root_reasoning_effort)
+            self.assertEqual((), receipt.agents)
+
     def test_observes_only_new_policy_verified_metadata(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
             root = Path(temp_dir)
             codex_home = root / "codex-home"
             codex_home.mkdir(mode=0o700)
-            policy = policy_bundle(root).runtime_policy()
+            policy = policy_bundle(root).runtime_policy("implementation")
             baseline = snapshot_delegations(codex_home, database_required=False)
             create_state_database(codex_home)
 
@@ -83,10 +109,10 @@ class DelegationEvidenceTests(unittest.TestCase):
                 policy=policy,
             )
 
-            self.assertEqual("gpt-5.6-sol", receipt.root_model)
+            self.assertEqual("gpt-6-sol", receipt.root_model)
             self.assertEqual(1, len(receipt.agents))
-            self.assertEqual("terra_worker", receipt.agents[0].agent_name)
-            self.assertEqual("gpt-5.6-terra", receipt.agents[0].model)
+            self.assertEqual("luna_worker", receipt.agents[0].agent_name)
+            self.assertEqual("gpt-6-luna", receipt.agents[0].model)
             self.assertEqual(42, receipt.agents[0].tokens_used)
             self.assertEqual(
                 receipt,
@@ -113,7 +139,7 @@ class DelegationEvidenceTests(unittest.TestCase):
             root = Path(temp_dir)
             codex_home = root / "codex-home"
             codex_home.mkdir(mode=0o700)
-            policy = policy_bundle(root).runtime_policy()
+            policy = policy_bundle(root).runtime_policy("implementation")
             create_state_database(codex_home, agent_role="unknown_worker")
             with self.assertRaisesRegex(DelegationEvidenceError, "profile"):
                 observe_delegation_receipt(
@@ -127,7 +153,7 @@ class DelegationEvidenceTests(unittest.TestCase):
 
             with closing(sqlite3.connect(codex_home / "state_5.sqlite")) as connection:
                 connection.execute(
-                    "UPDATE threads SET agent_role = 'terra_worker' WHERE id = ?",
+                    "UPDATE threads SET agent_role = 'luna_worker' WHERE id = ?",
                     (CHILD_SESSION,),
                 )
                 connection.commit()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from codex_dispatcher.executors.codex_cli import (
     build_codex_invocation,
     build_codex_login_status_invocation,
 )
+from codex_dispatcher.runner_policy import PolicyBundle
 
 
 SESSION = "123e4567-e89b-12d3-a456-426614174000"
@@ -66,35 +68,33 @@ class CodexCliInvocationTests(unittest.TestCase):
         self.assertNotIn("--last", plan.argv)
         self.assertNotIn("--ephemeral", plan.argv)
 
-    def test_runner_policy_flags_are_fixed_before_exec_for_start_and_resume(self) -> None:
-        for session_id in (None, SESSION):
-            with self.subTest(session_id=session_id):
-                plan = build_codex_invocation(
-                    codex_path=Path("/usr/local/bin/codex"),
-                    repository_directory=Path("/srv/tasks/issue-1/repo"),
-                    codex_home=CODEX_HOME,
-                    output_schema=Path("/srv/codex-runner/etc/result.schema.json"),
-                    session_id=session_id,
-                    enable_runner_policy=True,
-                )
-                self.assertEqual(
-                    (
-                        "--strict-config",
-                        "--model",
-                        "gpt-5.6-sol",
-                        "-c",
-                        'model_reasoning_effort="xhigh"',
-                        "--enable",
-                        "multi_agent",
-                    ),
-                    plan.argv[5:12],
-                )
-                self.assertLess(plan.argv.index("--strict-config"), plan.argv.index("exec"))
-                if session_id is None:
-                    self.assertNotIn("resume", plan.argv)
-                else:
-                    resume = plan.argv.index("resume")
-                    self.assertEqual(SESSION, plan.argv[resume + 1])
+    def test_runner_policy_profile_follows_resolved_generation_role(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "config" / "runner-codex-policy"
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        bundle = PolicyBundle.load(root, manifest["policy_digest"])
+        for role, expected_profile in (("implementation", None), ("ci_repair", "repair"), ("audit", "audit")):
+            for session_id in (None, SESSION):
+                with self.subTest(role=role, session_id=session_id):
+                    policy = bundle.runtime_policy(role)
+                    plan = build_codex_invocation(
+                        codex_path=Path("/usr/local/bin/codex"),
+                        repository_directory=Path("/srv/tasks/issue-1/repo"),
+                        codex_home=CODEX_HOME,
+                        output_schema=Path("/srv/codex-runner/etc/result.schema.json"),
+                        session_id=session_id,
+                        enable_runner_policy=True,
+                        agent_policy=policy,
+                    )
+                    expected_flags = ("--strict-config",) if expected_profile is None else ("--strict-config", "--profile", expected_profile)
+                    self.assertEqual(expected_flags, plan.argv[5:5 + len(expected_flags)])
+                    self.assertNotIn("--model", plan.argv)
+                    self.assertNotIn("multi_agent", plan.argv)
+                    self.assertLess(plan.argv.index("--strict-config"), plan.argv.index("exec"))
+                    if session_id is None:
+                        self.assertNotIn("resume", plan.argv)
+                    else:
+                        resume = plan.argv.index("resume")
+                        self.assertEqual(SESSION, plan.argv[resume + 1])
 
     def test_proxy_plan_sets_only_one_fixed_credential_free_endpoint(self) -> None:
         plan = build_codex_invocation(

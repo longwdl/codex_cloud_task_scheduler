@@ -538,7 +538,7 @@ class RunnerTurnExecutor:
                     session_id=request.session_id,
                 )
             if active_policy is not None:
-                agent_runtime_policy = active_policy.runtime_policy()
+                agent_runtime_policy = active_policy.runtime_policy(request.session_role)
                 delegation_baseline = snapshot_delegations(
                     context.codex_home,
                     database_required=request.operation is RunnerOperation.RESUME,
@@ -563,6 +563,8 @@ class RunnerTurnExecutor:
                 ),
                 session_generation=request.session_generation if is_v2 else None,
                 agent_policy_digest=request.agent_policy_digest if is_v2 else None,
+                generation_role=request.session_role,
+                agent_runtime_policy=agent_runtime_policy,
             )
             if is_v2:
                 receipt_hook = _ThreadStartedReceiptHook(request, context)

@@ -307,6 +307,8 @@ def observe_delegation_receipt(
             if edge not in baseline.edges
             or current_tokens[edge[1]] > baseline_tokens[edge[1]]
         }
+        if not policy.delegation_allowed and observed_edges:
+            raise DelegationEvidenceError("delegation is forbidden for this generation role")
         observed: list[DelegatedAgent] = []
         for parent_thread_id, child_thread_id in sorted(observed_edges):
             if parent_thread_id != root_thread_id:

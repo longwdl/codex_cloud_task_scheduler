@@ -1,13 +1,13 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "codex_version": "0.147.0",
-  "policy_digest": "ac698244f3546e13574118fe72b132250353f42d79d614fe059d445e5449a946",
+  "policy_digest": "103884dd4f02910a1533a6c1feb06a3a5df384bc477c5aab4f9fda14c3d4976a",
   "files": {
-    "agents/luna-worker.toml": "b4a89aa9ee2b9f9aec937c16efc4f2dffc0796ce7d0040fa77c90ff3c5cbf108",
-    "agents/sol-specialist.toml": "f9166c1305f7d038ff230a805bd9d4cae8d085540fc21b538a019b0c129b5856",
-    "agents/spark-worker.toml": "adc29aff2efc5be2075a508f96340b4c8712bfd5fe299229d9ba09ac95d431ba",
-    "agents/terra-worker.toml": "4bd188f5bc097e9cb94ac9ee0ed3d70865a858cde1966f28e681d23b8ffb2f85",
-    "config.toml": "e3653f3ced3da2024fda5d22f00b667e006bec751bcca224df9d794b26960c0c",
-    "requirements.toml": "e5c03e5d09b2481a64c2a5cc72dabe47ca48bfa5f3d5bfc2debc24d2ddedac67"
+    "config.toml": "2ccaf1a1c1193e2b223be2138509fb87a7fe8d4054625bc9febd69fe981b0abc",
+    "repair.config.toml": "f5d1d58dd8b9c2e732f511799449df06bfb293c1db8180454f070cf9f5516aa7",
+    "audit.config.toml": "cb15d9bd2dcf549baa4afffe0b416505934719993800fc98f6f4752379f33d5a",
+    "requirements.toml": "e5c03e5d09b2481a64c2a5cc72dabe47ca48bfa5f3d5bfc2debc24d2ddedac67",
+    "agents/luna-worker.toml": "6f70cb053ebe2f8a2f0211b9bab7dc19507ac23d664fb8143e11cd4bd2b45202",
+    "agents/sol-specialist.toml": "a2e597dd954ebd1dd785772a931d29d14615e4b0e1e4316484baf452915fe40d"
   }
 }

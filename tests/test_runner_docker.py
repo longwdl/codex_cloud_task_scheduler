@@ -160,20 +160,21 @@ if "refresh auth" in prompt:
 if "corrupt auth" in prompt:
     auth_file.write_bytes(b"not-json")
 session = codex[codex.index("resume") + 1] if "resume" in codex else {SESSION!r}
+root_effort = "high" if "--profile" in codex and codex[codex.index("--profile") + 1] in {{"repair", "audit"}} else "medium"
 with sqlite3.connect(state_database) as state:
     state.execute(
         "INSERT OR REPLACE INTO threads "
         "(id, cli_version, agent_role, model, reasoning_effort, tokens_used) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (session, "0.147.0", None, "gpt-5.6-sol", "xhigh", 100),
+        (session, "0.147.0", None, "gpt-6-sol", root_effort, 100),
     )
-    if "delegate terra" in prompt:
+    if "delegate luna" in prompt:
         child = "223e4567-e89b-12d3-a456-426614174000"
         state.execute(
             "INSERT OR REPLACE INTO threads "
             "(id, cli_version, agent_role, model, reasoning_effort, tokens_used) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (child, "0.147.0", "terra_worker", "gpt-5.6-terra", "medium", 42),
+            (child, "0.147.0", "luna_worker", "gpt-6-luna", "medium", 42),
         )
         state.execute(
             "INSERT OR REPLACE INTO thread_spawn_edges "
@@ -1051,7 +1052,7 @@ class RunnerDockerExecutionTests(unittest.TestCase):
                 policy_bundle=policy,
             )
             assert listener is not None
-            prompt = b"delegate terra"
+            prompt = b"delegate luna"
             try:
                 with patch(
                     "codex_dispatcher.runner_docker._expected_rootless_socket",
@@ -1073,10 +1074,10 @@ class RunnerDockerExecutionTests(unittest.TestCase):
             self.assertEqual(RunnerTurnRemoteState.FINISHED, reply.state)
             self.assertIsNotNone(reply.delegation_receipt)
             assert reply.delegation_receipt is not None
-            self.assertEqual("gpt-5.6-sol", reply.delegation_receipt.root_model)
+            self.assertEqual("gpt-6-sol", reply.delegation_receipt.root_model)
             self.assertEqual(1, len(reply.delegation_receipt.agents))
             self.assertEqual(
-                "terra_worker", reply.delegation_receipt.agents[0].agent_name
+                "luna_worker", reply.delegation_receipt.agents[0].agent_name
             )
             self.assertEqual(42, reply.delegation_receipt.agents[0].tokens_used)
 

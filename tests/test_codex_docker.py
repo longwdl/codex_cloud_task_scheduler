@@ -233,7 +233,7 @@ class DockerCodexPlanTests(unittest.TestCase):
             audit_schema_plan.argv,
         )
 
-    def test_policy_bundle_mounts_exact_three_readonly_targets(self) -> None:
+    def test_policy_bundle_mounts_profiles_readonly(self) -> None:
         policy_root = ROOT / "config" / "runner-codex-policy"
         manifest = json.loads((policy_root / "manifest.json").read_text(encoding="utf-8"))
         policy = PolicyBundle.load(policy_root, manifest["policy_digest"])
@@ -256,26 +256,42 @@ class DockerCodexPlanTests(unittest.TestCase):
         )
         mounts = tuple(item for item in plan.argv if item.startswith("--mount="))
 
-        self.assertEqual(8, len(mounts))
+        self.assertEqual(10, len(mounts))
         self.assertEqual(
             f"--mount=type=bind,source={policy.config_path},"
             "target=/codex-home/config.toml,readonly",
             mounts[5],
         )
         self.assertEqual(
-            f"--mount=type=bind,source={policy.agents_path},"
-            "target=/codex-home/agents,readonly",
+            f"--mount=type=bind,source={policy.profile_path('repair')},"
+            "target=/codex-home/repair.config.toml,readonly",
             mounts[6],
         )
         self.assertEqual(
-            f"--mount=type=bind,source={policy.requirements_path},"
-            "target=/etc/codex/requirements.toml,readonly",
+            f"--mount=type=bind,source={policy.profile_path('audit')},"
+            "target=/codex-home/audit.config.toml,readonly",
             mounts[7],
         )
+        self.assertIn("target=/codex-home/agents,readonly", mounts[8])
+        self.assertIn("target=/etc/codex/requirements.toml,readonly", mounts[9])
         self.assertIn("--strict-config", plan.argv)
-        self.assertIn("gpt-5.6-sol", plan.argv)
-        self.assertIn("multi_agent", plan.argv)
+        self.assertNotIn("--model", plan.argv)
+        self.assertNotIn("multi_agent", plan.argv)
         self.assertFalse(any(f"source={policy.root},target=" in item for item in mounts))
+
+        for role, expected_profile in (("ci_repair", "repair"), ("audit", "audit")):
+            role_plan = build_docker_codex_plan(
+                runtime=runtime(), work_item_id=WORK_ITEM, turn_id=TURN,
+                codex_path=CODEX_PATH,
+                repository=Path("/srv/codex-runner/work-items/owner__repo/issue-42/repo"),
+                codex_home=Path("/srv/codex-runner/work-items/owner__repo/issue-42/runner-state/codex-home"),
+                auth_file=Path("/srv/codex-runner/work-items/owner__repo/issue-42/runner-state/codex-home/auth.json"),
+                output_schema=Path("/srv/codex-runner/etc/agent-result.schema.json"),
+                session_id=None, policy_bundle=policy, generation_role=role,
+                repository_readonly=role == "audit",
+            )
+            self.assertIn("--profile", role_plan.argv)
+            self.assertEqual(expected_profile, role_plan.argv[role_plan.argv.index("--profile") + 1])
 
     def test_v2_turn_uses_generation_home_and_exact_identity_labels(self) -> None:
         policy_root = ROOT / "config" / "runner-codex-policy"

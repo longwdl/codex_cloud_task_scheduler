@@ -24,7 +24,7 @@ class PolicyBundleError(ValueError):
 
 _MAX_POLICY_FILE_BYTES = 128 * 1024
 _MANIFEST_FILE = "manifest.json"
-_REQUIRED_FILES = frozenset(
+_V1_REQUIRED_FILES = frozenset(
     {
         "config.toml",
         "requirements.toml",
@@ -34,6 +34,25 @@ _REQUIRED_FILES = frozenset(
         "agents/sol-specialist.toml",
     }
 )
+_V2_REQUIRED_FILES = frozenset(
+    {
+        "config.toml",
+        "repair.config.toml",
+        "audit.config.toml",
+        "requirements.toml",
+        "agents/luna-worker.toml",
+        "agents/sol-specialist.toml",
+    }
+)
+_GENERATION_PROFILES = {
+    "implementation": None,
+    "ci_repair": "repair",
+    "audit": "audit",
+}
+_V2_AGENT_CONTRACT = {
+    "luna_worker": ("gpt-6-luna", "medium"),
+    "sol_specialist": ("gpt-6-sol", "high"),
+}
 _SHA256_LENGTH = 64
 _REASONING_EFFORTS = frozenset(
     {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
@@ -53,6 +72,9 @@ class AgentRuntimePolicy:
     primary_model: str
     primary_reasoning_effort: str
     profiles: tuple[AgentPolicyProfile, ...]
+    config_profile: str | None = None
+    delegation_allowed: bool = True
+    bundle_schema_version: int = 1
 
     @property
     def profiles_by_name(self) -> dict[str, AgentPolicyProfile]:
@@ -84,6 +106,11 @@ class PolicyBundle:
     def requirements_path(self) -> Path:
         return self.root / "requirements.toml"
 
+    def profile_path(self, profile: str) -> Path:
+        if profile not in {"repair", "audit"}:
+            raise PolicyBundleError("generation profile is invalid")
+        return self.root / f"{profile}.config.toml"
+
     @property
     def agents_path(self) -> Path:
         return self.root / "agents"
@@ -94,20 +121,6 @@ class PolicyBundle:
         _trusted_parents(self.root, "policy_root")
         agents = self.agents_path
         _trusted_directory(agents, "policy agents directory")
-        try:
-            root_entries = {entry.name for entry in self.root.iterdir()}
-            agent_entries = {entry.name for entry in agents.iterdir()}
-        except OSError as exc:
-            raise PolicyBundleError("policy bundle is unavailable") from exc
-        if root_entries != {"config.toml", "requirements.toml", "agents", _MANIFEST_FILE}:
-            raise PolicyBundleError("policy bundle contains unknown files")
-        if agent_entries != {
-            "spark-worker.toml",
-            "luna-worker.toml",
-            "terra-worker.toml",
-            "sol-specialist.toml",
-        }:
-            raise PolicyBundleError("policy agents contain unknown files")
         manifest_path = self.root / _MANIFEST_FILE
         manifest = _read_json_file(manifest_path, "policy manifest")
         if set(manifest) != {
@@ -117,17 +130,40 @@ class PolicyBundle:
             "files",
         }:
             raise PolicyBundleError("policy manifest fields are invalid")
-        if manifest["schema_version"] != 1 or manifest["codex_version"] != "0.147.0":
+        schema_version = manifest["schema_version"]
+        if (
+            type(schema_version) is not int
+            or schema_version not in {1, 2}
+            or manifest["codex_version"] != "0.147.0"
+        ):
             raise PolicyBundleError("policy manifest version is unsupported")
+        required_files = _V1_REQUIRED_FILES if schema_version == 1 else _V2_REQUIRED_FILES
+        try:
+            root_entries = {entry.name for entry in self.root.iterdir()}
+            agent_entries = {entry.name for entry in agents.iterdir()}
+        except OSError as exc:
+            raise PolicyBundleError("policy bundle is unavailable") from exc
+        expected_root = {name for name in required_files if "/" not in name} | {
+            "agents", _MANIFEST_FILE
+        }
+        expected_agents = {
+            name.removeprefix("agents/")
+            for name in required_files
+            if name.startswith("agents/")
+        }
+        if root_entries != expected_root:
+            raise PolicyBundleError("policy bundle contains unknown files")
+        if agent_entries != expected_agents:
+            raise PolicyBundleError("policy agents contain unknown files")
         manifest_digest = _digest(manifest["policy_digest"])
         if manifest_digest != self.policy_digest:
             raise PolicyBundleError("policy digest does not match manifest")
         file_hashes = manifest["files"]
-        if not isinstance(file_hashes, dict) or set(file_hashes) != _REQUIRED_FILES:
+        if not isinstance(file_hashes, dict) or set(file_hashes) != required_files:
             raise PolicyBundleError("policy manifest file set is invalid")
 
         observed: dict[str, str] = {}
-        for relative_path in sorted(_REQUIRED_FILES):
+        for relative_path in sorted(required_files):
             expected_hash = _digest(file_hashes[relative_path])
             target = self.root / relative_path
             _trusted_regular_file(target, f"policy file {relative_path}")
@@ -138,17 +174,24 @@ class PolicyBundle:
         if calculated_policy_digest != manifest_digest:
             raise PolicyBundleError("policy manifest digest is invalid")
 
-    def runtime_policy(self) -> AgentRuntimePolicy:
-        """Return the exact primary and named-agent execution contract."""
+    def runtime_policy(self, generation_role: str) -> AgentRuntimePolicy:
+        """Return the effective root and child execution contract for one role."""
         self.validate()
+        if not isinstance(generation_role, str) or generation_role not in _GENERATION_PROFILES:
+            raise PolicyBundleError("generation role is unsupported")
         manifest = _read_json_file(self.root / _MANIFEST_FILE, "policy manifest")
+        schema_version = manifest["schema_version"]
         config = _read_toml_file(self.config_path, "policy config")
+        profile = _GENERATION_PROFILES[generation_role] if schema_version == 2 else None
+        if profile is not None:
+            config = {**config, **_read_toml_file(self.profile_path(profile), "generation profile")}
         primary_model = _bounded_policy_text(config.get("model"), "primary model")
         primary_effort = _reasoning_effort(
             config.get("model_reasoning_effort"), "primary reasoning effort"
         )
         profiles: list[AgentPolicyProfile] = []
-        for relative_path in sorted(_REQUIRED_FILES):
+        required_files = _V1_REQUIRED_FILES if schema_version == 1 else _V2_REQUIRED_FILES
+        for relative_path in sorted(required_files):
             if not relative_path.startswith("agents/"):
                 continue
             table = _read_toml_file(self.root / relative_path, "agent profile")
@@ -165,11 +208,28 @@ class PolicyBundle:
         names = {profile.name for profile in profiles}
         if len(names) != len(profiles):
             raise PolicyBundleError("policy agent names must be unique")
+        if schema_version == 2:
+            expected_effort = "medium" if generation_role == "implementation" else "high"
+            if (primary_model, primary_effort) != ("gpt-6-sol", expected_effort):
+                raise PolicyBundleError("generation root model or effort is unsupported")
+            actual_agents = {
+                item.name: (item.model, item.reasoning_effort) for item in profiles
+            }
+            if actual_agents != _V2_AGENT_CONTRACT:
+                raise PolicyBundleError("generation agent profiles are unsupported")
+        delegation_allowed = schema_version == 1 or generation_role != "audit"
+        if not delegation_allowed:
+            agents_config = config.get("agents")
+            if not isinstance(agents_config, dict) or agents_config.get("enabled") is not False:
+                raise PolicyBundleError("audit profile must disable delegation")
         return AgentRuntimePolicy(
             codex_version=manifest["codex_version"],
             primary_model=primary_model,
             primary_reasoning_effort=primary_effort,
             profiles=tuple(sorted(profiles, key=lambda profile: profile.name)),
+            config_profile=profile,
+            delegation_allowed=delegation_allowed,
+            bundle_schema_version=schema_version,
         )
 
 

@@ -20,7 +20,7 @@ from codex_dispatcher.work_items import (
     validate_turn_id,
     validate_work_item_id,
 )
-from codex_dispatcher.runner_policy import PolicyBundle
+from codex_dispatcher.runner_policy import AgentRuntimePolicy, PolicyBundle
 
 
 CONTAINER_CODEX_HOME = Path("/codex-home")
@@ -176,6 +176,8 @@ def build_docker_codex_plan(
     session_generation_id: str | None = None,
     session_generation: int | None = None,
     agent_policy_digest: str | None = None,
+    generation_role: str = "implementation",
+    agent_runtime_policy: AgentRuntimePolicy | None = None,
 ) -> DockerCodexPlan:
     """Build a fixed Docker invocation; the Prompt remains standard-input only."""
     proxy_url = _required_proxy_url(runtime)
@@ -218,7 +220,14 @@ def build_docker_codex_plan(
     if policy_bundle is not None:
         if not isinstance(policy_bundle, PolicyBundle):
             raise TypeError("policy_bundle must be a PolicyBundle or None")
-        policy_bundle.validate()
+        resolved_policy = policy_bundle.runtime_policy(generation_role)
+        if agent_runtime_policy is not None and agent_runtime_policy != resolved_policy:
+            raise ValueError("resolved agent policy conflicts with policy bundle")
+        agent_runtime_policy = resolved_policy
+        if generation_role == "audit" and not repository_readonly:
+            raise ValueError("audit repository must be read-only")
+    elif agent_runtime_policy is not None:
+        raise ValueError("resolved agent policy requires a policy bundle")
     inner = build_codex_invocation(
         codex_path=CONTAINER_CODEX_PATH,
         repository_directory=CONTAINER_REPOSITORY,
@@ -227,7 +236,23 @@ def build_docker_codex_plan(
         session_id=session_id,
         egress_proxy_url=proxy_url,
         enable_runner_policy=policy_bundle is not None,
+        agent_policy=agent_runtime_policy,
     )
+    profile_mounts: tuple[str, ...] = ()
+    if policy_bundle is not None and agent_runtime_policy is not None:
+        if agent_runtime_policy.bundle_schema_version == 2:
+            profile_mounts = (
+                _mount(
+                    policy_bundle.profile_path("repair"),
+                    CONTAINER_CODEX_HOME / "repair.config.toml",
+                    readonly=True,
+                ),
+                _mount(
+                    policy_bundle.profile_path("audit"),
+                    CONTAINER_CODEX_HOME / "audit.config.toml",
+                    readonly=True,
+                ),
+            )
     argv = (
         *_docker_prefix(runtime, f"codex-{turn_id}", labels=generation_labels),
         _mount(codex_path, CONTAINER_CODEX_PATH, readonly=True),
@@ -246,6 +271,7 @@ def build_docker_codex_plan(
         *(
             (
                 _mount(policy_bundle.config_path, CONTAINER_CODEX_HOME / "config.toml", readonly=True),
+                *profile_mounts,
                 _mount(policy_bundle.agents_path, CONTAINER_CODEX_HOME / "agents", readonly=True),
                 _mount(policy_bundle.requirements_path, CONTAINER_REQUIREMENTS, readonly=True),
             )
