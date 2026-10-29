@@ -67,6 +67,44 @@ def create_state_database(codex_home: Path, *, agent_role: str = "luna_worker") 
 
 
 class DelegationEvidenceTests(unittest.TestCase):
+    def test_codex_0165_observation_is_supported_and_unknown_version_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root = Path(temp_dir)
+            codex_home = root / "codex-home"
+            codex_home.mkdir(mode=0o700)
+            source = Path(__file__).resolve().parents[1] / "config" / "runner-codex-policy"
+            destination = root / "policy"
+            shutil.copytree(source, destination)
+            manifest_path = destination / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["codex_version"] = "0.165.0"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            policy = PolicyBundle.load(destination, manifest["policy_digest"]).runtime_policy(
+                "implementation"
+            )
+            baseline = snapshot_delegations(codex_home, database_required=False)
+            create_state_database(codex_home)
+            with closing(sqlite3.connect(codex_home / "state_5.sqlite")) as connection:
+                connection.execute("UPDATE threads SET cli_version = '0.165.0'")
+                connection.commit()
+
+            receipt = observe_delegation_receipt(
+                codex_home,
+                baseline=baseline,
+                root_thread_id=ROOT_SESSION,
+                policy=policy,
+            )
+            self.assertEqual("0.165.0", receipt.codex_version)
+            self.assertEqual(
+                receipt,
+                parse_delegation_receipt(delegation_receipt_to_mapping(receipt)),
+            )
+            payload = delegation_receipt_to_mapping(receipt)
+            for unsupported in ("9.999.0", ["0.165.0"]):
+                payload["codex_version"] = unsupported
+                with self.assertRaisesRegex(DelegationEvidenceError, "version"):
+                    parse_delegation_receipt(payload)
+
     def test_audit_requires_high_root_and_no_delegation(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
             root = Path(temp_dir)

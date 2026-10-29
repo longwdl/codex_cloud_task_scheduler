@@ -134,7 +134,8 @@ class PolicyBundle:
         if (
             type(schema_version) is not int
             or schema_version not in {1, 2}
-            or manifest["codex_version"] != "0.147.0"
+            or not isinstance(manifest["codex_version"], str)
+            or manifest["codex_version"] not in ("0.147.0", "0.165.0")
         ):
             raise PolicyBundleError("policy manifest version is unsupported")
         required_files = _V1_REQUIRED_FILES if schema_version == 1 else _V2_REQUIRED_FILES

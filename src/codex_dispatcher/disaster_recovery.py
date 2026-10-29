@@ -42,7 +42,11 @@ from codex_dispatcher.work_items import WorkItemState, validate_work_item_id
 
 _SCHEMA_VERSION = 3
 _BUNDLE_SCHEMA_VERSION = 1
-_EXPECTED_DATABASE_SCHEMA = tuple(range(1, 22))
+_EXPECTED_DATABASE_SCHEMA = tuple(range(1, 23))
+_SUPPORTED_DATABASE_SCHEMAS = {
+    tuple(range(1, 22)),
+    _EXPECTED_DATABASE_SCHEMA,
+}
 _RELEASE_FILES = (
     "scripts/codex-dispatcher-v1",
     "scripts/codex-dispatcher-backup-v1",
@@ -121,6 +125,7 @@ class DisasterRecoveryResult:
     previous_control_commit: str
     previous_runner_commit: str
     restored_database_sha256: str
+    database_schema_migrations: tuple[int, ...]
     rebuild_manifest_sha256: str
     runner_rebuild_manifest_sha256: str
     work_item_count: int
@@ -156,7 +161,7 @@ class DisasterRecoveryResult:
             "restored_database_sha256": self.restored_database_sha256,
             "rebuild_manifest_sha256": self.rebuild_manifest_sha256,
             "runner_rebuild_manifest_sha256": self.runner_rebuild_manifest_sha256,
-            "database_schema_migrations": list(_EXPECTED_DATABASE_SCHEMA),
+            "database_schema_migrations": list(self.database_schema_migrations),
             "work_item_count": self.work_item_count,
             "runner_archive_count": self.runner_archive_count,
             "runner_absence_count": self.runner_absence_count,
@@ -168,7 +173,8 @@ class DisasterRecoveryResult:
             "slack_receipt_count": self.slack_receipt_count,
             "rto_milliseconds": self.rto_milliseconds,
             "rto_scope": (
-                "complete independent-bundle validation through isolated schema-21 "
+                "complete independent-bundle validation through isolated schema "
+                f"{self.database_schema_migrations[-1]} "
                 "restore, Control and Runner application-filesystem rebuilds, and "
                 "exact Runner/GitHub/Slack read-back"
             ),
@@ -351,6 +357,8 @@ def create_disaster_recovery_bundle(
         raise ValueError("bundle timestamp must be timezone-aware")
     moment = moment.astimezone(timezone.utc)
     restore_evidence = drill_latest_state_backup(database_path, backup_directory, now=moment)
+    if restore_evidence.schema_migrations != _EXPECTED_DATABASE_SCHEMA:
+        raise DisasterRecoveryError("current Control backup is not exact schema 22")
     release = _read_release_receipt(release_receipt_path)
     release_commit = _validate_commit(release.get("release_commit"), "release_commit")
     if control_release_path.name != release_commit:
@@ -391,8 +399,8 @@ def create_disaster_recovery_bundle(
             with StateStore(source_path, read_only=True) as source:
                 if source.integrity_check() != "ok" or source.foreign_key_violation_count():
                     raise DisasterRecoveryError("provenance database is not integral")
-                if source.schema_migration_versions() != _EXPECTED_DATABASE_SCHEMA:
-                    raise DisasterRecoveryError("provenance database is not exact schema 21")
+                if source.schema_migration_versions() not in _SUPPORTED_DATABASE_SCHEMAS:
+                    raise DisasterRecoveryError("provenance database schema is unsupported")
                 source.backup(target)
             os.chmod(target, 0o600, follow_symlinks=False)
             provenance_targets.append(target)
@@ -594,7 +602,7 @@ def load_disaster_recovery_bundle(
             if (
                 store.integrity_check() != "ok"
                 or store.foreign_key_violation_count()
-                or store.schema_migration_versions() != _EXPECTED_DATABASE_SCHEMA
+                or store.schema_migration_versions() not in _SUPPORTED_DATABASE_SCHEMAS
             ):
                 raise DisasterRecoveryError("bundled Control database is invalid")
     return bundle
@@ -635,7 +643,7 @@ def run_schema18_disaster_recovery_drill(
     slack_verifier: SlackReceiptVerifier | None,
     now: datetime | None = None,
 ) -> DisasterRecoveryResult:
-    """Restore and reconcile one exact schema-21 snapshot without touching live state."""
+    """Restore and reconcile one supported database snapshot without touching live state."""
     started = time.monotonic_ns()
     moment = datetime.now(timezone.utc) if now is None else now
     if not isinstance(moment, datetime) or moment.tzinfo is None:
@@ -680,8 +688,9 @@ def run_schema18_disaster_recovery_drill(
                 raise DisasterRecoveryError("restored database integrity check failed")
             if restored.foreign_key_violation_count():
                 raise DisasterRecoveryError("restored database has foreign-key violations")
-            if restored.schema_migration_versions() != _EXPECTED_DATABASE_SCHEMA:
-                raise DisasterRecoveryError("restored database is not exact schema 21")
+            restored_schema = restored.schema_migration_versions()
+            if restored_schema not in _SUPPORTED_DATABASE_SCHEMAS:
+                raise DisasterRecoveryError("restored database schema is unsupported")
             work_items = restored.list_work_items()
             archive_count, absence_count, orphan_terminal_count = _verify_runner_snapshot(
                 restored, runner_snapshot, bundle.provenance_databases
@@ -741,6 +750,7 @@ def run_schema18_disaster_recovery_drill(
             previous_control_commit=previous_control,
             previous_runner_commit=previous_runner,
             restored_database_sha256=_sha256_file(restored_database),
+            database_schema_migrations=restored_schema,
             rebuild_manifest_sha256=rebuild_manifest,
             runner_rebuild_manifest_sha256=runner_rebuild_manifest,
             work_item_count=len(work_items),
@@ -858,7 +868,7 @@ def _provenance_work_items(paths: tuple[Path, ...]) -> dict[str, Any]:
                 if (
                     source.integrity_check() != "ok"
                     or source.foreign_key_violation_count()
-                    or source.schema_migration_versions() != _EXPECTED_DATABASE_SCHEMA
+                    or source.schema_migration_versions() not in _SUPPORTED_DATABASE_SCHEMAS
                 ):
                     raise DisasterRecoveryError("Runner provenance database is invalid")
                 for work_item in source.list_work_items():

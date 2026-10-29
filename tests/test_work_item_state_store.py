@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from dataclasses import replace
 from hashlib import sha256
 from importlib.resources import files
 from pathlib import Path
@@ -12,7 +13,11 @@ from codex_dispatcher.handoffs import (
     SessionHandoffSnapshot,
     build_session_handoff_snapshot,
 )
-from codex_dispatcher.delegation_evidence import DelegatedAgent, DelegationReceipt
+from codex_dispatcher.delegation_evidence import (
+    DelegatedAgent,
+    DelegationReceipt,
+    delegation_receipt_to_json,
+)
 from codex_dispatcher.runner_protocol import (
     AgentResult,
     AgentResultStatus,
@@ -185,7 +190,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 assert request is not None and disposition is not None
                 self.assertEqual(disposition.expected_head_sha, request.expected_head_sha)
                 self.assertEqual(disposition.request_sha256, request.request_sha256)
-                self.assertEqual(tuple(range(1, 22)), upgraded.schema_migration_versions())
+                self.assertEqual(tuple(range(1, 23)), upgraded.schema_migration_versions())
                 with self.assertRaises(sqlite3.IntegrityError):
                     upgraded._connection.execute(
                         "DELETE FROM work_item_discard_requests WHERE work_item_id = ?",
@@ -631,7 +636,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 ).fetchall()
                 legacy_runs = connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
                 self.assertEqual(
-                [(version,) for version in range(1, 22)],
+                [(version,) for version in range(1, 23)],
                     versions,
                 )
             self.assertEqual(0, legacy_runs)
@@ -700,7 +705,7 @@ class WorkItemStateStoreTests(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
                 self.assertEqual(
-                [(version,) for version in range(1, 22)],
+                [(version,) for version in range(1, 23)],
                     versions,
                 )
 
@@ -1188,6 +1193,190 @@ class WorkItemStateStoreTests(unittest.TestCase):
                 ).fetchone()
                 self.assertIsNotNone(event)
                 self.assertNotIn(child_session, event["payload_json"])
+
+    def test_codex_0165_receipt_uses_new_table_and_cross_table_duplicate_is_rejected(self) -> None:
+        for output_head in ("a" * 40, "b" * 40):
+            with self.subTest(output_head=output_head):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    database = Path(temp_dir) / "state.db"
+                    with StateStore(database) as store:
+                        store.migrate()
+                        item = make_ready(store, make_item(18))
+                        generation = store.plan_session_generation(
+                            item.work_item_id,
+                            role=SessionGenerationRole.IMPLEMENTATION,
+                            policy_sha256="c" * 64,
+                        )
+                        _, _, turn, _ = store.begin_session_generation_turn(
+                            item.work_item_id,
+                            session_generation_id=generation.session_generation_id,
+                            generation_number=1,
+                            policy_sha256="c" * 64,
+                            prompt_kind=PromptKind.FULL,
+                            issue_revision="revision",
+                            issue_content_sha256="d" * 64,
+                            task_spec_sha256="e" * 64,
+                            prompt_sha256="f" * 64,
+                            approved_comment_ids=(),
+                            approved_context_sha256="1" * 64,
+                            issue_allowed_paths=("src",),
+                            input_head_sha="a" * 40,
+                        )
+                        receipt = DelegationReceipt(
+                            codex_version="0.165.0",
+                            root_thread_id=SESSION,
+                            root_model="gpt-6-sol",
+                            root_reasoning_effort="medium",
+                            agents=(),
+                        )
+                        result = AgentResult(
+                            status=AgentResultStatus.COMPLETED,
+                            summary="complete",
+                            acceptance=(), remaining_work=(), needs_input=(),
+                            tests=(TestResult("unit", TestStatus.PASSED),),
+                            changed_paths=(), blocker_code=None, next_step="review",
+                        )
+                        finish_args = dict(
+                            session_generation_id=generation.session_generation_id,
+                            generation_number=1,
+                            policy_sha256="c" * 64,
+                            session_id=SESSION,
+                            output_sha256="2" * 64,
+                            output_head_sha=output_head,
+                            result_status="completed",
+                            result_summary="complete",
+                            agent_result=result,
+                            input_tokens=100,
+                            cached_input_tokens=10,
+                            cache_write_input_tokens=0,
+                            output_tokens=20,
+                            reasoning_output_tokens=5,
+                            delegation_receipt=receipt,
+                        )
+                        store.record_generation_turn_finished(turn.turn_id, **finish_args)
+                        before_replay = tuple(store._connection.iterdump())
+                        store.record_generation_turn_finished(turn.turn_id, **finish_args)
+                        self.assertEqual(before_replay, tuple(store._connection.iterdump()))
+                        conflicting = {**finish_args, "delegation_receipt": replace(receipt, root_model="other-model")}
+                        with self.assertRaisesRegex(ValueError, "different recorded delegation"):
+                            store.record_generation_turn_finished(turn.turn_id, **conflicting)
+                        self.assertEqual(before_replay, tuple(store._connection.iterdump()))
+                        stored = store._connection.execute(
+                            "SELECT receipt_json, receipt_sha256 FROM turn_delegation_receipts_0165 "
+                            "WHERE turn_id = ?", (turn.turn_id,),
+                        ).fetchone()
+                        self.assertIsNotNone(stored)
+                        self.assertEqual(receipt, store.get_turn_delegation_receipt(turn.turn_id))
+                        self.assertEqual(sha256(stored["receipt_json"].encode()).hexdigest(), stored["receipt_sha256"])
+                        with self.assertRaises(sqlite3.IntegrityError):
+                            store._connection.execute(
+                                "INSERT INTO turn_delegation_receipts (turn_id, schema_version, observer, "
+                                "codex_version, root_thread_id, root_model, root_reasoning_effort, agent_count, "
+                                "receipt_json, receipt_sha256, created_at, updated_at) "
+                                "SELECT turn_id, 1, 'codex_state_db_delta_v1', '0.147.0', root_thread_id, "
+                                "root_model, root_reasoning_effort, agent_count, receipt_json, receipt_sha256, "
+                                "created_at, updated_at FROM turn_delegation_receipts_0165 WHERE turn_id = ?",
+                                (turn.turn_id,),
+                            )
+
+                        store._connection.rollback()
+                        if output_head != "a" * 40:
+                            store.update_turn_state(turn.turn_id, TurnState.PUBLISHED)
+                        store.update_turn_state(turn.turn_id, TurnState.FINISHED)
+                        other = make_ready(store, make_item(180))
+                        _, legacy_turn = store.begin_turn(
+                            other.work_item_id, issue_revision="legacy",
+                            prompt_sha256="f" * 64, input_head_sha="a" * 40,
+                        )
+                        legacy_receipt = replace(receipt, codex_version="0.147.0")
+                        legacy_json = delegation_receipt_to_json(legacy_receipt)
+                        with store._transaction() as connection:
+                            connection.execute(
+                                "INSERT INTO turn_delegation_receipts VALUES (?, 1, 'codex_state_db_delta_v1', "
+                                "'0.147.0', ?, ?, ?, 0, ?, ?, 'created', 'updated')",
+                                (legacy_turn.turn_id, SESSION, legacy_receipt.root_model,
+                                 legacy_receipt.root_reasoning_effort, legacy_json,
+                                 sha256(legacy_json.encode()).hexdigest()),
+                            )
+                        before_conflicts = tuple(store._connection.iterdump())
+                        with self.assertRaisesRegex(sqlite3.IntegrityError, "already exists"):
+                            store._connection.execute(
+                                "INSERT INTO turn_delegation_receipts_0165 "
+                                "SELECT turn_id, schema_version, observer, '0.165.0', root_thread_id, "
+                                "root_model, root_reasoning_effort, agent_count, receipt_json, receipt_sha256, "
+                                "created_at, updated_at FROM turn_delegation_receipts WHERE turn_id = ?",
+                                (legacy_turn.turn_id,),
+                            )
+                        store._connection.rollback()
+                        for table, source, target in (
+                            ("turn_delegation_receipts", legacy_turn.turn_id, turn.turn_id),
+                            ("turn_delegation_receipts_0165", turn.turn_id, legacy_turn.turn_id),
+                        ):
+                            with self.assertRaisesRegex(sqlite3.IntegrityError, "already exists"):
+                                store._connection.execute(
+                                    f"UPDATE {table} SET turn_id = ? WHERE turn_id = ?", (target, source),
+                                )
+                            store._connection.rollback()
+                        self.assertEqual(before_conflicts, tuple(store._connection.iterdump()))
+                        self.assertEqual(0, store.foreign_key_violation_count())
+
+    def test_schema_022_migration_preserves_0147_delegation_receipt_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "state.db"
+            receipt = DelegationReceipt(
+                codex_version="0.147.0",
+                root_thread_id=SESSION,
+                root_model="gpt-5.6-sol",
+                root_reasoning_effort="xhigh",
+                agents=(),
+            )
+            receipt_json = delegation_receipt_to_json(receipt)
+            receipt_hash = sha256(receipt_json.encode()).hexdigest()
+            migrate_database_through(database, 21)
+            with StateStore(database) as store:
+                item = make_ready(store, make_item(19))
+                generation = store.plan_session_generation(
+                    item.work_item_id,
+                    role=SessionGenerationRole.IMPLEMENTATION,
+                    policy_sha256="c" * 64,
+                )
+                _, _, turn, _ = store.begin_session_generation_turn(
+                    item.work_item_id,
+                    session_generation_id=generation.session_generation_id,
+                    generation_number=1,
+                    policy_sha256="c" * 64,
+                    prompt_kind=PromptKind.FULL,
+                    issue_revision="revision",
+                    issue_content_sha256="d" * 64,
+                    task_spec_sha256="e" * 64,
+                    prompt_sha256="f" * 64,
+                    approved_comment_ids=(), approved_context_sha256="1" * 64,
+                    issue_allowed_paths=("src",), input_head_sha="a" * 40,
+                )
+                with store._transaction() as connection:
+                    connection.execute(
+                        "INSERT INTO turn_delegation_receipts VALUES (?, 1, 'codex_state_db_delta_v1', "
+                        "'0.147.0', ?, 'gpt-5.6-sol', 'xhigh', 0, ?, ?, 'created', 'updated')",
+                        (turn.turn_id, SESSION, receipt_json, receipt_hash),
+                    )
+                original_fk = store.foreign_key_violation_count()
+                self.assertEqual(0, original_fk)
+
+            with StateStore(database, read_only=True) as legacy:
+                self.assertEqual(tuple(range(1, 22)), legacy.schema_migration_versions())
+                self.assertEqual(receipt, legacy.get_turn_delegation_receipt(turn.turn_id))
+                self.assertIsNone(legacy.get_turn_delegation_receipt("turn_missing"))
+
+            with StateStore(database) as upgraded:
+                upgraded.migrate()
+                rows = upgraded._connection.execute(
+                    "SELECT receipt_json, receipt_sha256 FROM turn_delegation_receipts"
+                ).fetchall()
+                self.assertEqual(1, len(rows))
+                self.assertEqual(receipt_json, rows[0]["receipt_json"])
+                self.assertEqual(receipt_hash, rows[0]["receipt_sha256"])
+                self.assertEqual(0, upgraded.foreign_key_violation_count())
+                self.assertEqual(tuple(range(1, 23)), upgraded.schema_migration_versions())
 
     def test_rotate_session_generation_is_atomic_and_requires_idle_ready_work_item(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

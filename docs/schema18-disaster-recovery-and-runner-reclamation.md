@@ -24,14 +24,19 @@ service. They contain the exact release, protected Control config, systemd units
 database, permanent handoff/release receipts, Runner reference ledger/apply receipt, and strict
 planner status needed to prove both application reconstruction paths.
 
-## Schema-21 isolated drill
+## Schema-22 isolated drill
+
+Current releases create schema-22 bundles. Previously exported complete schema-21
+bundles and provenance databases remain readable without modifying their bytes;
+an isolated historical restore reports its actual schema, not the current schema.
+Do not run schema-21 Dispatcher code against a database migrated to schema 22.
 
 Preconditions:
 
 - leave the current Control and Runner environments in place;
 - require a committed schema-v2 release receipt for the exact current commit;
 - require a permanent operational handoff receipt for that release;
-- require the newest retained backup to be mode `0600`, schema 21, integral, and free of foreign-key
+- require the newest retained backup to be mode `0600`, schema 22, integral, and free of foreign-key
   violations;
 - require no unfinished Slack outbox row;
 - place copied inputs and the bundle in `codex-dispatcher`-owned mode-`0700` directories and never
@@ -135,7 +140,7 @@ sudo systemd-run --wait --collect --pipe \
   --execute-isolated --json
 ```
 
-Acceptance requires `status=passed`, `database_schema_migrations=[1,...,21]`, identical Control and
+Current-release acceptance requires `status=passed`, `database_schema_migrations=[1,...,22]`, identical Control and
 Runner commits, exact reference and planner digests, all recorded external counts reconciled,
 `online_state_modified=false`, distinct Control/Runner rebuild-manifest SHA-256 values, and a
 mode-protected `receipt.json`. A failure writes `failed-receipt.json`; retain it and the source

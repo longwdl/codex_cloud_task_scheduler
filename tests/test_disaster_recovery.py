@@ -5,6 +5,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -109,6 +110,31 @@ class _SlackPublisher:
 
 
 class DisasterRecoveryTests(unittest.TestCase):
+    @staticmethod
+    def _downgrade_bundle_database_to_schema21(bundle_root: Path) -> None:
+        database = bundle_root / "state.db"
+        connection = sqlite3.connect(database)
+        try:
+            connection.execute("DROP TRIGGER IF EXISTS turn_delegation_receipts_0165_unique_turn")
+            connection.execute("DROP TRIGGER IF EXISTS turn_delegation_receipts_0147_unique_turn")
+            connection.execute("DROP TRIGGER IF EXISTS turn_delegation_receipts_0165_unique_turn_update")
+            connection.execute("DROP TRIGGER IF EXISTS turn_delegation_receipts_0147_unique_turn_update")
+            connection.execute("DROP TABLE IF EXISTS turn_delegation_receipts_0165")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 22")
+            connection.commit()
+        finally:
+            connection.close()
+        manifest_path = bundle_root / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for artifact in manifest["artifacts"]:
+            if artifact["path"] == "state.db":
+                artifact["size_bytes"] = database.stat().st_size
+                artifact["sha256"] = sha256(database.read_bytes()).hexdigest()
+        body = dict(manifest)
+        body.pop("evidence_sha256", None)
+        manifest["evidence_sha256"] = _canonical(body)
+        _write_canonical(manifest_path, manifest)
+
     def test_discarded_issue_reconciliation_requires_closed_not_planned_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             item = WorkItem.new(
@@ -615,7 +641,7 @@ class DisasterRecoveryTests(unittest.TestCase):
             )
 
             self.assertEqual(COMMIT, result.release_commit)
-            self.assertEqual(tuple(range(1, 22)), tuple(
+            self.assertEqual(tuple(range(1, 23)), tuple(
                 json.loads(result.receipt_path.read_text())["database_schema_migrations"]
             ))
             self.assertEqual(1, result.work_item_count)
@@ -633,7 +659,7 @@ class DisasterRecoveryTests(unittest.TestCase):
             )
             with StateStore(rebuilt, read_only=True) as store:
                 self.assertEqual("ok", store.integrity_check())
-                self.assertEqual(tuple(range(1, 22)), store.schema_migration_versions())
+                self.assertEqual(tuple(range(1, 23)), store.schema_migration_versions())
             self.assertTrue((recovery / "empty-control-host-manifest.json").is_file())
             self.assertTrue((recovery / "empty-runner-host-manifest.json").is_file())
             self.assertTrue(
@@ -643,6 +669,41 @@ class DisasterRecoveryTests(unittest.TestCase):
                     "reclamation-rollback-references.json"
                 ).is_file()
             )
+
+    def test_schema21_bundle_and_runner_provenance_remain_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fixture = self._fixture(root)
+            # Historical Runner evidence may remain on schema 21 after Control advances.
+            provenance = Path(fixture["provenance"])  # type: ignore[arg-type]
+            connection = sqlite3.connect(provenance)
+            try:
+                connection.execute("DROP TRIGGER IF EXISTS turn_delegation_receipts_0165_unique_turn")
+                connection.execute("DROP TRIGGER IF EXISTS turn_delegation_receipts_0147_unique_turn")
+                connection.execute("DROP TRIGGER IF EXISTS turn_delegation_receipts_0165_unique_turn_update")
+                connection.execute("DROP TRIGGER IF EXISTS turn_delegation_receipts_0147_unique_turn_update")
+                connection.execute("DROP TABLE IF EXISTS turn_delegation_receipts_0165")
+                connection.execute("DELETE FROM schema_migrations WHERE version = 22")
+                connection.commit()
+            finally:
+                connection.close()
+
+            bundle = self._bundle(root, fixture)
+            self._downgrade_bundle_database_to_schema21(bundle.root)
+            legacy_bundle = load_disaster_recovery_bundle(bundle.root)
+            verifier = _SlackVerifier()
+            result = run_schema18_disaster_recovery_drill(
+                bundle=legacy_bundle,
+                recovery_root=root / "legacy-recovery",
+                tracker=fixture["tracker"],  # type: ignore[arg-type]
+                slack_verifier=verifier,
+                now=NOW.replace(hour=13),
+            )
+            receipt = json.loads(result.receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual(list(range(1, 22)), receipt["database_schema_migrations"])
+            rebuilt = root / "legacy-recovery/empty-control-host/var/lib/codex-dispatcher/state.db"
+            with StateStore(rebuilt, read_only=True) as recovered:
+                self.assertEqual(tuple(range(1, 22)), recovered.schema_migration_versions())
 
     def test_runner_tombstone_drift_fails_without_touching_online_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

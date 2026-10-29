@@ -82,7 +82,10 @@ class DelegationReceipt:
             raise DelegationEvidenceError("delegation receipt schema is unsupported")
         if self.observer != DELEGATION_OBSERVER:
             raise DelegationEvidenceError("delegation receipt observer is unsupported")
-        if self.codex_version != "0.147.0":
+        if not isinstance(self.codex_version, str) or self.codex_version not in (
+            "0.147.0",
+            "0.165.0",
+        ):
             raise DelegationEvidenceError("delegation receipt Codex version is unsupported")
         try:
             validate_session_id(self.root_thread_id)

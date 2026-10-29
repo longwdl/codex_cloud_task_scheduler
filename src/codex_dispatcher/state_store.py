@@ -3170,11 +3170,7 @@ class StateStore:
                     "VALUES (?, ?, ?, ?, ?)",
                     (turn_id, result_json, result_sha256, now, now),
                 )
-            existing_delegation = connection.execute(
-                "SELECT receipt_json, receipt_sha256 FROM turn_delegation_receipts "
-                "WHERE turn_id = ?",
-                (turn_id,),
-            ).fetchone()
+            existing_delegation = _find_delegation_receipt_row(connection, turn_id)
             if existing_delegation is not None:
                 if (
                     delegation_json is None
@@ -3185,8 +3181,14 @@ class StateStore:
                         "Turn already has different recorded delegation evidence"
                     )
             elif delegation_receipt is not None:
+                receipt_table = {
+                    "0.147.0": "turn_delegation_receipts",
+                    "0.165.0": "turn_delegation_receipts_0165",
+                }.get(delegation_receipt.codex_version)
+                if receipt_table is None:
+                    raise ValueError("delegation receipt Codex version is unsupported")
                 connection.execute(
-                    "INSERT INTO turn_delegation_receipts "
+                    f"INSERT INTO {receipt_table} "
                     "(turn_id, schema_version, observer, codex_version, root_thread_id, "
                     "root_model, root_reasoning_effort, agent_count, receipt_json, "
                     "receipt_sha256, created_at, updated_at) "
@@ -3236,7 +3238,11 @@ class StateStore:
             if work_item.state is not WorkItemState.RUNNING:
                 raise ValueError("work item is not running")
             if output_head_sha != turn.input_head_sha:
-                next_turn = candidate.transition_to(TurnState.CHECKPOINTING, at=now)
+                next_turn = (
+                    candidate
+                    if candidate.state is TurnState.CHECKPOINTING
+                    else candidate.transition_to(TurnState.CHECKPOINTING, at=now)
+                )
                 next_work_item = work_item
             else:
                 outcome = {
@@ -3248,7 +3254,11 @@ class StateStore:
                 }.get(result_status)
                 if outcome is None:
                     raise ValueError("result_status is unsupported")
-                next_turn = candidate.transition_to(outcome[0], at=now)
+                next_turn = (
+                    candidate
+                    if candidate.state is outcome[0]
+                    else candidate.transition_to(outcome[0], at=now)
+                )
                 next_work_item = (
                     work_item
                     if outcome[1] is work_item.state
@@ -3276,11 +3286,7 @@ class StateStore:
     def get_turn_delegation_receipt(
         self, turn_id: str
     ) -> DelegationReceipt | None:
-        row = self._connection.execute(
-            "SELECT receipt_json, receipt_sha256 FROM turn_delegation_receipts "
-            "WHERE turn_id = ?",
-            (turn_id,),
-        ).fetchone()
+        row = _find_delegation_receipt_row(self._connection, turn_id)
         if row is None:
             return None
         receipt_json = str(row["receipt_json"])
@@ -5984,6 +5990,26 @@ class StateStore:
         if not isinstance(parsed, list) or any(not isinstance(item, str) for item in parsed):
             raise ValueError(f"{field} are malformed")
         return tuple(parsed)
+
+
+def _find_delegation_receipt_row(
+    connection: sqlite3.Connection, turn_id: str
+) -> sqlite3.Row | None:
+    rows = [
+        connection.execute(
+            f"SELECT receipt_json, receipt_sha256 FROM {table} WHERE turn_id = ?",
+            (turn_id,),
+        ).fetchone()
+        for table in ("turn_delegation_receipts", "turn_delegation_receipts_0165")
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+    ]
+    found = [row for row in rows if row is not None]
+    if len(found) > 1:
+        raise ValueError("Turn has conflicting delegation receipt records")
+    return found[0] if found else None
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

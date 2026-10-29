@@ -65,6 +65,27 @@ def make_bundle(root: Path) -> tuple[Path, str]:
 
 
 class PolicyBundleTests(unittest.TestCase):
+    def test_accepts_codex_0165_and_rejects_unknown_codex_versions(self) -> None:
+        source = Path(__file__).resolve().parents[1] / "config" / "runner-codex-policy"
+        for version, accepted in (
+            ("0.165.0", True),
+            ("9.999.0", False),
+            (["0.165.0"], False),
+        ):
+            with self.subTest(version=version), tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+                root = Path(temp_dir) / "policy"
+                shutil.copytree(source, root)
+                manifest_path = root / "manifest.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["codex_version"] = version
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                if accepted:
+                    bundle = PolicyBundle.load(root, manifest["policy_digest"])
+                    self.assertEqual("0.165.0", bundle.runtime_policy("implementation").codex_version)
+                else:
+                    with self.assertRaisesRegex(PolicyBundleError, "unsupported"):
+                        PolicyBundle.load(root, manifest["policy_digest"])
+
     def test_validates_exact_hash_pinned_bundle_and_revalidates_drift(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
             root, digest = make_bundle(Path(temp_dir))

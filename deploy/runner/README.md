@@ -18,9 +18,9 @@ Install immutable inputs as root-owned and non-group/world-writable:
 /srv/codex-runner/releases/               root:root             0755
 /srv/codex-runner/current                 root-owned symlink
 /srv/codex-runner/tools/                  root:root             0755
-/srv/codex-runner/tools/codex/0.147.0/    root:root             0755
-/srv/codex-runner/tools/codex/0.147.0/bin/codex root:root       0755
-/srv/codex-runner/tools/codex/0.147.0/bin/codex-code-mode-host root:root 0755
+/srv/codex-runner/tools/codex/0.165.0/    root:root             0755
+/srv/codex-runner/tools/codex/0.165.0/bin/codex root:root       0755
+/srv/codex-runner/tools/codex/0.165.0/bin/codex-code-mode-host root:root 0755
 /srv/codex-runner/bin/                    root:root             0755
 /srv/codex-runner/bin/codex-runner-v1     root:root             0755
 /srv/codex-runner/bin/codex-runner-maintenance-v1 root:root     0755
@@ -61,6 +61,16 @@ replace a trusted executable through a writable package-manager directory. Mutab
 lock files must be owned by the executing account with no group or world access.
 
 ## Codex policy bundle
+
+Codex 0.165.0 and historical 0.147.0 policy/receipt versions are accepted
+explicitly; other versions remain unsupported. A client upgrade must update the
+configured tool path, both executable hashes, policy manifest version, and Control
+tool pin together. Keep the previous immutable tool directory. Installing another
+binary on the administrator's PATH does not upgrade the protected Runner runtime.
+Schema migration 022 adds a separate 0.165.0 receipt table with cross-table Turn
+uniqueness; it leaves historical 0.147.0 rows and migration 009 unchanged. Historical
+schema-21 disaster recovery bundles remain readable. Preserve the live model,
+reasoning, authentication, and policy file bytes when upgrading only the client.
 
 For protocol v2 on `rootless_docker`, install the complete reviewed
 `config/runner-codex-policy/` tree as root-owned, non-group/world-writable
